@@ -1,0 +1,66 @@
+name: IssueLens (local test)
+
+# Local end-to-end test: mint a GitHub App installation token, then call the
+# IssueLens agent exposed via a Dev Tunnel. The local agent has no endpoint auth,
+# so there is no Azure login step here (the production template adds one).
+#
+# Repo configuration used by this workflow:
+#   Variables: ISSUELENS_APP_ID, ISSUELENS_AGENT_URL
+#   Secret:    ISSUELENS_APP_PRIVATE_KEY
+
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: "Issue to label (leave blank to triage the whole repo)"
+        required: false
+  issues:
+    types: [opened, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  issuelens:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.ISSUELENS_APP_ID }}
+          private-key: ${{ secrets.ISSUELENS_APP_PRIVATE_KEY }}
+
+      - name: Invoke IssueLens agent
+        env:
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ISSUE_EVENT: ${{ github.event.issue.number }}
+          ISSUE_INPUT: ${{ github.event.inputs.issue_number }}
+          GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          AGENT_URL: ${{ vars.ISSUELENS_AGENT_URL }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "issues" ]; then
+            mode="label"; issue="$ISSUE_EVENT"
+          elif [ -n "${ISSUE_INPUT:-}" ]; then
+            mode="label"; issue="$ISSUE_INPUT"
+          else
+            mode="triage"; issue=""
+          fi
+
+          # The agent takes a 2-field payload: "input" (a free-form task prompt)
+          # and "github_token" (used to authenticate the GitHub MCP server).
+          if [ "$mode" = "label" ]; then
+            input="Label GitHub issue ${REPO}#${issue} using the repository's labeling instructions. Read the issue with the available GitHub tools and apply appropriate labels."
+          else
+            since=$(date -u -d '7 days ago' +'%Y-%m-%dT%H:00:00Z')
+            input="Triage the open GitHub issues in ${REPO} updated since ${since}. Identify critical (hot/blocking/regression) issues, apply labels, and produce the final JSON summary."
+          fi
+          payload=$(jq -cn --arg input "$input" --arg tok "$GH_APP_TOKEN" \
+            '{input:$input, github_token:$tok}')
+
+          echo "Invoking IssueLens agent (mode=$mode)…"
+          curl -sS -N --fail-with-body -X POST "$AGENT_URL/invocations" \
+            -H "Content-Type: application/json" \
+            -d "$payload" | tail -c 3000

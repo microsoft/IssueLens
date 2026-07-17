@@ -1,0 +1,106 @@
+# IssueLens — triage & label GitHub issues via the hosted IssueLens agent.
+#
+# Copy this file into a target repository at .github/workflows/issuelens.yml.
+# It authenticates as the IssueLens GitHub App (no PAT), then calls the hosted
+# agent, which does the AI work and acts on GitHub as the App bot.
+#
+# One-time setup in the repository (or organization, shared to selected repos):
+#   Variables (Settings → Secrets and variables → Actions → Variables):
+#     ISSUELENS_APP_ID          GitHub App numeric App ID
+#   Secrets (… → Secrets):
+#     ISSUELENS_APP_PRIVATE_KEY GitHub App private key (full PEM contents)
+#     AZURE_CLIENT_ID           Client ID of the OIDC identity (UAMI or app reg)
+#     AZURE_TENANT_ID
+#     AZURE_SUBSCRIPTION_ID
+#     ISSUELENS_AGENT_URL       Full deployed invocations endpoint
+#                               (…/protocols/invocations?api-version=…)
+#     ISSUELENS_AGENT_SCOPE     Entra scope/resource for the agent endpoint token
+#
+# Notes:
+# - actions/create-github-app-token mints a repo-scoped installation token; the
+#   agent uses it directly, so writes are attributed to the App bot.
+# - The agent-endpoint auth below uses Azure OIDC. If your endpoint uses an API
+#   key instead, drop the azure/login + az token steps and send the key as a
+#   header (e.g. from a secret).
+
+name: IssueLens
+
+on:
+  # Event-driven: label newly opened / reopened issues.
+  issues:
+    types: [opened, reopened]
+  # Scheduled: batch triage (weekdays at 00:00 UTC).
+  schedule:
+    - cron: "0 0 * * 1-5"
+  # Manual run (triage).
+  workflow_dispatch:
+
+# Least privilege: the App token (not GITHUB_TOKEN) grants issue access.
+# id-token: write is required for Azure OIDC login.
+permissions:
+  contents: read
+  id-token: write
+
+# Avoid piling up scheduled runs; let an in-flight run finish.
+concurrency:
+  group: issuelens-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  issuelens:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.ISSUELENS_APP_ID }}
+          private-key: ${{ secrets.ISSUELENS_APP_PRIVATE_KEY }}
+
+      - name: Azure login (OIDC) for the agent endpoint
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Invoke IssueLens agent
+        env:
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          # Masked automatically by create-github-app-token; kept in-step only.
+          GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          AGENT_URL: ${{ secrets.ISSUELENS_AGENT_URL }}
+          AGENT_SCOPE: ${{ secrets.ISSUELENS_AGENT_SCOPE }}
+        run: |
+          set -euo pipefail
+
+          # Build the invocation payload based on the trigger. The agent takes a
+          # 2-field payload: "input" (a free-form task prompt) and "github_token"
+          # (used to authenticate the GitHub MCP server as the App bot).
+          if [ "$EVENT" = "issues" ]; then
+            input="Label GitHub issue ${REPO}#${ISSUE} using the repository's labeling instructions. Read the issue with the available GitHub tools and apply appropriate labels."
+            payload=$(jq -cn \
+              --arg input "$input" \
+              --arg tok "$GH_APP_TOKEN" \
+              '{input:$input, github_token:$tok}')
+          else
+            since=$(date -u -d '24 hours ago' +'%Y-%m-%dT%H:00:00Z')
+            input="Triage the open GitHub issues in ${REPO} updated since ${since}. Identify critical (hot/blocking/regression) issues, apply labels, produce the final JSON summary, and send the report."
+            payload=$(jq -cn \
+              --arg input "$input" \
+              --arg tok "$GH_APP_TOKEN" \
+              '{input:$input, github_token:$tok}')
+          fi
+
+          # Bearer token for the hosted agent endpoint (Entra via OIDC).
+          agent_token=$(az account get-access-token --scope "$AGENT_SCOPE" --query accessToken -o tsv)
+
+          # Call the agent. ISSUELENS_AGENT_URL is the full deployed invocations
+          # endpoint (…/protocols/invocations?api-version=…). SSE is streamed back;
+          # -N disables curl buffering.
+          curl -sS -N -X POST "$AGENT_URL" \
+            -H "Authorization: Bearer $agent_token" \
+            -H "Content-Type: application/json" \
+            -d "$payload"

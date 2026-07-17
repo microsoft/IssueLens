@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/microsoft/AgentSchema/refs/heads/main/schemas/v1.0/ContainerAgent.yaml
+
+name: IssueLens
+kind: hosted
+protocols:
+  - protocol: invocations
+    version: 2.0.0
+resources:
+  cpu: '0.5'
+  memory: 1.0Gi
+environment_variables:
+  # Model (inference) — Foundry BYOK. Key auth via AZURE_AI_MODEL_API_KEY
+  # (no managed-identity model RBAC required).
+  - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+    value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
+  - name: AZURE_AI_MODEL_API_KEY
+    value: ${AZURE_AI_MODEL_API_KEY}
+description: >
+  IssueLens — a GitHub issue-triage agent built on the GitHub Copilot SDK
+  (CopilotClient) with the azure-ai-agentserver-invocations protocol. It triages
+  issues (hot/blocking/regression) and applies labels via the remote GitHub MCP
+  server, authenticated with a GitHub token supplied per request. Notification
+  tools are provided by the Foundry toolbox.
+metadata:
+  tags:
+    - AI Agent Hosting
+    - GitHub Copilot SDK
+    - Invocations Protocol
+    - Issue Triage

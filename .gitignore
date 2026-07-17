@@ -1,0 +1,21 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+webhook_bridge/local.settings.json
+
+# Azure Developer CLI / Foundry local state (contains injected secrets like the
+# model API key) — never commit
+.azure/
+.foundry/
+.issuelens-copilot/
+
+# Python
+.venv/
+**/__pycache__/
+*.pyc
+
+# Azure Functions local
+webhook_bridge/bin/
+webhook_bridge/obj/

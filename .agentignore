@@ -1,0 +1,27 @@
+# Files excluded from the code-deploy ZIP (gitignore syntax).
+
+# Secrets / local environment
+.env
+.env.*
+!.env.example
+*.pem
+
+# Python virtualenv and caches
+.venv/
+__pycache__/
+*.pyc
+
+# Copilot runtime home (created at runtime)
+.issuelens-copilot/
+
+# Local dev / editor
+.vscode/
+.git/
+
+# Container path — not used for code deploy
+Dockerfile
+.dockerignore
+
+# Separate transports / CI assets, not part of the agent runtime
+webhook_bridge/
+templates/

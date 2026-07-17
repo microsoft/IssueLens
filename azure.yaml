@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: issuelens
+services:
+    IssueLens:
+        project: .
+        host: azure.ai.agent
+        language: python
+        codeConfiguration:
+            dependencyResolution: remote_build
+            entryPoint: main.py
+            runtime: python_3_13
+        container:
+            resources:
+                cpu: "0.5"
+                memory: 1Gi
+        description: IssueLens — GitHub issue triage agent.
+        environmentVariables:
+            - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+              value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
+            - name: AZURE_AI_MODEL_API_KEY
+              value: ${AZURE_AI_MODEL_API_KEY}
+        kind: hosted
+        name: IssueLens
+        protocols:
+            - protocol: invocations
+              version: 2.0.0

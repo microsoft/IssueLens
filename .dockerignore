@@ -1,0 +1,33 @@
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE settings
+.vscode/
+.idea/
+
+# Version control
+.git/
+.gitignore
+
+# Docker files
+.dockerignore
+
+# Docs
+README.md
+
+# Local environment (never bake credentials into the image)
+.env
+
+# GitHub App private keys — never bake secrets into the image (Actions-only
+# deployment doesn't need them; the workflow supplies the token per request).
+*.pem
+
+# The webhook bridge is a separate deployable (Azure Function), not part of the agent image.
+webhook_bridge/
