@@ -411,18 +411,13 @@ async def _stream_response(invocation_id: str, payload: dict):
         on_permission_request=PermissionHandler.approve_all,
         streaming=True,
         working_directory=_working_dir,
-        # Discover supporting configuration from the project config root:
-        # instructions, MCP servers, skills, hooks, and plugins.
-        # Drop new config files into the project and they are picked up with no
-        # code change. Explicitly provided values below merge with (and take
-        # precedence over) anything discovered.
-        config_directory=_config_dir,
-        enable_config_discovery=True,
-        enable_file_hooks=True,
-        enable_skills=True,
+        # Load supporting configuration from the project: skills and instruction
+        # files (AGENTS.md, .github/copilot-instructions.md). Config
+        # auto-discovery, file hooks, and plugin loading are intentionally NOT
+        # enabled — in the hosted container the deployed code dir is read-only,
+        # and enabling them makes the runtime try to write there (I/O error 30).
         skill_directories=[_skills_dir],
         instruction_directories=[_config_dir],
-        plugin_directories=[_config_dir],
         provider=provider,
         model=model,
         mcp_servers=mcp_servers or None,
