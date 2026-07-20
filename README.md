@@ -2,7 +2,7 @@
 
 # IssueLens — GitHub Issue Triage Agent (Foundry hosted)
 
-A GitHub issue-triage agent built on the [GitHub Copilot SDK](https://pypi.org/project/github-copilot-sdk/) (`CopilotClient`) and the [azure-ai-agentserver-invocations](https://pypi.org/project/azure-ai-agentserver-invocations/) protocol. It identifies critical issues (hot / blocking / regression), applies labels, and sends notifications — deployable as a Foundry hosted agent.
+A GitHub issue-triage agent built on the [GitHub Copilot SDK](https://pypi.org/project/github-copilot-sdk/) (`CopilotClient`) and the [azure-ai-agentserver-invocations](https://pypi.org/project/azure-ai-agentserver-invocations/) protocol. It identifies critical issues (hot / blocking / regression), detects duplicates, applies labels, assigns owners, and sends notifications — deployable as a Foundry hosted agent.
 
 ## How It Works
 
@@ -11,7 +11,7 @@ A GitHub issue-triage agent built on the [GitHub Copilot SDK](https://pypi.org/p
    - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
    - the remote **GitHub MCP server**, authenticated with the `github_token` from the payload — so the agent reads issues and applies labels as that token's identity;
    - **notification tools provided by the Foundry toolbox**.
-3. The preselected `issuelens` agent runs the `triage`, `label-issue`, and `notify` skills.
+3. The preselected `issuelens` orchestrator delegates analysis to the runtime **Critical Issue Analyst** sub-agent registered with the Copilot SDK, then runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions.
 4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Triage runs end with a JSON summary.
 
 ## Environment Variables
@@ -128,6 +128,16 @@ curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
   -d '{"input": "Label issue owner/repo#123", "github_token": "ghs_..."}'
 
+# Assign a single issue using area ownership and historical patterns
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Assign issue owner/repo#123 to the right owner", "github_token": "ghs_..."}'
+
+# Find duplicate or related reports for a single issue
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Find duplicates for issue owner/repo#123", "github_token": "ghs_..."}'
+
 # Free-form instruction
 curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
@@ -225,16 +235,24 @@ For the full deployment guide, see [Azure AI Foundry hosted agents](https://aka.
    - Click **Deploy**. Fields are validated inline, and the extension handles the build/upload, agent version creation, and RBAC role assignment.
 5. After deployment, invoke the agent in the Agent Playground and stream live logs from the **Logs** tab.
 
-## Skills
+## Sub-agent and skills
 
-Any subdirectory under `skills/` containing a `SKILL.md` file is loaded by the Copilot SDK. This agent ships three skills, preloaded by the `issuelens` agent:
+The Foundry hosted agent registers both the `issuelens` orchestrator and the `critical-issue-analyst` sub-agent as Copilot SDK `CustomAgentConfig` objects in `main.py`. The analyst prompt is maintained separately and loaded explicitly at startup, so VS Code does not discover it as a workspace custom agent:
 
 ```
+agents/
+└── critical-issue-analyst.md  ← runtime sub-agent prompt
+
 skills/
-├── triage/       ← critical-issue criteria + JSON report schema
-├── label-issue/  ← classify and apply labels via the GitHub tools
-└── notify/       ← send the report via WorkIQ (email / Teams)
+├── find-duplicates/ ← identify duplicate and related issues via GitHub MCP
+├── label-issue/     ← classify and apply labels via GitHub MCP
+├── assign-issue/    ← route and assign issues via GitHub MCP
+└── notify/          ← send the report via WorkIQ
 ```
+
+The **Critical Issue Analyst** is available to the parent through runtime sub-agent inference. It uses the request-scoped GitHub MCP server inherited from the session, identifies hot, blocking, and regression issues, and returns the structured JSON report. Issue mutations and notifications remain the responsibility of the parent orchestrator.
+
+Any subdirectory under `skills/` containing a `SKILL.md` file is loaded by the Copilot SDK.
 
 To add your own skill, create a new folder under `skills/` with a `SKILL.md`:
 

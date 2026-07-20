@@ -1,44 +1,66 @@
 ---
 name: notify
-description: Send an issue triage report or notification to people via WorkIQ (Microsoft 365) — as an email or a Teams message. Use after triaging issues when asked to notify, send a report, email the summary, or message the team.
+description: Send an issue-triage report or notification to people — as an email or a Teams personal-chat message — using the send-email / send-teams-notification tools. Use after triaging issues when asked to notify, send a report, email the summary, or message the team.
 ---
 
 # Notify Skill
 
-Deliver a triage report or notification through **WorkIQ**, the Microsoft 365
-tool surface. WorkIQ tools are exposed by the `workiq` MCP server, so their names
-are **prefixed with `workiq-`** (e.g. `workiq-do_action`, `workiq-fetch`,
-`workiq-search_paths`). Scan the available tools list for entries ending in
-`do_action` / `fetch` and call those exact names.
+Deliver a triage report or notification using the agent's built-in notification
+tools, which POST to preconfigured Logic App endpoints:
+
+- **`send-email`** — send an HTML email. Arguments: `title` (subject),
+  `body` (inline-styled HTML), `recipients` (array of email addresses), and the
+  optional `timeFrame` and `workflowRunUrl`.
+- **`send-teams-notification`** — send a Teams personal-chat message. Arguments:
+  `title`, `message` (Markdown), `recipient` (a single email address), and the
+  optional `workflowRunUrl`.
+
+Only the tools whose endpoints are configured are available. If a needed tool is
+not present in the tool list, that channel isn't set up — say so; do not
+fabricate a send.
 
 ## Inputs
 
-- The report content (typically the JSON summary produced by the triage skill,
-  and/or a human-readable summary).
-- A target: an email address, a person's name, or a Teams chat/channel. If no
-  target is provided, ask for one or use the configured default recipient.
+- The report content (typically the JSON summary produced by the Critical Issue
+  Analyst sub-agent, and/or a human-readable summary).
+- Recipient(s): `recipients` (array) for email, `recipient` (single) for Teams.
 
-## Sending an email (default)
+## Sending an email (`send-email`)
 
-1. Compose a clear subject (e.g. `Daily Issue Triage Report — <timeFrame>`) and an
-   HTML or plain-text body summarizing the critical issues with links.
-2. Call the WorkIQ action to send mail: `do_action` on `/me/sendMail` with the
-   recipient(s), subject, and body.
-3. Confirm the send succeeded from the tool response (a 2xx / accepted result).
+1. Compose a clear `title` (e.g. `Daily Issue Triage Report`) and optional
+   `timeFrame` (e.g. `February 2, 2026`).
+2. Build the `body` as **inline-styled HTML** (email clients don't support
+   external CSS). Suggested template:
+   ```html
+   <html>
+   <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 800px; margin: 0 auto; padding: 20px;">
+     <div style="background: #f6f8fa; padding: 20px; border-radius: 8px; margin-bottom: 20px;">
+       <h1 style="color: #0366d6; margin: 0;">{{title}}</h1>
+       <p style="color: #586069; margin: 5px 0 0 0;">{{timeFrame}}</p>
+     </div>
+     <!-- content: <p>, <ul>/<ol>, <table> with borders, <a style="color:#0366d6"> -->
+     {{content}}
+   </body>
+   </html>
+   ```
+3. Call `send-email` with `title`, `body`, `recipients` (and optional
+   `timeFrame`, `workflowRunUrl`).
+4. Confirm success from the tool result (it reports the HTTP status).
 
-## Sending a Teams message
+## Sending a Teams personal notification (`send-teams-notification`)
 
-1. Resolve the target chat or channel first with `fetch` (e.g. list `/chats` or
-   the team's channels) to get its id. Do not guess ids.
-2. Call `do_action` to post the message to the resolved chat/channel.
-3. Confirm success from the tool response.
+1. Compose a concise `title` and a `message` in **Markdown** — an overall
+   summary line plus the critical issues (a table works well) with their URLs.
+2. Call `send-teams-notification` with `title`, `message`, `recipient` (and
+   optional `workflowRunUrl`).
+3. Confirm success from the tool result.
 
 ## Rules
 
-- **Report honestly.** Only claim the notification was sent if the tool response
-  confirms it. If the WorkIQ tools are unavailable (no `workiq-*` tools present)
-  or a call fails, say so explicitly — do not fabricate success.
-- Resolve-then-act: when targeting a named person, chat, or channel, resolve the
-  id with `fetch` before sending.
-- Keep the message concise: an overall summary line plus the list of critical
+- **Report honestly.** Only claim the notification was sent if the tool result
+  reports success (a 2xx HTTP status). If the tool is unavailable or the call
+  fails, say so explicitly — do not fabricate success.
+- Keep the content concise: an overall summary line plus the list of critical
   issues with their URLs.
+
+

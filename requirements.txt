@@ -4,5 +4,8 @@ azure-ai-agentserver-invocations==1.0.0b6
 azure-identity>=1.17.0
 python-dotenv==1.2.2
 
+# httpx — POST triage notifications to the email / Teams Logic App endpoints.
+httpx>=0.27.0
+
 # debugpy enables local debugging of this agent with the Foundry Toolkit VS Code extension.
 debugpy

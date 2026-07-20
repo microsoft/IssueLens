@@ -15,6 +15,8 @@
 #     ISSUELENS_AGENT_URL       Full deployed invocations endpoint
 #                               (…/protocols/invocations?api-version=…)
 #     ISSUELENS_AGENT_SCOPE     Entra scope/resource for the agent endpoint token
+#     RECIPIENTS                Comma-separated email addresses to receive the
+#                               triage report summary
 #
 # Notes:
 # - actions/create-github-app-token mints a repo-scoped installation token; the
@@ -73,6 +75,7 @@ jobs:
           GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           AGENT_URL: ${{ secrets.ISSUELENS_AGENT_URL }}
           AGENT_SCOPE: ${{ secrets.ISSUELENS_AGENT_SCOPE }}
+          RECIPIENTS: ${{ secrets.RECIPIENTS }}
         run: |
           set -euo pipefail
 
@@ -80,14 +83,18 @@ jobs:
           # 2-field payload: "input" (a free-form task prompt) and "github_token"
           # (used to authenticate the GitHub MCP server as the App bot).
           if [ "$EVENT" = "issues" ]; then
-            input="Label GitHub issue ${REPO}#${ISSUE} using the repository's labeling instructions. Read the issue with the available GitHub tools and apply appropriate labels."
+            input="Process GitHub issue ${REPO}#${ISSUE} using the available GitHub tools. "
+            input+="First, find and report potential duplicate or related issues without closing or modifying the target issue. "
+            input+="If one or more duplicate matches are found, always add the 'duplicate' label to the target issue. Then apply any other appropriate labels using the repository's labeling instructions. "
+            input+="Next, assign the issue to the best individual owner using repository area mappings and historical assignment patterns, while preserving existing assignees. "
+            input+="Finally, use the send-teams-notification tool to send a Teams notification summarizing the result (duplicates found, labels applied, and the assignee, with a link to the issue) to each of these recipients: ${RECIPIENTS}."
             payload=$(jq -cn \
               --arg input "$input" \
               --arg tok "$GH_APP_TOKEN" \
               '{input:$input, github_token:$tok}')
           else
             since=$(date -u -d '24 hours ago' +'%Y-%m-%dT%H:00:00Z')
-            input="Triage the open GitHub issues in ${REPO} updated since ${since}. Identify critical (hot/blocking/regression) issues, apply labels, produce the final JSON summary, and send the report."
+            input="Triage the open GitHub issues in ${REPO} updated since ${since}. Identify critical (hot/blocking/regression) issues, apply labels, and produce the final JSON summary. Then use the send-email tool to email a concise summary of the report to these recipients: ${RECIPIENTS}."
             payload=$(jq -cn \
               --arg input "$input" \
               --arg tok "$GH_APP_TOKEN" \

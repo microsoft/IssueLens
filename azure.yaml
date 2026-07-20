@@ -20,6 +20,12 @@ services:
               value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
             - name: AZURE_AI_MODEL_API_KEY
               value: ${AZURE_AI_MODEL_API_KEY}
+            - name: MAILING_URL
+              value: ${MAILING_URL}
+            - name: PERSONAL_NOTIFICATION_URL
+              value: ${PERSONAL_NOTIFICATION_URL}
+            - name: RECIPIENTS
+              value: ${RECIPIENTS}
         kind: hosted
         name: IssueLens
         protocols:
