@@ -29,15 +29,21 @@ areas' keywords and path patterns. The format is described in
 
 ### Historical patterns
 
-Use the GitHub MCP issue-search tools to find similar closed issues in the same
-repository:
+Use the GitHub MCP issue-search tools to find similar closed (and recently
+resolved) issues in the same repository:
 
-1. Search using the most specific terms from the issue title and labels.
+1. Search using the most specific terms from the issue title, body, and labels.
 2. Prefer issues updated in the last 6 to 12 months.
 3. Inspect up to 20 relevant results and count their assignees.
-4. Rank candidates by assignment frequency and similarity to the target issue.
+4. Rank candidates by assignment frequency and similarity to the target issue,
+   and choose the top-ranked individual as the proposed assignee.
 
 Do not infer ownership from issue authorship alone.
+
+This is the **primary** strategy when the repository has no area-owner file. In
+that case, always run this search and assign the best-matching individual from
+the historical data (see the Workflow). Only skip assignment when the search
+returns no similar issues with a clear, recurring assignee.
 
 ## Workflow
 
@@ -47,6 +53,9 @@ Do not infer ownership from issue authorship alone.
 4. Combine the evidence:
    - Both strategies agree: high confidence.
    - One strategy produces a clear match: medium confidence.
+   - **No area-owner file:** rely on historical patterns — if similar past
+     issues have a clear, recurring top assignee, treat it as medium confidence
+     and assign that individual.
    - Strategies conflict or evidence is weak: low confidence; report candidates
      and do not assign automatically.
 5. For a medium- or high-confidence individual user, update the issue with the
@@ -65,7 +74,10 @@ Do not infer ownership from issue authorship alone.
   available GitHub tools provide enough evidence; otherwise report the team as
   a routing suggestion.
 - Treat a failed or unconfirmed write as a suggestion, not a completed action.
-- If no area-owner file exists, use historical patterns only.
+- If no area-owner file exists, use historical patterns as the primary strategy:
+  search similar past issues and assign the most frequent / most relevant
+  individual assignee. Only skip assignment when the historical evidence yields
+  no reasonable candidate.
 - If no confident match exists, do not guess and do not modify the issue.
 
 ## Output

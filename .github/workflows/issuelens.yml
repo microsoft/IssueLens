@@ -87,7 +87,8 @@ jobs:
             input+="First, find and report potential duplicate or related issues without closing or modifying the target issue. "
             input+="If one or more duplicate matches are found, always add the 'duplicate' label to the target issue. Then apply any other appropriate labels using the repository's labeling instructions. "
             input+="Next, assign the issue to the best individual owner using repository area mappings and historical assignment patterns, while preserving existing assignees. "
-            input+="Finally, use the send-teams-notification tool to send a Teams notification summarizing the result (duplicates found, labels applied, and the assignee, with a link to the issue) to each of these recipients: ${RECIPIENTS}."
+            input+="Then investigate the issue: analyze the report and search broadly across the whole of GitHub — not just this repository — using the available GitHub tools (code search, issues, pull requests, commits, and discussions in any relevant public repositories) to determine the likely affected component/area, probable root cause, and reproduction. Post a comment on the issue summarizing your investigation result, with links to the supporting evidence you found. "
+            input+="Finally, use the send-teams-notification tool to send a Teams notification summarizing the result (duplicates found, labels applied, the assignee, a short investigation summary, and a link to the issue) to each of these recipients: ${RECIPIENTS}."
             payload=$(jq -cn \
               --arg input "$input" \
               --arg tok "$GH_APP_TOKEN" \
