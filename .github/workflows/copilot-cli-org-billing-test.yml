@@ -1,0 +1,40 @@
+name: Copilot CLI organization billing test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  copilot-requests: write
+
+jobs:
+  probe:
+    name: Request Copilot response
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Send minimal Copilot request
+        env:
+          COPILOT_GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response="$(npx --yes @github/copilot@1.0.71-2 \
+            -p 'Reply with exactly: COPILOT_CLI_ORG_BILLING_OK' \
+            --disable-builtin-mcps \
+            --no-ask-user \
+            --no-color \
+            --no-custom-instructions \
+            --no-experimental \
+            --no-remote-export \
+            --output-format=text \
+            --stream=off \
+            --silent)"
+
+          printf 'Copilot response: %s\n' "$response"
+          test "$response" = 'COPILOT_CLI_ORG_BILLING_OK'
