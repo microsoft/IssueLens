@@ -29,6 +29,7 @@ jobs:
           python - <<'PY'
           import asyncio
           import html
+          import json
           import os
           from mcp import ClientSession, StdioServerParameters
           from mcp.client.stdio import stdio_client
@@ -66,8 +67,9 @@ jobs:
                           },
                       )
                       assert not result.isError, result.content
-                      text = "\n".join(item.text for item in result.content if hasattr(item, "text"))
-                      assert os.environ["EXPECTED_TITLE"] in html.unescape(text), text
+                      text = next(item.text for item in result.content if hasattr(item, "text"))
+                      issue = json.loads(text)
+                      assert html.unescape(issue["title"]) == os.environ["EXPECTED_TITLE"], issue["title"]
                       print("GITHUB_MCP_ACTIONS_TOKEN_OK")
 
           asyncio.run(main())
