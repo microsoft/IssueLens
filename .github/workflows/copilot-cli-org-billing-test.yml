@@ -31,11 +31,21 @@ jobs:
           {
             "mcpServers": {
               "github_mcp": {
-                "type": "http",
-                "url": "https://api.githubcopilot.com/mcp/",
-                "headers": {
-                  "Authorization": "Bearer ${GITHUB_MCP_TOKEN}",
-                  "X-MCP-Tools": "issue_read"
+                "type": "stdio",
+                "command": "docker",
+                "args": [
+                  "run",
+                  "-i",
+                  "--rm",
+                  "-e",
+                  "GITHUB_PERSONAL_ACCESS_TOKEN",
+                  "-e",
+                  "GITHUB_TOOLS",
+                  "ghcr.io/github/github-mcp-server:v1.7.0"
+                ],
+                "env": {
+                  "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_MCP_TOKEN}",
+                  "GITHUB_TOOLS": "issue_read"
                 },
                 "tools": ["issue_read"]
               }
