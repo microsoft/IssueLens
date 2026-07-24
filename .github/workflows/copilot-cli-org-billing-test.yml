@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  issues: read
   copilot-requests: write
 
 jobs:
@@ -17,15 +18,36 @@ jobs:
         with:
           node-version: 22
 
-      - name: Send minimal Copilot request
+      - name: Read an issue through custom GitHub MCP
         env:
           COPILOT_GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_MCP_TOKEN: ${{ github.token }}
+          EXPECTED_TITLE: 'project setting "Store information about method parameters" cannot be changed for individual projects in a multi-root workspace'
         shell: bash
         run: |
           set -euo pipefail
+          mcp_config="$RUNNER_TEMP/mcp-config.json"
+          cat > "$mcp_config" <<'JSON'
+          {
+            "mcpServers": {
+              "github_mcp": {
+                "type": "http",
+                "url": "https://api.githubcopilot.com/mcp/",
+                "headers": {
+                  "Authorization": "Bearer ${GITHUB_MCP_TOKEN}",
+                  "X-MCP-Tools": "issue_read"
+                },
+                "tools": ["issue_read"]
+              }
+            }
+          }
+          JSON
 
           response="$(npx --yes @github/copilot@1.0.71-2 \
-            -p 'Reply with exactly: COPILOT_CLI_ORG_BILLING_OK' \
+            -p 'Use github_mcp/issue_read to read microsoft/IssueLens issue #9. Reply with exactly its title and no other text.' \
+            --additional-mcp-config="@$mcp_config" \
+            --available-tools='github_mcp/*' \
+            --allow-tool='github_mcp(issue_read)' \
             --disable-builtin-mcps \
             --no-ask-user \
             --no-color \
@@ -37,4 +59,4 @@ jobs:
             --silent)"
 
           printf 'Copilot response: %s\n' "$response"
-          test "$response" = 'COPILOT_CLI_ORG_BILLING_OK'
+          test "$response" = "$EXPECTED_TITLE"
