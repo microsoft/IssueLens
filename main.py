@@ -3,14 +3,25 @@
 """IssueLens — a GitHub issue-triage agent (GitHub Copilot SDK + Foundry).
 
 Triages GitHub issues (finds critical hot/blocking/regression issues), applies
-labels, and sends notifications. It runs as a Foundry hosted agent exposing the
-invocations protocol.
+labels, and sends notifications. It runs as a Foundry hosted agent that serves
+two protocols from a single host:
+
+* **invocations** (``POST /invocations``) — automation, e.g. GitHub Actions.
+* **responses** (``POST /responses``) — interactive chat (playground, Teams,
+  any OpenAI Responses client).
 
 The invocation payload has exactly two fields:
 
 * ``input`` — the user's task (a free-form text prompt).
 * ``github_token`` — a GitHub token used to authenticate the remote GitHub MCP
   server, so the agent reads issues / applies labels as that token's identity.
+
+Chat has no payload to carry a token, so GitHub access goes through a Foundry
+**toolbox** (``TOOLBOX_ENDPOINT``) whose GitHub MCP connection uses managed
+OAuth2. Foundry prompts each caller for consent once — surfaced as a JSON-RPC
+``-32006`` error carrying the consent URL — and owns their tokens and refresh.
+The agent authenticates to the toolbox with its own Azure AD token and forwards
+the per-request call ID so the toolbox can resolve who is calling.
 
 Model (inference) auth is selected automatically:
 
@@ -31,6 +42,7 @@ import logging
 import os
 import pathlib
 import sys
+import time
 
 import httpx
 from dotenv import load_dotenv
@@ -39,9 +51,19 @@ from starlette.responses import JSONResponse, Response, StreamingResponse
 
 
 from azure.ai.agentserver.invocations import InvocationAgentServerHost
+from azure.ai.agentserver.responses import (
+    CreateResponse,
+    ResponseContext,
+    ResponseEventStream,
+    ResponsesAgentServerHost,
+)
 from copilot import CopilotClient, PermissionHandler, ProviderConfig
 from copilot.session import CustomAgentConfig
-from copilot.session_events import SessionEventType
+from copilot.session_events import (
+    AssistantMessageDeltaData,
+    SessionEventType,
+    SessionIdleData,
+)
 from copilot.tools import Tool, ToolInvocation, ToolResult
 
 load_dotenv(override=False)
@@ -49,7 +71,12 @@ load_dotenv(override=False)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = InvocationAgentServerHost()
+
+class IssueLensHost(InvocationAgentServerHost, ResponsesAgentServerHost):
+    """One host, both protocols — cooperative init merges each one's routes."""
+
+
+app = IssueLensHost()
 
 _client: CopilotClient | None = None
 _client_lock = asyncio.Lock()
@@ -90,8 +117,12 @@ _ISSUELENS_AGENT: CustomAgentConfig = {
         "preloaded find-duplicates, label-issue, assign-issue, and notify "
         "skills. Handle direct duplicate-check requests with the "
         "find-duplicates skill and direct issue-assignment requests with the "
-        "assign-issue skill. Use only the GitHub MCP server for GitHub "
-        "operations; never use shell commands or the GitHub CLI. Preserve the "
+        "assign-issue skill. Use only MCP server tools for GitHub operations; "
+        "never use shell commands or the GitHub CLI. When the tools come from "
+        "the Foundry toolbox, discover them with tool_search and invoke them "
+        "with call_tool. If a toolbox call fails with a CONSENT_REQUIRED "
+        "error, stop and reply with the consent URL from that error so the "
+        "user can authorize access, then retry once they confirm. Preserve the "
         "analyst's JSON report and place it at the very end of triage "
         "responses. Never open pull requests."
     ),
@@ -230,8 +261,31 @@ def _build_mcp_servers(gh_token: str | None) -> dict:
         servers["github"] = _github_mcp_server(gh_token)
     else:
         logger.warning(
-            "No github_token in the invocation payload; GitHub tools disabled.")
+            "No github_token available; GitHub tools disabled.")
     return servers
+
+
+def _session_options(mcp_servers: dict) -> dict:
+    """Common ``create_session`` keyword arguments for both protocols."""
+    provider, model = _byok_provider()
+    return {
+        "on_permission_request": PermissionHandler.approve_all,
+        "streaming": True,
+        "working_directory": _working_dir,
+        # Load supporting configuration from the project: skills and instruction
+        # files (AGENTS.md, .github/copilot-instructions.md). Config
+        # auto-discovery, file hooks, and plugin loading are intentionally NOT
+        # enabled — in the hosted container the deployed code dir is read-only,
+        # and enabling them makes the runtime try to write there (I/O error 30).
+        "skill_directories": [_skills_dir],
+        "instruction_directories": [_config_dir],
+        "provider": provider,
+        "model": model,
+        "mcp_servers": mcp_servers or None,
+        "tools": _NOTIFY_TOOLS or None,
+        "custom_agents": [_ISSUELENS_AGENT, _CRITICAL_ISSUE_ANALYST],
+        "agent": "issuelens",
+    }
 
 
 def _build_prompt(payload: dict) -> str:
@@ -399,7 +453,6 @@ async def _stream_response(invocation_id: str, payload: dict):
     App installation token and its own repository context (multi-tenant safe).
     """
     client = await _ensure_client()
-    provider, model = _byok_provider()
     mcp_servers = _build_mcp_servers(payload.get("github_token"))
     prompt = _build_prompt(payload)
 
@@ -407,24 +460,7 @@ async def _stream_response(invocation_id: str, payload: dict):
         yield f"data: {json.dumps({'type': 'error', 'message': 'empty task'})}\n\n".encode()
         return
 
-    session = await client.create_session(
-        on_permission_request=PermissionHandler.approve_all,
-        streaming=True,
-        working_directory=_working_dir,
-        # Load supporting configuration from the project: skills and instruction
-        # files (AGENTS.md, .github/copilot-instructions.md). Config
-        # auto-discovery, file hooks, and plugin loading are intentionally NOT
-        # enabled — in the hosted container the deployed code dir is read-only,
-        # and enabling them makes the runtime try to write there (I/O error 30).
-        skill_directories=[_skills_dir],
-        instruction_directories=[_config_dir],
-        provider=provider,
-        model=model,
-        mcp_servers=mcp_servers or None,
-        tools=_NOTIFY_TOOLS or None,
-        custom_agents=[_ISSUELENS_AGENT, _CRITICAL_ISSUE_ANALYST],
-        agent="issuelens",
-    )
+    session = await client.create_session(**_session_options(mcp_servers))
     session_id = getattr(session, "session_id", None)
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -495,6 +531,255 @@ async def handle_invoke(request: Request) -> Response:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
+
+# ── Chat (responses protocol) ────────────────────────────────────────────────
+#
+# A chat request carries no payload token, so GitHub access goes through a
+# Foundry **toolbox** whose GitHub MCP connection uses managed OAuth2: Foundry
+# prompts each caller for consent once, then owns their tokens and refresh. The
+# agent authenticates to the toolbox with its own Azure AD token and forwards
+# the per-request call ID so the toolbox can resolve who is calling.
+
+_TOOLBOX_ENDPOINT_ENV = "TOOLBOX_ENDPOINT"
+_TOOLBOX_SCOPE = "https://ai.azure.com/.default"
+_CALL_ID_HEADER = "x-agent-foundry-call-id"
+_CONSENT_ERROR_CODE = -32006
+_TOKEN_REFRESH_MARGIN_SECONDS = 300
+
+_ANONYMOUS_CONVERSATION = "anonymous"
+_MAX_CHAT_SESSIONS = 500
+
+_GREETING = (
+    "I'm IssueLens. Ask me to triage a repository's issues, find duplicates, "
+    "label an issue, assign an owner, or send a triage report."
+)
+_TOOLBOX_UNCONFIGURED = (
+    "GitHub access for chat isn't configured. Set `TOOLBOX_ENDPOINT` to a "
+    "Foundry toolbox that includes a GitHub MCP connection using managed "
+    "OAuth2 (`azd ai connection create ... --auth-type oauth2 "
+    "--managed-connector foundrygithubmcp`)."
+)
+_TOOLBOX_UNREACHABLE = (
+    "I couldn't reach the Foundry toolbox. Check that `TOOLBOX_ENDPOINT` is "
+    "correct (it must end with `?api-version=v1`) and that this agent's "
+    "identity has access to the project \u2014 locally that means `az login`. "
+    "The agent log has the details."
+)
+
+# Copilot session id per conversation, so chat stays multi-turn.
+_chat_session_ids: dict[str, str] = {}
+
+_credential = None
+_toolbox_token = None
+
+
+def _toolbox_bearer() -> str:
+    """Azure AD token for the toolbox MCP endpoint, refreshed before it expires."""
+    global _credential, _toolbox_token
+    stale = (
+        _toolbox_token is None
+        or _toolbox_token.expires_on - time.time() < _TOKEN_REFRESH_MARGIN_SECONDS
+    )
+    if stale:
+        from azure.identity import DefaultAzureCredential
+        if _credential is None:
+            _credential = DefaultAzureCredential()
+        _toolbox_token = _credential.get_token(_TOOLBOX_SCOPE)
+    return _toolbox_token.token
+
+
+def _toolbox_headers(call_id: str | None) -> dict[str, str]:
+    """Agent auth plus the per-request caller identity for toolbox MCP calls."""
+    headers = {"Authorization": f"Bearer {_toolbox_bearer()}"}
+    if call_id:
+        headers[_CALL_ID_HEADER] = call_id
+    return headers
+
+
+def _toolbox_mcp_server(endpoint: str, call_id: str | None) -> dict:
+    """Build the toolbox MCP server config for a single chat turn."""
+    return {
+        "type": "http",
+        "url": endpoint,
+        "headers": _toolbox_headers(call_id),
+        "tools": ["*"],
+    }
+
+
+def _decode_mcp(resp: httpx.Response) -> dict:
+    """Decode a toolbox MCP reply, which may be JSON or a single SSE frame."""
+    if "text/event-stream" in resp.headers.get("content-type", ""):
+        for line in resp.text.splitlines():
+            if line.startswith("data:"):
+                return json.loads(line[len("data:"):].strip())
+        return {}
+    return resp.json()
+
+
+def _consent_url(message: str) -> str | None:
+    """Pull the OAuth consent URL out of a ``-32006`` toolbox error.
+
+    The JSON payload is appended to human-readable prefix text, so slice from
+    the first brace rather than parsing the whole message.
+    """
+    start = message.find("{")
+    if start < 0:
+        return None
+    try:
+        payload = json.loads(message[start:])
+    except json.JSONDecodeError:
+        return None
+    for source in payload.get("errors", []):
+        error = source.get("error") or {}
+        if error.get("code") == "CONSENT_REQUIRED":
+            return error.get("message")
+    return None
+
+
+async def _consent_required(endpoint: str, call_id: str | None) -> str | None:
+    """Probe the toolbox with ``tools/list``; return a consent URL if one is needed.
+
+    ``tools/list`` fans out to every tool source, so a source still awaiting
+    OAuth consent reports it here even when the others succeed.
+    """
+    async with httpx.AsyncClient(timeout=60) as http:
+        resp = await http.post(
+            endpoint,
+            headers={
+                **_toolbox_headers(call_id),
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            json={"jsonrpc": "2.0", "id": 1,
+                  "method": "tools/list", "params": {}},
+        )
+    resp.raise_for_status()
+    error = _decode_mcp(resp).get("error") or {}
+    if error.get("code") != _CONSENT_ERROR_CODE:
+        return None
+    return _consent_url(error.get("message", ""))
+
+
+async def _close_session(session) -> None:
+    try:
+        await session.disconnect()
+    except Exception:  # pragma: no cover - best-effort cleanup
+        logger.debug("session.disconnect() failed", exc_info=True)
+
+
+async def _chat_session(conversation: str, mcp_servers: dict):
+    """Open this conversation's Copilot session, resuming it when one exists.
+
+    A session is opened per turn so every toolbox call carries a fresh Azure AD
+    token and the current caller's call ID.
+    """
+    client = await _ensure_client()
+    options = _session_options(mcp_servers)
+
+    session_id = _chat_session_ids.get(conversation)
+    if session_id:
+        try:
+            return await client.resume_session(session_id, **options)
+        except Exception:
+            logger.info(
+                "Could not resume session %s; starting a new one", session_id)
+
+    session = await client.create_session(**options)
+    while len(_chat_session_ids) >= _MAX_CHAT_SESSIONS:
+        _chat_session_ids.pop(next(iter(_chat_session_ids)))
+    _chat_session_ids[conversation] = session.session_id
+    return session
+
+
+@app.response_handler
+async def handle_chat(
+    request: CreateResponse,
+    context: ResponseContext,
+    cancellation_signal: asyncio.Event,
+):
+    """Chat entry point — streams the agent's reply as Responses SSE events."""
+    stream = ResponseEventStream(
+        response_id=context.response_id, request=request)
+    yield stream.emit_created()
+    yield stream.emit_in_progress()
+
+    prompt = (await context.get_input_text()).strip()
+    if not prompt:
+        for event in stream.output_item_message(_GREETING):
+            yield event
+        yield stream.emit_completed()
+        return
+
+    endpoint = os.environ.get(_TOOLBOX_ENDPOINT_ENV, "")
+    if not endpoint:
+        for event in stream.output_item_message(_TOOLBOX_UNCONFIGURED):
+            yield event
+        yield stream.emit_completed()
+        return
+
+    call_id = context.platform_context.call_id
+    try:
+        consent_url = await _consent_required(endpoint, call_id)
+    except Exception:
+        logger.error("Toolbox probe failed for %s", endpoint, exc_info=True)
+        for event in stream.output_item_message(_TOOLBOX_UNREACHABLE):
+            yield event
+        yield stream.emit_completed()
+        return
+
+    if consent_url:
+        for event in stream.output_item_message(
+            "**Connect your GitHub account**\n\n"
+            f"Open {consent_url} to authorize IssueLens, then send your "
+            "request again. This is a one-time step."
+        ):
+            yield event
+        yield stream.emit_completed()
+        return
+
+    conversation = (
+        context.conversation_id
+        or context.platform_context.user_id_key
+        or _ANONYMOUS_CONVERSATION
+    )
+    session = await _chat_session(
+        conversation, {"toolbox": _toolbox_mcp_server(endpoint, call_id)})
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def on_event(event):
+        data = event.data
+        if isinstance(data, AssistantMessageDeltaData):
+            queue.put_nowait(data.delta_content or "")
+        elif isinstance(data, SessionIdleData):
+            queue.put_nowait(None)
+        elif event.type == SessionEventType.SESSION_ERROR:
+            queue.put_nowait(RuntimeError(getattr(data, "message", "error")))
+
+    unsubscribe = session.on(on_event)
+    message = stream.add_output_item_message()
+    yield message.emit_added()
+    text = message.add_text_content()
+    yield text.emit_added()
+    try:
+        await session.send(prompt)
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                raise item
+            if item:
+                yield text.emit_delta(item)
+    finally:
+        unsubscribe()
+        await _close_session(session)
+
+    yield text.emit_text_done()
+    yield text.emit_done()
+    yield message.emit_done()
+    yield stream.emit_completed()
 
 
 if __name__ == "__main__":

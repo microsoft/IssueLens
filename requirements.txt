@@ -1,6 +1,9 @@
 github-copilot-sdk>=1.0.7
 
-azure-ai-agentserver-invocations==1.0.0b6
+# Both protocol packages plug into the same azure-ai-agentserver-core host:
+# invocations (automation) + responses (chat).
+azure-ai-agentserver-invocations==1.0.0b7
+azure-ai-agentserver-responses==1.0.0b9
 azure-identity>=1.17.0
 python-dotenv==1.2.2
 

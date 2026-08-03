@@ -20,6 +20,8 @@ services:
               value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
             - name: AZURE_AI_MODEL_API_KEY
               value: ${AZURE_AI_MODEL_API_KEY}
+            - name: TOOLBOX_ENDPOINT
+              value: ${TOOLBOX_ENDPOINT}
             - name: MAILING_URL
               value: ${MAILING_URL}
             - name: PERSONAL_NOTIFICATION_URL
@@ -30,4 +32,6 @@ services:
         name: IssueLens
         protocols:
             - protocol: invocations
+              version: 2.0.0
+            - protocol: responses
               version: 2.0.0

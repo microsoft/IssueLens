@@ -5,6 +5,8 @@ kind: hosted
 protocols:
   - protocol: invocations
     version: 2.0.0
+  - protocol: responses
+    version: 2.0.0
 resources:
   cpu: '0.5'
   memory: 1.0Gi
@@ -15,6 +17,11 @@ environment_variables:
     value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
   - name: AZURE_AI_MODEL_API_KEY
     value: ${AZURE_AI_MODEL_API_KEY}
+  # Chat (responses protocol) — Foundry toolbox MCP endpoint. Its GitHub MCP
+  # connection uses managed OAuth2, so each chat caller consents once and
+  # Foundry owns their tokens.
+  - name: TOOLBOX_ENDPOINT
+    value: ${TOOLBOX_ENDPOINT}
   # Notifications — Logic App HTTP endpoints (contain SAS signatures; store as
   # secrets, e.g. via `azd env set` or a secret store).
   - name: MAILING_URL
@@ -27,13 +34,16 @@ environment_variables:
     value: ${RECIPIENTS}
 description: >
   IssueLens — a GitHub issue-triage agent built on the GitHub Copilot SDK
-  (CopilotClient) with the azure-ai-agentserver-invocations protocol. It triages
-  issues (hot/blocking/regression) and applies labels via the remote GitHub MCP
-  server, authenticated with a GitHub token supplied per request. Notification
+  (CopilotClient). It serves the invocations protocol for automation (GitHub
+  Actions) and the responses protocol for chat. It triages issues
+  (hot/blocking/regression) and applies labels via the remote GitHub MCP server,
+  authenticated with a GitHub token supplied per request (invocations) or via a
+  Foundry toolbox with a managed-OAuth2 GitHub connection (chat). Notification
   tools are provided by the Foundry toolbox.
 metadata:
   tags:
     - AI Agent Hosting
     - GitHub Copilot SDK
     - Invocations Protocol
+    - Responses Protocol
     - Issue Triage

@@ -4,7 +4,9 @@ IssueLens is a **GitHub issue-triage agent** that runs as a **Microsoft Foundry
 hosted agent**, built on the **GitHub Copilot SDK**. It analyzes issues across
 repositories, identifies critical (hot / blocking / regression) issues, applies
 labels, and sends notifications — acting on GitHub as a **GitHub App**, so all
-writes are attributed to the App bot with the App's scoped permissions.
+writes are attributed to the App bot with the App's scoped permissions. It is
+reachable two ways: the **invocations** protocol for automation and the
+**responses** protocol for chat.
 
 ## Main features
 
@@ -26,16 +28,27 @@ writes are attributed to the App bot with the App's scoped permissions.
 
 ## Architecture
 
-- **`main.py`** — the Foundry hosted-agent server (`InvocationAgentServerHost`,
-  Starlette + SSE). Exposes `POST /invocations`; each request opens a fresh
-  Copilot session and streams session events back as SSE.
-  - **Invocation payload:** exactly two fields —
+- **`main.py`** — the Foundry hosted-agent server. A single host class
+  (`IssueLensHost(InvocationAgentServerHost, ResponsesAgentServerHost)`) serves
+  two protocols in one process:
+  - **`POST /invocations`** — automation (GitHub Actions). Each request opens a
+    fresh Copilot session and streams session events back as SSE.
+    **Invocation payload:** exactly two fields —
     `{ "input": "<free-form task>", "github_token": "<token>" }`. `input` is the
     task; `github_token` authenticates the GitHub MCP server.
     If the GitHub MCP server returns an authentication or permission error,
     respond immediately with HTTP 400 and body
     `{ "error": "github_token invalid or insufficient scopes" }`; do not proceed
     with any GitHub operations.
+  - **`POST /responses`** — chat (playground, Teams, any Responses client).
+    There is no payload token, so GitHub access goes through a **Foundry
+    toolbox** (`TOOLBOX_ENDPOINT`) whose GitHub MCP connection uses managed
+    OAuth2. The agent authenticates to the toolbox with its own Azure AD token
+    (scope `https://ai.azure.com/.default`) and forwards the per-request
+    `x-agent-foundry-call-id`. Before each turn it probes `tools/list`; on a
+    JSON-RPC `-32006` / `CONSENT_REQUIRED` error it replies with the consent
+    URL instead of failing. The conversation's Copilot session is resumed each
+    turn so chat stays multi-turn while the token and call ID stay fresh.
   - **Model (inference) auth (auto-selected):** BYOK Foundry model
     (`FOUNDRY_PROJECT_ENDPOINT` + `AZURE_AI_MODEL_DEPLOYMENT_NAME`, using
     `AZURE_AI_MODEL_API_KEY` or a Managed Identity token), or the GitHub Copilot
@@ -55,9 +68,10 @@ writes are attributed to the App bot with the App's scoped permissions.
   issues via GitHub MCP tools), `label-issue` (apply labels via GitHub MCP
   tools), `assign-issue` (route and assign issues via GitHub MCP tools), and
   `notify` (send the report via the `workiq-*` MCP tools).
-- **GitHub access** — the remote GitHub MCP server
-  (`https://api.githubcopilot.com/mcp/`), authenticated with the payload's
-  `github_token`.
+- **GitHub access** — invocations use the remote GitHub MCP server
+  (`https://api.githubcopilot.com/mcp/`) authenticated with the payload's
+  `github_token`; chat uses the Foundry toolbox MCP endpoint
+  (`TOOLBOX_ENDPOINT`) with its managed-OAuth2 GitHub connection.
 - **Config auto-discovery** — the Copilot harness discovers supporting config
   from the project root, so capabilities can be added **without editing
   `main.py`**:
@@ -91,7 +105,8 @@ and `workflow_dispatch`.
 ## Run & deploy
 
 - **Local:** `pip install -r requirements.txt`, copy `.env.example` → `.env` and
-  fill it in, then `python main.py` (serves the invocations endpoint on `:8088`).
+  fill it in, then `python main.py` (serves `/invocations` and `/responses` on
+  `:8088`).
 - **Deploy to Foundry:** `azd deploy` — see `azure.yaml` (Python hosted agent,
   `codeConfiguration` remote build) and `agent.yaml` (hosted-agent manifest). A
   `Dockerfile` is also provided for a container build.

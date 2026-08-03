@@ -2,17 +2,28 @@
 
 # IssueLens — GitHub Issue Triage Agent (Foundry hosted)
 
-A GitHub issue-triage agent built on the [GitHub Copilot SDK](https://pypi.org/project/github-copilot-sdk/) (`CopilotClient`) and the [azure-ai-agentserver-invocations](https://pypi.org/project/azure-ai-agentserver-invocations/) protocol. It identifies critical issues (hot / blocking / regression), detects duplicates, applies labels, assigns owners, and sends notifications — deployable as a Foundry hosted agent.
+A GitHub issue-triage agent built on the [GitHub Copilot SDK](https://pypi.org/project/github-copilot-sdk/) (`CopilotClient`), serving both the [invocations](https://pypi.org/project/azure-ai-agentserver-invocations/) protocol (automation) and the [responses](https://pypi.org/project/azure-ai-agentserver-responses/) protocol (chat). It identifies critical issues (hot / blocking / regression), detects duplicates, applies labels, assigns owners, and sends notifications — deployable as a Foundry hosted agent.
 
 ## How It Works
 
-1. Receives a JSON task via `POST /invocations`. The payload has exactly two fields: `input` (the task, a free-form text prompt) and `github_token` (used to authenticate the GitHub MCP server), e.g. `{"input": "Triage open issues in owner/repo", "github_token": "ghs_..."}`.
+Both protocols run in the same process and share the same orchestrator, skills, and sub-agent; only how the GitHub token is obtained differs.
+
+### Automation — `POST /invocations`
+
+1. Receives a JSON task. The payload has exactly two fields: `input` (the task, a free-form text prompt) and `github_token` (used to authenticate the GitHub MCP server), e.g. `{"input": "Triage open issues in owner/repo", "github_token": "ghs_..."}`.
 2. Creates a **fresh Copilot session per request** configured with:
    - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
    - the remote **GitHub MCP server**, authenticated with the `github_token` from the payload — so the agent reads issues and applies labels as that token's identity;
    - **notification tools provided by the Foundry toolbox**.
 3. The preselected `issuelens` orchestrator delegates analysis to the runtime **Critical Issue Analyst** sub-agent registered with the Copilot SDK, then runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions.
 4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Triage runs end with a JSON summary.
+
+### Chat — `POST /responses`
+
+1. Receives an OpenAI Responses request (Foundry playground, Teams, or any Responses client).
+2. Reaches GitHub through a **Foundry toolbox** (`TOOLBOX_ENDPOINT`) whose GitHub MCP connection uses **managed OAuth2** — Foundry prompts each caller for consent once and owns their tokens and refresh. The agent authenticates to the toolbox with its own Azure AD token (scope `https://ai.azure.com/.default`) and forwards the per-request `x-agent-foundry-call-id` so the toolbox resolves who is calling.
+3. Before each turn it probes the toolbox with `tools/list`. If Foundry returns the JSON-RPC `-32006` / `CONSENT_REQUIRED` error, the agent replies with the consent URL instead of failing.
+4. Resumes the conversation's Copilot session each turn (fresh token + call ID per turn, history preserved) and streams the reply as Responses SSE events.
 
 ## Environment Variables
 
@@ -28,11 +39,30 @@ If the Foundry variables are set they take precedence over `GITHUB_TOKEN`.
 
 ### GitHub resource access
 
-The agent authenticates the remote GitHub MCP server with the `github_token` supplied in each invocation payload — there is nothing to configure via environment variables. Override the endpoint only if needed:
+For **invocations**, the agent authenticates the remote GitHub MCP server with the `github_token` supplied in each payload — there is nothing to configure via environment variables.
+
+For **chat**, there is no payload token, so GitHub access goes through a Foundry toolbox with a managed-OAuth2 GitHub connection:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GITHUB_MCP_URL` | No | GitHub MCP endpoint (default `https://api.githubcopilot.com/mcp/`). Override for GitHub Enterprise |
+| `TOOLBOX_ENDPOINT` | For chat | Toolbox MCP endpoint, e.g. `https://<account>.services.ai.azure.com/api/projects/<project>/toolboxes/<toolbox>/mcp?api-version=v1`. The `?api-version=v1` query string is required |
+| `GITHUB_MCP_URL` | No | GitHub MCP endpoint used by the **invocations** path (default `https://api.githubcopilot.com/mcp/`). Override for GitHub Enterprise |
+
+Create the connection and toolbox once:
+
+```bash
+azd ai connection create github-oauth-conn \
+  --kind remote-tool \
+  --target https://api.githubcopilot.com/mcp \
+  --auth-type oauth2 \
+  --managed-connector foundrygithubmcp
+
+azd ai toolbox create issuelens-tools --from-file ./toolbox.yaml
+azd ai toolbox show issuelens-tools --output json   # copy the MCP endpoint
+azd env set TOOLBOX_ENDPOINT "<mcp-endpoint>"
+```
+
+The agent calls the toolbox with its own identity, so it needs data-plane access to the Foundry project (`Foundry User` or `Azure AI Developer`). Locally that identity comes from `az login`; when hosted it's the agent's managed identity. Foundry stores and refreshes the per-user GitHub tokens — none are held by this codebase.
 
 ### Notifications
 
@@ -142,14 +172,36 @@ curl -N -X POST http://localhost:8088/invocations \
 curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
   -d '{"input": "Summarize open issues in owner/repo", "github_token": "ghs_..."}'
+
+# Chat (responses protocol) — no token in the body; GitHub access comes from
+# the Foundry toolbox, which prompts for OAuth consent on first use.
+curl -N -X POST http://localhost:8088/responses \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Find duplicates for issue owner/repo#123", "stream": true}'
 ```
 
+### Chat from a terminal
+
+`chat.py` is a small REPL for the chat protocol — it chains `previous_response_id`
+so turns stay in one conversation:
+
+```bash
+python chat.py                                   # interactive
+python chat.py "Triage open issues in owner/repo"  # one-shot
+```
+
+Type `new` to start a fresh conversation, `exit` to quit.
+
 ### Request fields
+
+Invocations (`POST /invocations`):
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `input` | Yes | The task — a free-form text prompt describing what to triage, label, or report |
 | `github_token` | Yes | GitHub token used to authenticate the remote GitHub MCP server (e.g. minted by a GitHub Actions workflow) |
+
+Chat (`POST /responses`) takes a standard OpenAI Responses body; GitHub auth is handled by the Foundry toolbox's managed-OAuth2 connection.
 
 ### SSE Event Format
 
