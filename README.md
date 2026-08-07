@@ -10,7 +10,7 @@ Both protocols run in the same process and share the same orchestrator, skills, 
 
 ### Automation — `POST /invocations`
 
-1. Receives a JSON task. The payload has exactly two fields: `input` (the task, a free-form text prompt) and `github_token` (used to authenticate the GitHub MCP server), e.g. `{"input": "Triage open issues in owner/repo", "github_token": "ghs_..."}`.
+1. Receives a JSON task. The payload requires `input` (the task, a free-form text prompt) and `github_token` (used to authenticate the GitHub MCP server), with optional inline `attachments`, e.g. `{"input": "Triage open issues in owner/repo", "github_token": "ghs_..."}`.
 2. Creates a **fresh Copilot session per request** configured with:
    - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
    - the remote **GitHub MCP server**, authenticated with the `github_token` from the payload — so the agent reads issues and applies labels as that token's identity;
@@ -20,8 +20,8 @@ Both protocols run in the same process and share the same orchestrator, skills, 
 
 ### Chat — `POST /responses`
 
-1. Receives an OpenAI Responses request (Foundry playground, Teams, or any Responses client).
-2. Loads the `github-access` skill and calls its skill-owned `github-access` tool. The tool resolves the App installation for each `owner/repository`, mints and caches its short-lived installation token, and never returns credentials to the model.
+1. Receives an OpenAI Responses request (Foundry playground, Teams, or any Responses client), including inline `input_image` and `input_file` content.
+2. Loads the `github-access` skill and calls its skill-owned `github-access` tool. The host image loader and tool resolve the App installation for each `owner/repository`, mint and cache its short-lived installation token, and never return credentials to the model.
 3. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
 4. Performs only allowlisted issue-triage operations: repository/file reads, issue and comment reads/searches, label reads/additions, and assignee updates.
 5. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
@@ -202,6 +202,69 @@ curl -N -X POST http://localhost:8088/responses \
   -d '{"input": "Find duplicates for issue owner/repo#123", "stream": true}'
 ```
 
+### Image and file inputs
+
+Invocation clients send Copilot `blob` attachments. The `data` field is raw
+base64 without a data-URL prefix:
+
+```json
+{
+  "input": "Use this screenshot while triaging owner/repo#123",
+  "github_token": "ghs_...",
+  "attachments": [
+    {
+      "type": "blob",
+      "data": "iVBORw0KGgo...",
+      "mimeType": "image/png",
+      "displayName": "screenshot.png"
+    }
+  ]
+}
+```
+
+Responses clients use standard polymorphic message content. Images use a
+base64 data URL; generic files use inline `file_data`:
+
+```json
+{
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "Triage owner/repo#123 using this evidence"},
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,iVBORw0KGgo...",
+          "detail": "auto"
+        },
+        {
+          "type": "input_file",
+          "filename": "diagnostics.txt",
+          "file_data": "data:text/plain;base64,ZXJyb3IgbG9n..."
+        }
+      ]
+    }
+  ],
+  "stream": true
+}
+```
+
+Only inline base64 media is accepted. Remote URLs, platform `file_id` values,
+and invocation `file` paths are rejected to prevent server-side URL fetching
+and arbitrary container-file access. Requests may contain up to 10 attachments,
+20 MB each and 50 MB combined. The selected model must support the supplied
+image or file MIME type.
+
+Issue images are also loaded automatically during issue-link triage. Before the
+agent turn, the trusted host loader resolves explicit GitHub issue URLs and
+`owner/repository#number` references, reads each issue body, and adds validated
+image bytes as Copilot blob attachments. Clients do not need to add those images
+to the invocation payload. It accepts up to 5 PNG, JPEG, GIF, or WebP images,
+5 MB each and 15 MB combined. Arbitrary image hosts and unsafe redirects are
+rejected, and GitHub credentials are never forwarded to signed storage
+redirects.
+
 ### Chat from a terminal
 
 `chat.py` is a small REPL for the chat protocol — it chains `previous_response_id`
@@ -210,6 +273,7 @@ so turns stay in one conversation:
 ```bash
 python chat.py                                   # interactive
 python chat.py "Triage open issues in owner/repo"  # one-shot
+python chat.py --attach screenshot.png "Triage owner/repo#123"  # with media
 ```
 
 Type `new` to start a fresh conversation, `exit` to quit.
@@ -222,6 +286,7 @@ Invocations (`POST /invocations`):
 |-------|----------|-------------|
 | `input` | Yes | The task — a free-form text prompt describing what to triage, label, or report |
 | `github_token` | Yes | GitHub token used to authenticate the remote GitHub MCP server (e.g. minted by a GitHub Actions workflow) |
+| `attachments` | No | Inline Copilot `blob` attachments with base64 `data`, `mimeType`, and optional `displayName` |
 
 Chat (`POST /responses`) takes a standard OpenAI Responses body; GitHub auth is
 handled internally by the `github-access` skill helper and tool

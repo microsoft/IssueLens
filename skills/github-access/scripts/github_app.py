@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import html
 import json
 import os
 import pathlib
@@ -14,7 +15,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 import jwt
@@ -23,6 +24,25 @@ import jwt
 _API_ROOT = "https://api.github.com"
 _API_VERSION = "2022-11-28"
 _REFRESH_MARGIN_SECONDS = 300
+_MAX_ISSUE_IMAGES = 5
+_MAX_ISSUE_IMAGE_BYTES = 5 * 1024 * 1024
+_MAX_ISSUE_IMAGES_TOTAL_BYTES = 15 * 1024 * 1024
+_MAX_IMAGE_REDIRECTS = 4
+_IMAGE_MEDIA_TYPES = {
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+_URL_PATTERN = re.compile(r'https://[^\s<>"\')\]]+')
+_GITHUB_ASSET_HOSTS = {
+    "github.com",
+    "private-user-images.githubusercontent.com",
+    "user-images.githubusercontent.com",
+}
+_GITHUB_REDIRECT_HOST_PATTERN = re.compile(
+    r"^github-production-user-asset-[0-9]+\.s3\.amazonaws\.com$"
+)
 _REPOSITORY_PATTERN = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}$"
 )
@@ -71,11 +91,91 @@ class InstallationCredential:
     expires_at: float
 
 
+class RequestTokenProvider:
+    """Provide one request-scoped GitHub token without exposing it to the model."""
+
+    def __init__(self, token: str) -> None:
+        token = token.strip()
+        if not token:
+            raise GitHubAppError("A request-scoped GitHub token is required")
+        self._token = token
+
+    async def get_installation_token(
+        self, repository: str
+    ) -> InstallationCredential:
+        _validate_repository(repository)
+        return InstallationCredential(
+            installation_id=0,
+            token=self._token,
+            expires_at=float("inf"),
+        )
+
+
 def _validate_repository(repository: str) -> str:
     repository = repository.strip()
     if not _REPOSITORY_PATTERN.fullmatch(repository):
         raise GitHubAppError("Repository must use the owner/repository format")
     return repository
+
+
+def _extract_issue_image_urls(body: str) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in _URL_PATTERN.finditer(body):
+        url = html.unescape(match.group(0)).rstrip(".,;:")
+        if url in seen or not _is_allowed_image_url(url, allow_redirect=False):
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def _is_allowed_image_url(url: str, *, allow_redirect: bool) -> bool:
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except ValueError:
+        return False
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or port is not None
+    ):
+        return False
+
+    host = parsed.hostname.lower()
+    if host == "github.com":
+        return parsed.path.startswith("/user-attachments/assets/")
+    if host in {
+        "private-user-images.githubusercontent.com",
+        "user-images.githubusercontent.com",
+    }:
+        return True
+    return bool(
+        allow_redirect
+        and (
+            host == "objects.githubusercontent.com"
+            or _GITHUB_REDIRECT_HOST_PATTERN.fullmatch(host)
+        )
+    )
+
+
+def _image_media_type(content: bytes) -> str | None:
+    if content.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if content.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if content.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if (
+        len(content) >= 12
+        and content.startswith(b"RIFF")
+        and content[8:12] == b"WEBP"
+    ):
+        return "image/webp"
+    return None
 
 
 def _parse_secret_uri(secret_uri: str) -> tuple[str, str, str | None]:
@@ -261,6 +361,11 @@ class GitHubAppClient:
         per_page: int = 30,
     ) -> Any:
         repository = _validate_repository(repository)
+        if operation == "get-issue-images":
+            return await self._get_issue_images(
+                repository, _require_issue_number(issue_number)
+            )
+
         method = "GET"
         url = f"{_API_ROOT}/repos/{repository}"
         params: dict[str, Any] = {}
@@ -349,6 +454,127 @@ class GitHubAppClient:
                 ).decode("utf-8", errors="replace")
                 payload.pop("content", None)
         return payload
+
+    async def _get_issue_images(
+        self, repository: str, issue_number: int
+    ) -> dict[str, Any]:
+        credential = await self._token_provider.get_installation_token(repository)
+        api_headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {credential.token}",
+            "X-GitHub-Api-Version": _API_VERSION,
+        }
+        try:
+            async with httpx.AsyncClient(
+                transport=self._transport, timeout=30, follow_redirects=False
+            ) as client:
+                response = await client.get(
+                    f"{_API_ROOT}/repos/{repository}/issues/{issue_number}",
+                    headers=api_headers,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                body = payload.get("body") if isinstance(payload, dict) else None
+                urls = _extract_issue_image_urls(body if isinstance(body, str) else "")
+
+                images: list[dict[str, str]] = []
+                total_bytes = 0
+                candidates = urls[:_MAX_ISSUE_IMAGES]
+                for index, url in enumerate(candidates, start=1):
+                    remaining_bytes = _MAX_ISSUE_IMAGES_TOTAL_BYTES - total_bytes
+                    if remaining_bytes <= 0:
+                        break
+                    try:
+                        image = await self._download_issue_image(
+                            client,
+                            url,
+                            credential.token,
+                            min(_MAX_ISSUE_IMAGE_BYTES, remaining_bytes),
+                        )
+                    except GitHubAppError:
+                        continue
+                    total_bytes += image.pop("byte_count")
+                    image["description"] = (
+                        f"Image {index} from {repository}#{issue_number} issue body"
+                    )
+                    images.append(image)
+        except httpx.HTTPStatusError as exc:
+            raise GitHubAppError(
+                f"GitHub API returned HTTP {exc.response.status_code}"
+            ) from exc
+        except (httpx.HTTPError, ValueError) as exc:
+            raise GitHubAppError("GitHub issue image request failed") from exc
+
+        return {
+            "images": images,
+            "discovered_count": len(urls),
+            "skipped_count": len(urls) - len(images),
+        }
+
+    @staticmethod
+    async def _download_issue_image(
+        client: httpx.AsyncClient,
+        url: str,
+        token: str,
+        maximum_bytes: int,
+    ) -> dict[str, Any]:
+        current_url = url
+        for _ in range(_MAX_IMAGE_REDIRECTS + 1):
+            if not _is_allowed_image_url(current_url, allow_redirect=True):
+                raise GitHubAppError("GitHub issue image host is not allowed")
+
+            host = urlparse(current_url).hostname
+            headers = {"Accept": "image/png,image/jpeg,image/gif,image/webp"}
+            if host in _GITHUB_ASSET_HOSTS:
+                headers["Authorization"] = f"Bearer {token}"
+
+            try:
+                request = client.build_request("GET", current_url, headers=headers)
+                response = await client.send(request, stream=True)
+            except httpx.HTTPError as exc:
+                raise GitHubAppError("GitHub issue image download failed") from exc
+
+            if response.is_redirect:
+                location = response.headers.get("location")
+                await response.aclose()
+                if not location:
+                    raise GitHubAppError("GitHub issue image redirect is invalid")
+                current_url = urljoin(current_url, location)
+                continue
+
+            try:
+                response.raise_for_status()
+                media_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+                if media_type not in _IMAGE_MEDIA_TYPES:
+                    raise GitHubAppError("GitHub issue attachment is not a supported image")
+
+                content_length = response.headers.get("content-length")
+                if content_length and int(content_length) > maximum_bytes:
+                    raise GitHubAppError("GitHub issue image exceeds the size limit")
+
+                content = bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content) > maximum_bytes:
+                        raise GitHubAppError("GitHub issue image exceeds the size limit")
+            except (httpx.HTTPError, ValueError) as exc:
+                raise GitHubAppError("GitHub issue image download failed") from exc
+            finally:
+                await response.aclose()
+
+            if not content:
+                raise GitHubAppError("GitHub issue image is empty")
+            if _image_media_type(content) != media_type:
+                raise GitHubAppError(
+                    "GitHub issue attachment content does not match its image type"
+                )
+            return {
+                "data": base64.b64encode(content).decode("ascii"),
+                "mime_type": media_type,
+                "byte_count": len(content),
+            }
+
+        raise GitHubAppError("GitHub issue image has too many redirects")
 
 
 def _require_issue_number(issue_number: int | None) -> int:

@@ -24,6 +24,8 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn("`triage` sub-agent", global_prompt)
         self.assertIn("`find-criticals` sub-agent", global_prompt)
         self.assertIn("task-appropriate response", triage_prompt)
+        self.assertIn("host preloads", triage_prompt)
+        self.assertIn("untrusted issue content", triage_prompt)
         self.assertNotIn("Return only one valid JSON object", triage_prompt)
         self.assertIn("Return only the final JSON object", criticals_prompt)
         self.assertIn('_project_dir / "agents.md"', main_source)
@@ -36,6 +38,8 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn('"label-issue"', main_source)
         self.assertIn('"assign-issue"', main_source)
         self.assertIn('"notify"', main_source)
+        self.assertIn("issue_image_attachments", main_source)
+        self.assertIn("RequestTokenProvider", main_source)
         self.assertNotIn('"name": "issue-triage"', main_source)
         self.assertNotIn("critical-issue-analyst", main_source)
 

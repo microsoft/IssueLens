@@ -10,16 +10,20 @@ two protocols from a single host:
 * **responses** (``POST /responses``) — interactive chat (playground, Teams,
   any OpenAI Responses client).
 
-The invocation payload has exactly two fields:
+The invocation payload has two required fields and one optional field:
 
 * ``input`` — the user's task (a free-form text prompt).
 * ``github_token`` — a GitHub token used to authenticate the remote GitHub MCP
   server, so the agent reads issues / applies labels as that token's identity.
+* ``attachments`` — optional inline Copilot ``blob`` attachments containing
+    base64-encoded images or files.
 
 Chat has no payload token, so the skill-owned ``github-access`` tool uses the
 IssueLens GitHub App. Its bundled skill helper resolves the installation for
 each target repository, mints and caches a short-lived token, and performs only
 the allowlisted issue-triage operations. Tokens are never returned to the model.
+The trusted issue-image loader uses the same protocol-specific GitHub identity
+and attaches validated issue-body images to the Copilot turn as vision content.
 
 Model (inference) auth is selected automatically:
 
@@ -65,6 +69,14 @@ from copilot.session_events import (
     SessionIdleData,
 )
 from copilot.tools import Tool, ToolInvocation, ToolResult
+from issue_image_context import issue_image_attachments
+from media_inputs import (
+    MAX_ATTACHMENTS,
+    MediaInputError,
+    invocation_attachments,
+    redacted_input_items,
+    response_input,
+)
 
 load_dotenv(override=False)
 
@@ -280,7 +292,10 @@ def _build_mcp_servers(gh_token: str | None) -> dict:
     return servers
 
 
-def _session_options(mcp_servers: dict) -> dict:
+def _session_options(
+    mcp_servers: dict,
+    runtime_tools: list[Tool] | None = None,
+) -> dict:
     """Common ``create_session`` keyword arguments for both protocols."""
     provider, model = _byok_provider()
     return {
@@ -293,7 +308,9 @@ def _session_options(mcp_servers: dict) -> dict:
         "provider": provider,
         "model": model,
         "mcp_servers": mcp_servers or None,
-        "tools": _RUNTIME_TOOLS or None,
+        "tools": (
+            _RUNTIME_TOOLS if runtime_tools is None else runtime_tools
+        ) or None,
         "custom_agents": [
             _ISSUELENS_AGENT,
             _TRIAGE_AGENT,
@@ -458,11 +475,26 @@ def _notification_tools() -> list[Tool]:
 
 
 # Built once at startup from configured endpoint and App credential variables.
-_GITHUB_ACCESS_TOOL = _github_access_tool.create_tool(_github_app)
+_NOTIFICATION_TOOLS = _notification_tools()
+try:
+    _GITHUB_APP_PROVIDER = _github_app.GitHubAppTokenProvider.from_environment()
+except _github_app.GitHubAppError:
+    _GITHUB_APP_PROVIDER = None
+
+_GITHUB_APP_CLIENT = (
+    _github_app.GitHubAppClient(_GITHUB_APP_PROVIDER)
+    if _GITHUB_APP_PROVIDER
+    else None
+)
+_GITHUB_ACCESS_TOOL = (
+    _github_access_tool.create_tool(_github_app, client=_GITHUB_APP_CLIENT)
+    if _GITHUB_APP_CLIENT
+    else None
+)
 if _GITHUB_ACCESS_TOOL is None:
     logger.info("GitHub App chat tool is not configured")
 _RUNTIME_TOOLS = [
-    *_notification_tools(),
+    *_NOTIFICATION_TOOLS,
     *([_GITHUB_ACCESS_TOOL] if _GITHUB_ACCESS_TOOL else []),
 ]
 
@@ -470,18 +502,34 @@ _RUNTIME_TOOLS = [
 async def _stream_response(invocation_id: str, payload: dict):
     """Create a fresh session for this invocation and stream its events as SSE.
 
-    A new session is created per request so each run uses a freshly minted GitHub
-    App installation token and its own repository context (multi-tenant safe).
+    A new session is created per request so its GitHub MCP server and issue-image
+    tool use only that request's token and repository context.
     """
     client = await _ensure_client()
     mcp_servers = _build_mcp_servers(payload.get("github_token"))
     prompt = _build_prompt(payload)
+    attachments = payload.get("_copilot_attachments") or []
 
     if not prompt:
         yield f"data: {json.dumps({'type': 'error', 'message': 'empty task'})}\n\n".encode()
         return
 
-    session = await client.create_session(**_session_options(mcp_servers))
+    request_github_client = _github_app.GitHubAppClient(
+        _github_app.RequestTokenProvider(payload["github_token"])
+    )
+    try:
+        issue_attachments = await issue_image_attachments(
+            prompt,
+            request_github_client,
+            maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
+        )
+    except _github_app.GitHubAppError:
+        logger.info("Invocation issue-body images could not be loaded")
+        issue_attachments = []
+    attachments = [*attachments, *issue_attachments]
+    session = await client.create_session(
+        **_session_options(mcp_servers, _NOTIFICATION_TOOLS)
+    )
     session_id = getattr(session, "session_id", None)
 
     queue: asyncio.Queue = asyncio.Queue()
@@ -497,7 +545,7 @@ async def _stream_response(invocation_id: str, payload: dict):
 
     unsubscribe = session.on(on_event)
     try:
-        await session.send(prompt)
+        await session.send(prompt, attachments=attachments or None)
         while True:
             item = await queue.get()
             if item is None:
@@ -532,6 +580,9 @@ async def handle_invoke(request: Request) -> Response:
         )
         if not has_token:
             raise ValueError('provide a "github_token"')
+        data["_copilot_attachments"] = invocation_attachments(
+            data.get("attachments")
+        )
     except (json.JSONDecodeError, ValueError) as exc:
         return JSONResponse(
             status_code=400,
@@ -544,6 +595,14 @@ async def handle_invoke(request: Request) -> Response:
                         "critical ones."
                     ),
                     "github_token": "ghs_...",
+                    "attachments": [
+                        {
+                            "type": "blob",
+                            "data": "<base64>",
+                            "mimeType": "image/png",
+                            "displayName": "screenshot.png",
+                        }
+                    ],
                 },
             },
         )
@@ -556,7 +615,7 @@ async def handle_invoke(request: Request) -> Response:
 
 # ── Chat (responses protocol) ────────────────────────────────────────────────
 #
-# Chat uses the skill-owned github-access tool registered above for GitHub.
+# Chat uses the skill-owned GitHub tools registered above for GitHub.
 # A Foundry toolbox MCP server supplies only non-GitHub capabilities.
 
 _TOOLBOX_ENDPOINT_ENV = "TOOLBOX_ENDPOINT"
@@ -571,6 +630,7 @@ _GREETING = (
     "I'm IssueLens. Ask me to triage a repository's issues, find duplicates, "
     "label an issue, assign an owner, or send a triage report."
 )
+_ATTACHMENT_ONLY_PROMPT = "Analyze the attached content for this issue-triage task."
 _GITHUB_APP_UNCONFIGURED = (
     "GitHub access for chat isn't configured. Set `GITHUB_APP_ID` and "
     "`GITHUB_APP_PRIVATE_KEY_SECRET_URI` (hosted) or "
@@ -659,29 +719,53 @@ async def handle_chat(
     yield stream.emit_created()
     yield stream.emit_in_progress()
 
-    input_items = await context.get_input_items(resolve_references=False)
-    serialized_items = [
-        item.as_dict() if hasattr(item, "as_dict") else str(item)
-        for item in input_items
-    ]
+    input_items = await context.get_input_items(resolve_references=True)
     logger.info(
         "responses.user_input_items=%s",
-        json.dumps(serialized_items, ensure_ascii=False, default=str),
+        json.dumps(
+            redacted_input_items(input_items),
+            ensure_ascii=False,
+            default=str,
+        ),
     )
 
-    prompt = (await context.get_input_text()).strip()
-    logger.info("responses.user_input_text=%s", json.dumps(prompt, ensure_ascii=False))
-    if not prompt:
-        for event in stream.output_item_message(_GREETING):
+    try:
+        prompt, attachments = response_input(input_items)
+    except MediaInputError as exc:
+        logger.info("responses.media_input_rejected=%s", exc)
+        for event in stream.output_item_message(f"Unsupported attachment: {exc}"):
             yield event
         yield stream.emit_completed()
         return
+
+    prompt = prompt.strip()
+    logger.info("responses.user_input_text=%s", json.dumps(prompt, ensure_ascii=False))
+    if not prompt:
+        if attachments:
+            prompt = _ATTACHMENT_ONLY_PROMPT
+        else:
+            for event in stream.output_item_message(_GREETING):
+                yield event
+            yield stream.emit_completed()
+            return
 
     if not any(tool.name == "github-access" for tool in _RUNTIME_TOOLS):
         for event in stream.output_item_message(_GITHUB_APP_UNCONFIGURED):
             yield event
         yield stream.emit_completed()
         return
+
+    if _GITHUB_APP_CLIENT:
+        try:
+            issue_attachments = await issue_image_attachments(
+                prompt,
+                _GITHUB_APP_CLIENT,
+                maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
+            )
+        except _github_app.GitHubAppError:
+            logger.info("Chat issue-body images could not be loaded")
+            issue_attachments = []
+        attachments = [*attachments, *issue_attachments]
 
     conversation = (
         context.conversation_id
@@ -713,7 +797,7 @@ async def handle_chat(
     text = message.add_text_content()
     yield text.emit_added()
     try:
-        await session.send(prompt)
+        await session.send(prompt, attachments=attachments or None)
         while True:
             item = await queue.get()
             if item is None:

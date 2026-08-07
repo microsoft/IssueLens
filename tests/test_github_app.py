@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import pathlib
 import sys
 import unittest
@@ -57,6 +58,33 @@ class GitHubAppTests(unittest.IsolatedAsyncioTestCase):
                 )
             if request.url.path == "/repos/microsoft/IssueLens/issues/1/reactions":
                 return httpx.Response(200, json=[{"content": "+1"}])
+            if request.url.path == "/repos/microsoft/IssueLens/issues/1":
+                return httpx.Response(200, json={
+                    "number": 1,
+                    "body": (
+                        "![screenshot](https://github.com/user-attachments/"
+                        "assets/12345678-1234-1234-1234-123456789abc)\n"
+                        "![ignored](https://example.com/internal.png)"
+                    ),
+                })
+            if request.url.path == (
+                "/user-attachments/assets/12345678-1234-1234-1234-123456789abc"
+            ):
+                return httpx.Response(
+                    302,
+                    headers={
+                        "Location": (
+                            "https://github-production-user-asset-1.s3.amazonaws.com/"
+                            "123/image.png?signature=test"
+                        )
+                    },
+                )
+            if request.url.host == "github-production-user-asset-1.s3.amazonaws.com":
+                return httpx.Response(
+                    200,
+                    content=b"\x89PNG\r\n\x1a\nimage bytes",
+                    headers={"Content-Type": "image/png"},
+                )
             if request.url.path == "/repos/microsoft/IssueLens/issues/1/labels":
                 return httpx.Response(200, json=[{"name": "bug"}])
             return httpx.Response(404, json={"message": "Not Found"})
@@ -120,6 +148,53 @@ class GitHubAppTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(reactions, [{"content": "+1"}])
+
+    @patch.object(github_app.jwt, "encode", return_value="app-jwt")
+    async def test_get_issue_images_downloads_allowlisted_image_without_leaking_token(self, _):
+        client = github_app.GitHubAppClient(self.provider, self.transport)
+
+        result = await client.execute(
+            "get-issue-images", "microsoft/IssueLens", issue_number=1
+        )
+
+        self.assertEqual(result["discovered_count"], 1)
+        self.assertEqual(result["skipped_count"], 0)
+        self.assertEqual(len(result["images"]), 1)
+        self.assertEqual(result["images"][0]["mime_type"], "image/png")
+        self.assertEqual(
+            base64.b64decode(result["images"][0]["data"]),
+            b"\x89PNG\r\n\x1a\nimage bytes",
+        )
+        asset_call = next(
+            call for call in self.calls if call.url.host == "github.com"
+        )
+        redirect_call = next(
+            call
+            for call in self.calls
+            if call.url.host == "github-production-user-asset-1.s3.amazonaws.com"
+        )
+        self.assertEqual(
+            asset_call.headers["Authorization"], "Bearer installation-secret"
+        )
+        self.assertNotIn("Authorization", redirect_call.headers)
+
+    async def test_issue_image_rejects_content_type_spoofing(self):
+        transport = httpx.MockTransport(lambda request: httpx.Response(
+            200,
+            content=b"not really a png",
+            headers={"Content-Type": "image/png"},
+        ))
+        async with httpx.AsyncClient(transport=transport) as client:
+            with self.assertRaisesRegex(
+                github_app.GitHubAppError, "does not match"
+            ):
+                await github_app.GitHubAppClient._download_issue_image(
+                    client,
+                    "https://github.com/user-attachments/assets/"
+                    "12345678-1234-1234-1234-123456789abc",
+                    "installation-secret",
+                    1024,
+                )
 
     @patch.object(github_app.jwt, "encode", return_value="app-jwt")
     async def test_add_labels_uses_only_the_issue_labels_route(self, _):

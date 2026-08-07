@@ -33,9 +33,10 @@ reachable two ways: the **invocations** protocol for automation and the
   two protocols in one process:
   - **`POST /invocations`** — automation (GitHub Actions). Each request opens a
     fresh Copilot session and streams session events back as SSE.
-    **Invocation payload:** exactly two fields —
-    `{ "input": "<free-form task>", "github_token": "<token>" }`. `input` is the
-    task; `github_token` authenticates the GitHub MCP server.
+    **Invocation payload:** two required fields and one optional field —
+    `{ "input": "<free-form task>", "github_token": "<token>", "attachments": [] }`.
+    `input` is the task; `github_token` authenticates the GitHub MCP server;
+    `attachments` contains validated inline Copilot `blob` attachments.
     If the GitHub MCP server returns an authentication or permission error,
     respond immediately with HTTP 400 and body
     `{ "error": "github_token invalid or insufficient scopes" }`; do not proceed
@@ -45,6 +46,12 @@ reachable two ways: the **invocations** protocol for automation and the
     from Azure Key Vault, resolves the installation for each target repository,
     and caches its short-lived token. The token never enters model context. The
     conversation's Copilot session is resumed each turn.
+  - **Issue-body images** — before the model turn, the trusted host loader
+    resolves explicit issue URLs or `owner/repository#number` references using
+    the protocol's GitHub identity, accepts only allowlisted GitHub-hosted image
+    URLs, validates redirects, type signatures, count, and size, and supplies
+    Copilot blob attachments. It never exposes tokens or lets the model choose
+    arbitrary download URLs.
   - **Model (inference) auth (auto-selected):** BYOK Foundry model
     (`FOUNDRY_PROJECT_ENDPOINT` + `AZURE_AI_MODEL_DEPLOYMENT_NAME`, using
     `AZURE_AI_MODEL_API_KEY` or a Managed Identity token), or the GitHub Copilot
@@ -66,10 +73,15 @@ reachable two ways: the **invocations** protocol for automation and the
     returns **only** the critical-issue JSON report.
 - **Skills** (`skills/`): `github-access` (chat GitHub App operations),
   `find-duplicates`, `label-issue`, `assign-issue`, and `notify`.
+- **Media inputs** — `media_inputs.py` normalizes Responses `input_image` and
+  `input_file` content and invocation `blob` attachments into Copilot session
+  attachments. Only inline base64 content is accepted; remote URLs, file IDs,
+  and request-supplied server paths are rejected.
 - **GitHub access** — invocations use the remote GitHub MCP server
   (`https://api.githubcopilot.com/mcp/`) authenticated with the payload's
-  `github_token`; chat uses only the skill-owned `github-access` tool. Follow
-  the `github-access` skill before every GitHub read or write.
+  `github_token`; chat uses only the skill-owned `github-access` tool. The host
+  image loader uses the same protocol-specific identity. Follow the
+  `github-access` skill before every GitHub read or write.
 - **Runtime configuration** — `main.py` explicitly loads `agents.md`,
   both sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config
@@ -93,7 +105,8 @@ The agent is driven by a workflow in the target repo
 
 1. Mint a GitHub App installation token with `actions/create-github-app-token`.
 2. Authenticate to the Foundry agent endpoint via **Azure OIDC** (`azure/login`).
-3. POST `{ input, github_token }` to the agent's invocations endpoint.
+3. POST `{ input, github_token, attachments? }` to the agent's invocations
+  endpoint.
 
 Triggers: `issues` opened/reopened (label the issue), `schedule` (batch triage),
 and `workflow_dispatch`.
@@ -115,7 +128,7 @@ and `workflow_dispatch`.
 ## Layout
 
 - `main.py` — agent server, session wiring, custom-agent registration
-- `agents.md` — global IssueLens identity and current runtime scope
+- `agents.md` — global IssueLens identity and current runtime scope, works as orchestrator for sub-agents and skills
 - `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`)
 - `skills/` — modular skills (`find-duplicates`, `label-issue`, `assign-issue`,
   `notify`)

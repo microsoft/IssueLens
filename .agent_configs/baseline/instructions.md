@@ -1,0 +1,1 @@
+Evaluate IssueLens on GitHub issue triage: summarize and classify issues, identify hot/blocking/regression signals, use attached visual evidence safely, find high-confidence duplicates, recommend existing labels and individual assignees, and preserve authorization boundaries for writes.

@@ -80,8 +80,11 @@ jobs:
           set -euo pipefail
 
           # Build the invocation payload based on the trigger. The agent takes a
-          # 2-field payload: "input" (a free-form task prompt) and "github_token"
-          # (used to authenticate the GitHub MCP server as the App bot).
+          # payload with "input" (a free-form task prompt), "github_token" (used
+          # to authenticate GitHub as the App bot), and optional inline
+          # "attachments". Issue-body images need no workflow handling: the
+          # trusted host loader resolves the issue reference and loads them with
+          # this same request-scoped token before the model turn.
           if [ "$EVENT" = "issues" ]; then
             input="Process GitHub issue ${REPO}#${ISSUE} using the available GitHub tools. "
             input+="First, find and report potential duplicate or related issues without closing or modifying the target issue. "

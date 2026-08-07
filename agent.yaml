@@ -31,10 +31,6 @@ environment_variables:
     value: ${MAILING_URL}
   - name: PERSONAL_NOTIFICATION_URL
     value: ${PERSONAL_NOTIFICATION_URL}
-  # Default email recipients for the triage report (comma-separated). Optional —
-  # the workflow can also pass recipients in the task input.
-  - name: RECIPIENTS
-    value: ${RECIPIENTS}
 description: >
   IssueLens — a GitHub issue-triage agent built on the GitHub Copilot SDK
   (CopilotClient). It serves the invocations protocol for automation (GitHub

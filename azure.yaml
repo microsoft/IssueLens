@@ -30,8 +30,6 @@ services:
               value: ${MAILING_URL}
             - name: PERSONAL_NOTIFICATION_URL
               value: ${PERSONAL_NOTIFICATION_URL}
-            - name: RECIPIENTS
-              value: ${RECIPIENTS}
         kind: hosted
         name: IssueLens
         protocols:
