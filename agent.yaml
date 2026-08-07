@@ -17,9 +17,12 @@ environment_variables:
     value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
   - name: AZURE_AI_MODEL_API_KEY
     value: ${AZURE_AI_MODEL_API_KEY}
-  # Chat (responses protocol) — Foundry toolbox MCP endpoint. Its GitHub MCP
-  # connection uses managed OAuth2, so each chat caller consents once and
-  # Foundry owns their tokens.
+  # Chat — GitHub App registration and Key Vault-backed private key.
+  - name: GITHUB_APP_ID
+    value: ${GITHUB_APP_ID}
+  - name: GITHUB_APP_PRIVATE_KEY_SECRET_URI
+    value: ${GITHUB_APP_PRIVATE_KEY_SECRET_URI}
+  # Chat — non-GitHub capabilities exposed by the Foundry toolbox.
   - name: TOOLBOX_ENDPOINT
     value: ${TOOLBOX_ENDPOINT}
   # Notifications — Logic App HTTP endpoints (contain SAS signatures; store as
@@ -36,10 +39,10 @@ description: >
   IssueLens — a GitHub issue-triage agent built on the GitHub Copilot SDK
   (CopilotClient). It serves the invocations protocol for automation (GitHub
   Actions) and the responses protocol for chat. It triages issues
-  (hot/blocking/regression) and applies labels via the remote GitHub MCP server,
-  authenticated with a GitHub token supplied per request (invocations) or via a
-  Foundry toolbox with a managed-OAuth2 GitHub connection (chat). Notification
-  tools are provided by the Foundry toolbox.
+  (hot/blocking/regression) and applies labels through a request-scoped GitHub
+  MCP token (invocations) or the skill-backed IssueLens GitHub App tool (chat).
+  Non-GitHub notification capabilities may also be supplied by the Foundry
+  toolbox. GitHub access never uses the toolbox.
 metadata:
   tags:
     - AI Agent Hosting

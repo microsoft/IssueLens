@@ -19,6 +19,10 @@ Only the tools whose endpoints are configured are available. If a needed tool is
 not present in the tool list, that channel isn't set up — say so; do not
 fabricate a send.
 
+The Foundry toolbox may expose additional notification capabilities. Toolbox
+tools are for non-GitHub operations only; all GitHub access must follow the
+`github-access` skill and use the `github-access` tool in chat.
+
 ## Inputs
 
 - The report content (typically the JSON summary produced by the Critical Issue

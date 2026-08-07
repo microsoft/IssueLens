@@ -51,9 +51,9 @@ matches in `possiblyRelated`; do not describe them as duplicates.
 2. Extract specific search signals: error strings, exception names, stack-frame
    functions, reproduction steps, component labels, file paths, environment,
    symptoms, and triggers.
-3. Search the same repository with the GitHub MCP issue-search tool. Query the
-   strongest signals first and include both open and closed issues. Exclude pull
-   requests and the target issue itself.
+3. Search the same repository with the available GitHub issue-search operation.
+  Query the strongest signals first and include both open and closed issues.
+  Exclude pull requests and the target issue itself.
 4. Search within the requested window, or the last 90 days by default. If the
    issue references an older report, include that report regardless of age.
 5. Read the most relevant candidates and their comments. Do not judge a result
@@ -65,7 +65,9 @@ matches in `possiblyRelated`; do not describe them as duplicates.
 
 ## Rules
 
-- Use only GitHub MCP tools for every GitHub read and search. Never use shell
+- Follow the `github-access` skill for every GitHub read. Use only the
+  request-scoped GitHub MCP tools (invocations) or `github-access` tool (chat)
+  for every GitHub read and search. Never use shell
   commands, direct HTTP requests, or the GitHub CLI.
 - This skill is read-only. Do not close, label, comment on, or otherwise modify
   an issue. A recommendation is not an action.

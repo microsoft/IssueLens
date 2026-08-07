@@ -29,8 +29,8 @@ areas' keywords and path patterns. The format is described in
 
 ### Historical patterns
 
-Use the GitHub MCP issue-search tools to find similar closed (and recently
-resolved) issues in the same repository:
+Use the available GitHub issue-search operation to find similar closed (and
+recently resolved) issues in the same repository:
 
 1. Search using the most specific terms from the issue title, body, and labels.
 2. Prefer issues updated in the last 6 to 12 months.
@@ -59,14 +59,16 @@ returns no similar issues with a clear, recurring assignee.
    - Strategies conflict or evidence is weak: low confidence; report candidates
      and do not assign automatically.
 5. For a medium- or high-confidence individual user, update the issue with the
-   GitHub MCP issue-write tool using `method: update`. Pass the union of existing
-   assignees and the selected username so no current assignment is removed.
+  available assignment operation. Pass the union of existing assignees and the
+  selected username so no current assignment is removed.
 6. Read the issue again and confirm that the selected assignee is present.
 7. Report the decision, evidence, and whether the write was confirmed.
 
 ## Rules
 
-- Use only the GitHub MCP server for every read, search, and write. Never use a
+- Follow the `github-access` skill for every GitHub read or write. Use only the
+  request-scoped GitHub MCP tools (invocations) or `github-access` tool (chat)
+  for every read, search, and write. Never use a
   shell command, bundled script, direct HTTP request, or GitHub CLI command.
 - Never remove or replace existing assignees.
 - Do not assign a team handle directly; GitHub issue assignees must be

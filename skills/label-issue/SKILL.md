@@ -23,8 +23,8 @@ GitHub tools and repository-specific labeling rules.
    - **Priority** — identify severity indicators (core function broken, no
      workaround → high).
    - **Area/component** — match content against area-specific labels.
-5. **Apply labels:** use the GitHub tools (e.g. add-labels-to-issue) to add the
-   selected labels. Do not remove existing labels.
+5. **Apply labels:** use the available add-labels operation to add the selected
+   labels. Do not remove existing labels.
 6. **Report:** list the labels applied and the reasoning for each.
 
 ## Rules
@@ -32,6 +32,9 @@ GitHub tools and repository-specific labeling rules.
 - Only add labels that exist in the repository. Never invent labels.
 - Preserve existing labels; only add.
 - Prefer the repository's `.github/label-instructions.md` rules when present.
+- Follow the `github-access` skill for every GitHub read or write. Use
+   request-scoped GitHub MCP tools for invocations or the `github-access` tool
+   for chat. Never use shell commands, direct HTTP, or the GitHub CLI.
 
 ## Output
 

@@ -10,9 +10,9 @@ reachable two ways: the **invocations** protocol for automation and the
 
 ## Main features
 
-- **Critical-issue triage** — a dedicated *Critical Issue Analyst* sub-agent
-  scans issues updated within the last 24 hours (configurable via
-  `TRIAGE_WINDOW_HOURS`, default: `24`) and returns a structured JSON report
+- **Critical-issue triage** — the `find-criticals` sub-agent
+  scans issues updated within the requested time scope (default: the last 24
+  hours) and returns a structured JSON report
   identifying **hot**, **blocking**, and **regression** issues.
 - **Duplicate detection** — compares a target issue with open and closed issues
   using strict technical evidence and reports high-confidence duplicates.
@@ -22,9 +22,9 @@ reachable two ways: the **invocations** protocol for automation and the
   mappings and historical assignment patterns.
 - **Notifications** — sends triage reports via **WorkIQ** (Microsoft 365) as
   email or Teams messages.
-- **App-scoped GitHub access** — every GitHub action flows through the GitHub MCP
-  server using a per-request GitHub App installation token (attributed to the
-  App bot, never an ambient user identity).
+- **App-scoped GitHub access** — invocations use GitHub MCP with the request
+  token; chat uses one skill-backed in-process tool. Both act as the App bot,
+  never an ambient user identity.
 
 ## Architecture
 
@@ -41,14 +41,10 @@ reachable two ways: the **invocations** protocol for automation and the
     `{ "error": "github_token invalid or insufficient scopes" }`; do not proceed
     with any GitHub operations.
   - **`POST /responses`** — chat (playground, Teams, any Responses client).
-    There is no payload token, so GitHub access goes through a **Foundry
-    toolbox** (`TOOLBOX_ENDPOINT`) whose GitHub MCP connection uses managed
-    OAuth2. The agent authenticates to the toolbox with its own Azure AD token
-    (scope `https://ai.azure.com/.default`) and forwards the per-request
-    `x-agent-foundry-call-id`. Before each turn it probes `tools/list`; on a
-    JSON-RPC `-32006` / `CONSENT_REQUIRED` error it replies with the consent
-    URL instead of failing. The conversation's Copilot session is resumed each
-    turn so chat stays multi-turn while the token and call ID stay fresh.
+    There is no payload token, so the `github-access` tool loads the App private key
+    from Azure Key Vault, resolves the installation for each target repository,
+    and caches its short-lived token. The token never enters model context. The
+    conversation's Copilot session is resumed each turn.
   - **Model (inference) auth (auto-selected):** BYOK Foundry model
     (`FOUNDRY_PROJECT_ENDPOINT` + `AZURE_AI_MODEL_DEPLOYMENT_NAME`, using
     `AZURE_AI_MODEL_API_KEY` or a Managed Identity token), or the GitHub Copilot
@@ -56,39 +52,39 @@ reachable two ways: the **invocations** protocol for automation and the
     BYOK Foundry model; fall back to the GitHub Copilot model (`GITHUB_TOKEN`)
     only when `FOUNDRY_PROJECT_ENDPOINT` is absent.
 - **Custom agents** (registered in `main.py`):
-  - **`issuelens`** — the orchestrator. Delegates analysis to the analyst, then
-    performs duplicate detection, labeling, assignment, and notifications via
-    its preloaded skills. If the
-    analyst's response is not valid JSON or is an empty object, stop, skip
+  - **`issuelens`** — the global agent identity. Its system prompt lives in
+    `agents.md`. It routes issue-level analysis to `triage` and critical-issue
+    scans to `find-criticals`. If the
+    sub-agent's response is not valid JSON or is an empty object, stop, skip
     labeling and notifications, and surface this error message:
     `Triage report could not be parsed; skipping downstream actions.`
-  - **`critical-issue-analyst`** — the triage sub-agent; its prompt lives in
-    `agents/critical-issue-analyst.md` and it returns **only** the JSON report.
-- **Skills** (`skills/`): `find-duplicates` (identify duplicate and related
-  issues via GitHub MCP tools), `label-issue` (apply labels via GitHub MCP
-  tools), `assign-issue` (route and assign issues via GitHub MCP tools), and
-  `notify` (send the report via the `workiq-*` MCP tools).
+  - **`triage`** — analyzes target issues and performs requested duplicate,
+    label, assignment, and notification work through its preloaded skills. Its
+    prompt lives in `agents/triage.md`.
+  - **`find-criticals`** — scans a repository and time scope for hot, blocking,
+    and regression issues. Its prompt lives in `agents/find-criticals.md` and it
+    returns **only** the critical-issue JSON report.
+- **Skills** (`skills/`): `github-access` (chat GitHub App operations),
+  `find-duplicates`, `label-issue`, `assign-issue`, and `notify`.
 - **GitHub access** — invocations use the remote GitHub MCP server
   (`https://api.githubcopilot.com/mcp/`) authenticated with the payload's
-  `github_token`; chat uses the Foundry toolbox MCP endpoint
-  (`TOOLBOX_ENDPOINT`) with its managed-OAuth2 GitHub connection.
-- **Config auto-discovery** — the Copilot harness discovers supporting config
-  from the project root, so capabilities can be added **without editing
-  `main.py`**:
-  - Instructions: `AGENTS.md`, `.github/copilot-instructions.md`, `*.instructions.md`
-  - MCP servers: `.mcp.json`, `.vscode/mcp.json` (WorkIQ tools come from the
-    Foundry toolbox)
-  - Skills: `skills/` · Hooks: `.github/hooks/` · Plugins: plugin directories
+  `github_token`; chat uses only the skill-owned `github-access` tool. Follow
+  the `github-access` skill before every GitHub read or write.
+- **Runtime configuration** — `main.py` explicitly loads `agents.md`,
+  both sub-agent prompts under `agents/`, and the skill directories. Explicit
+  loading keeps local and hosted behavior identical without enabling config
+  discovery in the read-only hosted code directory.
 
 ## Conventions
 
-- **All GitHub access goes through the GitHub MCP server** — never shell out to
-  `gh` / `bash` / `powershell` for GitHub operations. This keeps writes
-  attributed to the App bot. See `AGENTS.md`.
-- The analyst returns **only** the JSON object (no prose); the orchestrator
-  preserves that report at the very end of its response.
-- Prefer adding a **skill, agent, or instruction file** (picked up by config
-  discovery) over changing `main.py`.
+- **GitHub access follows the protocol boundary** — first follow the
+  `github-access` skill; invocations then use GitHub MCP and chat uses only the
+  `github-access` tool. Never shell out to `gh` / `bash` / `powershell`, call
+  GitHub over direct HTTP, or expose App credentials. See `agents.md`.
+- Only `find-criticals` is required to return JSON, which IssueLens preserves at
+  the end of its response. `triage` may use the format appropriate for its task.
+- Prefer adding behavior to a skill or sub-agent prompt before changing
+  `main.py`; register new runtime components explicitly when needed.
 
 ## Triggering (GitHub Actions)
 
@@ -107,6 +103,11 @@ and `workflow_dispatch`.
 - **Local:** `pip install -r requirements.txt`, copy `.env.example` → `.env` and
   fill it in, then `python main.py` (serves `/invocations` and `/responses` on
   `:8088`).
+- **Deployment approval gate:** never deploy, redeploy, roll back, or otherwise
+  publish an agent version to Microsoft Foundry unless the user explicitly
+  authorizes that deployment in the current request. Permission to edit, test,
+  investigate, or prepare deployment changes does not imply permission to
+  deploy them.
 - **Deploy to Foundry:** `azd deploy` — see `azure.yaml` (Python hosted agent,
   `codeConfiguration` remote build) and `agent.yaml` (hosted-agent manifest). A
   `Dockerfile` is also provided for a container build.
@@ -114,9 +115,9 @@ and `workflow_dispatch`.
 ## Layout
 
 - `main.py` — agent server, session wiring, custom-agent registration
-- `agents/` — sub-agent prompts (`critical-issue-analyst.md`)
+- `agents.md` — global IssueLens identity and current runtime scope
+- `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`)
 - `skills/` — modular skills (`find-duplicates`, `label-issue`, `assign-issue`,
   `notify`)
-- `AGENTS.md` — agent behavior rules
 - `azure.yaml` / `agent.yaml` / `Dockerfile` — deployment config
 - `.github/workflows/issuelens.yml` — the triggering workflow

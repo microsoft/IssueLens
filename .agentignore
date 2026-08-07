@@ -10,12 +10,18 @@
 .venv/
 __pycache__/
 *.pyc
+tests/
 
 # Copilot runtime home (created at runtime)
 .issuelens-copilot/
 
+# Local Azure / Foundry deployment state
+.azure/
+.foundry/
+
 # Local dev / editor
 .vscode/
+.github/
 .git/
 
 # Container path — not used for code deploy
@@ -25,3 +31,4 @@ Dockerfile
 # Separate transports / CI assets, not part of the agent runtime
 webhook_bridge/
 templates/
+deck/

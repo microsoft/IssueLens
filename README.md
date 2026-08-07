@@ -6,7 +6,7 @@ A GitHub issue-triage agent built on the [GitHub Copilot SDK](https://pypi.org/p
 
 ## How It Works
 
-Both protocols run in the same process and share the same orchestrator, skills, and sub-agent; only how the GitHub token is obtained differs.
+Both protocols run in the same process and share the same orchestrator, skills, and two sub-agents; only how the GitHub token is obtained differs.
 
 ### Automation — `POST /invocations`
 
@@ -14,16 +14,17 @@ Both protocols run in the same process and share the same orchestrator, skills, 
 2. Creates a **fresh Copilot session per request** configured with:
    - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
    - the remote **GitHub MCP server**, authenticated with the `github_token` from the payload — so the agent reads issues and applies labels as that token's identity;
-   - **notification tools provided by the Foundry toolbox**.
-3. The preselected `issuelens` orchestrator delegates analysis to the runtime **Critical Issue Analyst** sub-agent registered with the Copilot SDK, then runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions.
-4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Triage runs end with a JSON summary.
+  - in-process notification tools when their Logic App endpoints are configured.
+3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents.md`. It routes issue-level work to `triage` and critical-issue scans to `find-criticals`. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions.
+4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Critical-issue scans end with a JSON report.
 
 ### Chat — `POST /responses`
 
 1. Receives an OpenAI Responses request (Foundry playground, Teams, or any Responses client).
-2. Reaches GitHub through a **Foundry toolbox** (`TOOLBOX_ENDPOINT`) whose GitHub MCP connection uses **managed OAuth2** — Foundry prompts each caller for consent once and owns their tokens and refresh. The agent authenticates to the toolbox with its own Azure AD token (scope `https://ai.azure.com/.default`) and forwards the per-request `x-agent-foundry-call-id` so the toolbox resolves who is calling.
-3. Before each turn it probes the toolbox with `tools/list`. If Foundry returns the JSON-RPC `-32006` / `CONSENT_REQUIRED` error, the agent replies with the consent URL instead of failing.
-4. Resumes the conversation's Copilot session each turn (fresh token + call ID per turn, history preserved) and streams the reply as Responses SSE events.
+2. Loads the `github-access` skill and calls its skill-owned `github-access` tool. The tool resolves the App installation for each `owner/repository`, mints and caches its short-lived installation token, and never returns credentials to the model.
+3. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
+4. Performs only allowlisted issue-triage operations: repository/file reads, issue and comment reads/searches, label reads/additions, and assignee updates.
+5. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
 
 ## Environment Variables
 
@@ -41,32 +42,53 @@ If the Foundry variables are set they take precedence over `GITHUB_TOKEN`.
 
 For **invocations**, the agent authenticates the remote GitHub MCP server with the `github_token` supplied in each payload — there is nothing to configure via environment variables.
 
-For **chat**, there is no payload token, so GitHub access goes through a Foundry toolbox with a managed-OAuth2 GitHub connection:
+For **chat**, configure the IssueLens GitHub App registration. Every request
+names its target as `owner/repository`, and the tool resolves the matching App
+installation dynamically:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `TOOLBOX_ENDPOINT` | For chat | Toolbox MCP endpoint, e.g. `https://<account>.services.ai.azure.com/api/projects/<project>/toolboxes/<toolbox>/mcp?api-version=v1`. The `?api-version=v1` query string is required |
+| `GITHUB_APP_ID` | For chat | Numeric GitHub App ID |
+| `GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Hosted chat | Azure Key Vault secret URI containing the App PEM |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | Local chat | Path to an ignored local PEM, such as `.secrets/issuelens.pem` |
 | `GITHUB_MCP_URL` | No | GitHub MCP endpoint used by the **invocations** path (default `https://api.githubcopilot.com/mcp/`). Override for GitHub Enterprise |
 
-Create the connection and toolbox once:
+Store the PEM in Key Vault; never place it in `.env`, an azd environment, or a
+deployment manifest. Grant the hosted agent's managed identity **Key Vault
+Secrets User**, then configure only the App ID and secret URI:
 
-```bash
-azd ai connection create github-oauth-conn \
-  --kind remote-tool \
-  --target https://api.githubcopilot.com/mcp \
-  --auth-type oauth2 \
-  --managed-connector foundrygithubmcp
+```powershell
+# Run directly in your own terminal so the PEM never passes through chat.
+az keyvault secret set --vault-name <vault> --name issuelens-github-app-key `
+  --file .secrets/issuelens.pem
 
-azd ai toolbox create issuelens-tools --from-file ./toolbox.yaml
-azd ai toolbox show issuelens-tools --output json   # copy the MCP endpoint
-azd env set TOOLBOX_ENDPOINT "<mcp-endpoint>"
+azd env set GITHUB_APP_ID <app-id>
+azd env set GITHUB_APP_PRIVATE_KEY_SECRET_URI `
+  "https://<vault>.vault.azure.net/secrets/issuelens-github-app-key"
 ```
 
-The agent calls the toolbox with its own identity, so it needs data-plane access to the Foundry project (`Foundry User` or `Azure AI Developer`). Locally that identity comes from `az login`; when hosted it's the agent's managed identity. Foundry stores and refreshes the per-user GitHub tokens — none are held by this codebase.
+Each target repository must be included in an installation of the App. The
+helper caches tokens by installation and refreshes them five minutes before
+expiry. Configure the App with **Metadata: Read**, **Issues: Read and write**,
+and **Contents: Read** (for repository instruction and owner-mapping files).
+It does not start an MCP server and never exposes tokens to the model.
+
+### Foundry toolbox
+
+Set `TOOLBOX_ENDPOINT` to the versioned MCP endpoint for the toolbox containing
+non-GitHub chat capabilities. GitHub must remain excluded from this toolbox;
+chat GitHub access is provided only by the `github-access` tool.
+
+Verify a repository installation locally without printing the token:
+
+```powershell
+python skills/github-access/scripts/github_app.py microsoft/IssueLens
+```
 
 ### Notifications
 
-WorkIQ (notification) tools are provided by the **Foundry toolbox** and are not configured in this codebase.
+Email and Teams notification tools are registered in process when their Logic
+App endpoint variables are configured.
 
 ## Running Locally
 
@@ -173,8 +195,8 @@ curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
   -d '{"input": "Summarize open issues in owner/repo", "github_token": "ghs_..."}'
 
-# Chat (responses protocol) — no token in the body; GitHub access comes from
-# the Foundry toolbox, which prompts for OAuth consent on first use.
+# Chat (responses protocol) — no token in the body; the skill-backed tool
+# resolves the repository's App installation internally.
 curl -N -X POST http://localhost:8088/responses \
   -H "Content-Type: application/json" \
   -d '{"input": "Find duplicates for issue owner/repo#123", "stream": true}'
@@ -201,7 +223,9 @@ Invocations (`POST /invocations`):
 | `input` | Yes | The task — a free-form text prompt describing what to triage, label, or report |
 | `github_token` | Yes | GitHub token used to authenticate the remote GitHub MCP server (e.g. minted by a GitHub Actions workflow) |
 
-Chat (`POST /responses`) takes a standard OpenAI Responses body; GitHub auth is handled by the Foundry toolbox's managed-OAuth2 connection.
+Chat (`POST /responses`) takes a standard OpenAI Responses body; GitHub auth is
+handled internally by the `github-access` skill helper and tool
+tool.
 
 ### SSE Event Format
 
@@ -289,20 +313,29 @@ For the full deployment guide, see [Azure AI Foundry hosted agents](https://aka.
 
 ## Sub-agent and skills
 
-The Foundry hosted agent registers both the `issuelens` orchestrator and the `critical-issue-analyst` sub-agent as Copilot SDK `CustomAgentConfig` objects in `main.py`. The analyst prompt is maintained separately and loaded explicitly at startup, so VS Code does not discover it as a workspace custom agent:
+The Foundry hosted agent registers the `issuelens` orchestrator and its two sub-agents, `triage` and `find-criticals`, as Copilot SDK `CustomAgentConfig` objects in `main.py`. All prompts are loaded explicitly at startup so their behavior is consistent locally and in the hosted package:
 
 ```
+agents.md                   ← global IssueLens identity and current scope
+
 agents/
-└── critical-issue-analyst.md  ← runtime sub-agent prompt
+├── triage.md               ← issue-level triage and recommendations
+└── find-criticals.md        ← critical-issue scan and JSON report
 
 skills/
-├── find-duplicates/ ← identify duplicate and related issues via GitHub MCP
-├── label-issue/     ← classify and apply labels via GitHub MCP
-├── assign-issue/    ← route and assign issues via GitHub MCP
-└── notify/          ← send the report via WorkIQ
+├── github-access/   ← instructions, App client, and skill-owned SDK tool
+├── find-duplicates/ ← identify duplicate and related issues
+├── label-issue/     ← classify and apply labels
+├── assign-issue/    ← route and assign issues
+└── notify/          ← send the report via configured notification tools
 ```
 
-The **Critical Issue Analyst** is available to the parent through runtime sub-agent inference. It uses the request-scoped GitHub MCP server inherited from the session, identifies hot, blocking, and regression issues, and returns the structured JSON report. Issue mutations and notifications remain the responsibility of the parent orchestrator.
+Both sub-agents are available to IssueLens through runtime inference. `triage`
+analyzes target issues and owns requested duplicate, label, assignment, and
+notification work. `find-criticals` scans a repository and time scope for hot,
+blocking, and regression issues and returns the structured report. Both follow
+the `github-access` boundary, while `agents.md` keeps the parent IssueLens agent
+responsible for selecting and sequencing them.
 
 Any subdirectory under `skills/` containing a `SKILL.md` file is loaded by the Copilot SDK.
 

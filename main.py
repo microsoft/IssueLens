@@ -16,12 +16,10 @@ The invocation payload has exactly two fields:
 * ``github_token`` — a GitHub token used to authenticate the remote GitHub MCP
   server, so the agent reads issues / applies labels as that token's identity.
 
-Chat has no payload to carry a token, so GitHub access goes through a Foundry
-**toolbox** (``TOOLBOX_ENDPOINT``) whose GitHub MCP connection uses managed
-OAuth2. Foundry prompts each caller for consent once — surfaced as a JSON-RPC
-``-32006`` error carrying the consent URL — and owns their tokens and refresh.
-The agent authenticates to the toolbox with its own Azure AD token and forwards
-the per-request call ID so the toolbox can resolve who is calling.
+Chat has no payload token, so the skill-owned ``github-access`` tool uses the
+IssueLens GitHub App. Its bundled skill helper resolves the installation for
+each target repository, mints and caches a short-lived token, and performs only
+the allowlisted issue-triage operations. Tokens are never returned to the model.
 
 Model (inference) auth is selected automatically:
 
@@ -37,6 +35,7 @@ when its endpoint env var is set.
 """
 
 import asyncio
+import importlib.util
 import json
 import logging
 import os
@@ -45,6 +44,7 @@ import sys
 import time
 
 import httpx
+from azure.core.credentials import AccessToken
 from dotenv import load_dotenv
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
@@ -83,65 +83,80 @@ _client_lock = asyncio.Lock()
 _project_dir = pathlib.Path(__file__).parent
 _agents_dir = _project_dir / "agents"
 _skills_dir = str(_project_dir / "skills")
-# The agent's configuration root. The Copilot harness discovers all agent
-# configuration from here, so new config files can be dropped in without any
-# code change:
-#   • instructions — AGENTS.md, .github/copilot-instructions.md, *.instructions.md
-#   • MCP servers  — .mcp.json, .vscode/mcp.json
-#   • skills       — skill directories (see skills/)
-#   • hooks        — .github/hooks/
-#   • plugins      — plugin directories
-_config_dir = str(_project_dir)
+_github_app_script = (
+    _project_dir / "skills" / "github-access" / "scripts" / "github_app.py"
+)
+_github_access_tool_script = (
+    _project_dir / "skills" / "github-access" / "scripts" / "tool.py"
+)
+
+
+def _load_module(name: str, path: pathlib.Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_github_app = _load_module("issuelens_github_app", _github_app_script)
+_github_access_tool = _load_module(
+    "issuelens_github_access_tool", _github_access_tool_script
+)
 _working_dir = (
     os.environ.get("HOME")
     or os.environ.get("USERPROFILE")
     or os.getcwd()
 )
 
-# The IssueLens orchestrator delegates issue analysis to the runtime
-# Critical Issue Analyst sub-agent, then handles duplicate detection, labeling,
-# assignment, and notifications via its preloaded skills.
+
+def _load_prompt(path: pathlib.Path) -> str:
+    return path.read_text(encoding="utf-8").strip()
+
+
+# The global agent identity is maintained as a deployable system prompt instead
+# of being embedded in application wiring.
 _ISSUELENS_AGENT: CustomAgentConfig = {
     "name": "issuelens",
-    "display_name": "IssueLens Orchestrator",
+    "display_name": "IssueLens",
     "description": (
-        "Orchestrates GitHub issue triage, duplicate detection, labeling, "
-        "assignment, and notifications."
+        "Triages GitHub repository issues and performs requested duplicate, "
+        "labeling, assignment, and notification follow-up actions."
     ),
-    "prompt": (
-        "You are IssueLens, the GitHub issue-triage orchestrator. For every "
-        "triage request, delegate issue retrieval, criticality analysis, and "
-        "JSON report generation to the Critical Issue Analyst sub-agent. Use "
-        "the returned report to perform any requested duplicate detection, "
-        "labeling, assignment, and notification steps by following the "
-        "preloaded find-duplicates, label-issue, assign-issue, and notify "
-        "skills. Handle direct duplicate-check requests with the "
-        "find-duplicates skill and direct issue-assignment requests with the "
-        "assign-issue skill. Use only MCP server tools for GitHub operations; "
-        "never use shell commands or the GitHub CLI. When the tools come from "
-        "the Foundry toolbox, discover them with tool_search and invoke them "
-        "with call_tool. If a toolbox call fails with a CONSENT_REQUIRED "
-        "error, stop and reply with the consent URL from that error so the "
-        "user can authorize access, then retry once they confirm. Preserve the "
-        "analyst's JSON report and place it at the very end of triage "
-        "responses. Never open pull requests."
-    ),
-    "skills": ["find-duplicates", "label-issue", "assign-issue", "notify"],
+    "prompt": _load_prompt(_project_dir / "agents.md"),
 }
 
 
-def _load_agent_prompt(filename: str) -> str:
-    return (_agents_dir / filename).read_text(encoding="utf-8").strip()
-
-
-_CRITICAL_ISSUE_ANALYST: CustomAgentConfig = {
-    "name": "critical-issue-analyst",
-    "display_name": "Critical Issue Analyst",
+_TRIAGE_AGENT: CustomAgentConfig = {
+    "name": "triage",
+    "display_name": "Triage",
     "description": (
-        "Triages GitHub issues and identifies critical hot, blocking, and "
-        "regression issues for structured daily or weekly reports."
+        "Analyzes a target GitHub issue and returns structured classification, "
+        "duplicate, label, priority, and assignee recommendations."
     ),
-    "prompt": _load_agent_prompt("critical-issue-analyst.md"),
+    "prompt": _load_prompt(_agents_dir / "triage.md"),
+    "skills": [
+        "github-access",
+        "find-duplicates",
+        "label-issue",
+        "assign-issue",
+        "notify",
+    ],
+    "infer": True,
+}
+
+
+_FIND_CRITICALS_AGENT: CustomAgentConfig = {
+    "name": "find-criticals",
+    "display_name": "Find Criticals",
+    "description": (
+        "Scans GitHub issues and returns a structured report of hot, blocking, "
+        "and regression issues."
+    ),
+    "prompt": _load_prompt(_agents_dir / "find-criticals.md"),
+    "skills": ["github-access"],
     "infer": True,
 }
 
@@ -272,18 +287,18 @@ def _session_options(mcp_servers: dict) -> dict:
         "on_permission_request": PermissionHandler.approve_all,
         "streaming": True,
         "working_directory": _working_dir,
-        # Load supporting configuration from the project: skills and instruction
-        # files (AGENTS.md, .github/copilot-instructions.md). Config
-        # auto-discovery, file hooks, and plugin loading are intentionally NOT
-        # enabled — in the hosted container the deployed code dir is read-only,
-        # and enabling them makes the runtime try to write there (I/O error 30).
+        # Skills and all agent prompts are loaded explicitly so local and hosted
+        # behavior is identical.
         "skill_directories": [_skills_dir],
-        "instruction_directories": [_config_dir],
         "provider": provider,
         "model": model,
         "mcp_servers": mcp_servers or None,
-        "tools": _NOTIFY_TOOLS or None,
-        "custom_agents": [_ISSUELENS_AGENT, _CRITICAL_ISSUE_ANALYST],
+        "tools": _RUNTIME_TOOLS or None,
+        "custom_agents": [
+            _ISSUELENS_AGENT,
+            _TRIAGE_AGENT,
+            _FIND_CRITICALS_AGENT,
+        ],
         "agent": "issuelens",
     }
 
@@ -442,8 +457,14 @@ def _notification_tools() -> list[Tool]:
     return tools
 
 
-# Built once at startup from the configured endpoint env vars.
-_NOTIFY_TOOLS = _notification_tools()
+# Built once at startup from configured endpoint and App credential variables.
+_GITHUB_ACCESS_TOOL = _github_access_tool.create_tool(_github_app)
+if _GITHUB_ACCESS_TOOL is None:
+    logger.info("GitHub App chat tool is not configured")
+_RUNTIME_TOOLS = [
+    *_notification_tools(),
+    *([_GITHUB_ACCESS_TOOL] if _GITHUB_ACCESS_TOOL else []),
+]
 
 
 async def _stream_response(invocation_id: str, payload: dict):
@@ -535,16 +556,12 @@ async def handle_invoke(request: Request) -> Response:
 
 # ── Chat (responses protocol) ────────────────────────────────────────────────
 #
-# A chat request carries no payload token, so GitHub access goes through a
-# Foundry **toolbox** whose GitHub MCP connection uses managed OAuth2: Foundry
-# prompts each caller for consent once, then owns their tokens and refresh. The
-# agent authenticates to the toolbox with its own Azure AD token and forwards
-# the per-request call ID so the toolbox can resolve who is calling.
+# Chat uses the skill-owned github-access tool registered above for GitHub.
+# A Foundry toolbox MCP server supplies only non-GitHub capabilities.
 
 _TOOLBOX_ENDPOINT_ENV = "TOOLBOX_ENDPOINT"
 _TOOLBOX_SCOPE = "https://ai.azure.com/.default"
 _CALL_ID_HEADER = "x-agent-foundry-call-id"
-_CONSENT_ERROR_CODE = -32006
 _TOKEN_REFRESH_MARGIN_SECONDS = 300
 
 _ANONYMOUS_CONVERSATION = "anonymous"
@@ -554,111 +571,50 @@ _GREETING = (
     "I'm IssueLens. Ask me to triage a repository's issues, find duplicates, "
     "label an issue, assign an owner, or send a triage report."
 )
-_TOOLBOX_UNCONFIGURED = (
-    "GitHub access for chat isn't configured. Set `TOOLBOX_ENDPOINT` to a "
-    "Foundry toolbox that includes a GitHub MCP connection using managed "
-    "OAuth2 (`azd ai connection create ... --auth-type oauth2 "
-    "--managed-connector foundrygithubmcp`)."
-)
-_TOOLBOX_UNREACHABLE = (
-    "I couldn't reach the Foundry toolbox. Check that `TOOLBOX_ENDPOINT` is "
-    "correct (it must end with `?api-version=v1`) and that this agent's "
-    "identity has access to the project \u2014 locally that means `az login`. "
-    "The agent log has the details."
+_GITHUB_APP_UNCONFIGURED = (
+    "GitHub access for chat isn't configured. Set `GITHUB_APP_ID` and "
+    "`GITHUB_APP_PRIVATE_KEY_SECRET_URI` (hosted) or "
+    "`GITHUB_APP_PRIVATE_KEY_PATH` (local)."
 )
 
 # Copilot session id per conversation, so chat stays multi-turn.
 _chat_session_ids: dict[str, str] = {}
 
-_credential = None
-_toolbox_token = None
+_toolbox_credential = None
+_toolbox_token: AccessToken | None = None
 
 
 def _toolbox_bearer() -> str:
-    """Azure AD token for the toolbox MCP endpoint, refreshed before it expires."""
-    global _credential, _toolbox_token
+    """Return a cached Azure AD token for the Foundry toolbox."""
+    global _toolbox_credential, _toolbox_token
     stale = (
         _toolbox_token is None
-        or _toolbox_token.expires_on - time.time() < _TOKEN_REFRESH_MARGIN_SECONDS
+        or _toolbox_token.expires_on - time.time()
+        < _TOKEN_REFRESH_MARGIN_SECONDS
     )
     if stale:
         from azure.identity import DefaultAzureCredential
-        if _credential is None:
-            _credential = DefaultAzureCredential()
-        _toolbox_token = _credential.get_token(_TOOLBOX_SCOPE)
-    return _toolbox_token.token
 
-
-def _toolbox_headers(call_id: str | None) -> dict[str, str]:
-    """Agent auth plus the per-request caller identity for toolbox MCP calls."""
-    headers = {"Authorization": f"Bearer {_toolbox_bearer()}"}
-    if call_id:
-        headers[_CALL_ID_HEADER] = call_id
-    return headers
+        if _toolbox_credential is None:
+            _toolbox_credential = DefaultAzureCredential()
+        _toolbox_token = _toolbox_credential.get_token(_TOOLBOX_SCOPE)
+    token = _toolbox_token
+    if token is None:  # pragma: no cover - defensive narrowing
+        raise RuntimeError("Could not acquire a Foundry toolbox token")
+    return token.token
 
 
 def _toolbox_mcp_server(endpoint: str, call_id: str | None) -> dict:
-    """Build the toolbox MCP server config for a single chat turn."""
+    """Build the authenticated toolbox MCP configuration for one chat turn."""
+    headers = {"Authorization": f"Bearer {_toolbox_bearer()}"}
+    if call_id:
+        headers[_CALL_ID_HEADER] = call_id
     return {
         "type": "http",
         "url": endpoint,
-        "headers": _toolbox_headers(call_id),
+        "headers": headers,
         "tools": ["*"],
     }
-
-
-def _decode_mcp(resp: httpx.Response) -> dict:
-    """Decode a toolbox MCP reply, which may be JSON or a single SSE frame."""
-    if "text/event-stream" in resp.headers.get("content-type", ""):
-        for line in resp.text.splitlines():
-            if line.startswith("data:"):
-                return json.loads(line[len("data:"):].strip())
-        return {}
-    return resp.json()
-
-
-def _consent_url(message: str) -> str | None:
-    """Pull the OAuth consent URL out of a ``-32006`` toolbox error.
-
-    The JSON payload is appended to human-readable prefix text, so slice from
-    the first brace rather than parsing the whole message.
-    """
-    start = message.find("{")
-    if start < 0:
-        return None
-    try:
-        payload = json.loads(message[start:])
-    except json.JSONDecodeError:
-        return None
-    for source in payload.get("errors", []):
-        error = source.get("error") or {}
-        if error.get("code") == "CONSENT_REQUIRED":
-            return error.get("message")
-    return None
-
-
-async def _consent_required(endpoint: str, call_id: str | None) -> str | None:
-    """Probe the toolbox with ``tools/list``; return a consent URL if one is needed.
-
-    ``tools/list`` fans out to every tool source, so a source still awaiting
-    OAuth consent reports it here even when the others succeed.
-    """
-    async with httpx.AsyncClient(timeout=60) as http:
-        resp = await http.post(
-            endpoint,
-            headers={
-                **_toolbox_headers(call_id),
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-            },
-            json={"jsonrpc": "2.0", "id": 1,
-                  "method": "tools/list", "params": {}},
-        )
-    resp.raise_for_status()
-    error = _decode_mcp(resp).get("error") or {}
-    if error.get("code") != _CONSENT_ERROR_CODE:
-        return None
-    return _consent_url(error.get("message", ""))
 
 
 async def _close_session(session) -> None:
@@ -671,8 +627,7 @@ async def _close_session(session) -> None:
 async def _chat_session(conversation: str, mcp_servers: dict):
     """Open this conversation's Copilot session, resuming it when one exists.
 
-    A session is opened per turn so every toolbox call carries a fresh Azure AD
-    token and the current caller's call ID.
+    A session is resumed per conversation so chat history is preserved.
     """
     client = await _ensure_client()
     options = _session_options(mcp_servers)
@@ -704,36 +659,26 @@ async def handle_chat(
     yield stream.emit_created()
     yield stream.emit_in_progress()
 
+    input_items = await context.get_input_items(resolve_references=False)
+    serialized_items = [
+        item.as_dict() if hasattr(item, "as_dict") else str(item)
+        for item in input_items
+    ]
+    logger.info(
+        "responses.user_input_items=%s",
+        json.dumps(serialized_items, ensure_ascii=False, default=str),
+    )
+
     prompt = (await context.get_input_text()).strip()
+    logger.info("responses.user_input_text=%s", json.dumps(prompt, ensure_ascii=False))
     if not prompt:
         for event in stream.output_item_message(_GREETING):
             yield event
         yield stream.emit_completed()
         return
 
-    endpoint = os.environ.get(_TOOLBOX_ENDPOINT_ENV, "")
-    if not endpoint:
-        for event in stream.output_item_message(_TOOLBOX_UNCONFIGURED):
-            yield event
-        yield stream.emit_completed()
-        return
-
-    call_id = context.platform_context.call_id
-    try:
-        consent_url = await _consent_required(endpoint, call_id)
-    except Exception:
-        logger.error("Toolbox probe failed for %s", endpoint, exc_info=True)
-        for event in stream.output_item_message(_TOOLBOX_UNREACHABLE):
-            yield event
-        yield stream.emit_completed()
-        return
-
-    if consent_url:
-        for event in stream.output_item_message(
-            "**Connect your GitHub account**\n\n"
-            f"Open {consent_url} to authorize IssueLens, then send your "
-            "request again. This is a one-time step."
-        ):
+    if not any(tool.name == "github-access" for tool in _RUNTIME_TOOLS):
+        for event in stream.output_item_message(_GITHUB_APP_UNCONFIGURED):
             yield event
         yield stream.emit_completed()
         return
@@ -743,8 +688,13 @@ async def handle_chat(
         or context.platform_context.user_id_key
         or _ANONYMOUS_CONVERSATION
     )
-    session = await _chat_session(
-        conversation, {"toolbox": _toolbox_mcp_server(endpoint, call_id)})
+    toolbox_endpoint = os.environ.get(_TOOLBOX_ENDPOINT_ENV, "").strip()
+    mcp_servers = {}
+    if toolbox_endpoint:
+        mcp_servers["toolbox"] = _toolbox_mcp_server(
+            toolbox_endpoint, context.platform_context.call_id
+        )
+    session = await _chat_session(conversation, mcp_servers)
 
     queue: asyncio.Queue = asyncio.Queue()
 
