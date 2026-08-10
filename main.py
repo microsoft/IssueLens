@@ -70,6 +70,7 @@ from copilot.session_events import (
 )
 from copilot.tools import Tool, ToolInvocation, ToolResult
 from issue_image_context import issue_image_attachments
+from issuelens_config_tool import create_tool as create_issuelens_config_tool
 from media_inputs import (
     MAX_ATTACHMENTS,
     MediaInputError,
@@ -151,6 +152,7 @@ _TRIAGE_AGENT: CustomAgentConfig = {
     "prompt": _load_prompt(_agents_dir / "triage.md"),
     "skills": [
         "github-access",
+        "issuelens-config",
         "find-duplicates",
         "label-issue",
         "assign-issue",
@@ -168,7 +170,7 @@ _FIND_CRITICALS_AGENT: CustomAgentConfig = {
         "and regression issues."
     ),
     "prompt": _load_prompt(_agents_dir / "find-criticals.md"),
-    "skills": ["github-access"],
+    "skills": ["github-access", "issuelens-config"],
     "infer": True,
 }
 
@@ -491,11 +493,17 @@ _GITHUB_ACCESS_TOOL = (
     if _GITHUB_APP_CLIENT
     else None
 )
+_ISSUELENS_CONFIG_TOOL = (
+    create_issuelens_config_tool(_GITHUB_APP_CLIENT)
+    if _GITHUB_APP_CLIENT
+    else None
+)
 if _GITHUB_ACCESS_TOOL is None:
     logger.info("GitHub App chat tool is not configured")
 _RUNTIME_TOOLS = [
     *_NOTIFICATION_TOOLS,
     *([_GITHUB_ACCESS_TOOL] if _GITHUB_ACCESS_TOOL else []),
+    *([_ISSUELENS_CONFIG_TOOL] if _ISSUELENS_CONFIG_TOOL else []),
 ]
 
 
@@ -517,6 +525,7 @@ async def _stream_response(invocation_id: str, payload: dict):
     request_github_client = _github_app.GitHubAppClient(
         _github_app.RequestTokenProvider(payload["github_token"])
     )
+    request_config_tool = create_issuelens_config_tool(request_github_client)
     try:
         issue_attachments = await issue_image_attachments(
             prompt,
@@ -528,7 +537,10 @@ async def _stream_response(invocation_id: str, payload: dict):
         issue_attachments = []
     attachments = [*attachments, *issue_attachments]
     session = await client.create_session(
-        **_session_options(mcp_servers, _NOTIFICATION_TOOLS)
+        **_session_options(
+            mcp_servers,
+            [*_NOTIFICATION_TOOLS, request_config_tool],
+        )
     )
     session_id = getattr(session, "session_id", None)
 

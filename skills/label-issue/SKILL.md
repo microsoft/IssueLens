@@ -11,10 +11,12 @@ GitHub tools and repository-specific labeling rules.
 ## Workflow
 
 1. **Input:** an issue reference (`owner/repo` + issue number, or an issue URL).
-2. **Fetch labeling instructions:** read `.github/label-instructions.md` from the
-   target repository using the available GitHub tools. If it is not present, fall
-   back to the repository's existing label set (list the repo labels) and use
-   their names/descriptions to guide classification.
+2. **Fetch labeling instructions:** follow the `issuelens-config` skill and call
+   the `issuelens-config` tool for domain `labeling`. Use `configured` or
+   `legacy` content when returned. If the source is `built-in`, fall back to the
+   repository's existing label set (list the repo labels) and use label names
+   and descriptions to guide classification. If configuration loading fails,
+   stop and do not apply labels.
 3. **Fetch the issue:** read the issue title, body, existing labels, and comments
    with the GitHub tools.
 4. **Analyze the issue:**
@@ -31,7 +33,7 @@ GitHub tools and repository-specific labeling rules.
 
 - Only add labels that exist in the repository. Never invent labels.
 - Preserve existing labels; only add.
-- Prefer the repository's `.github/label-instructions.md` rules when present.
+- Prefer validated configured or legacy labeling instructions when returned.
 - Follow the `github-access` skill for every GitHub read or write. Use
    request-scoped GitHub MCP tools for invocations or the `github-access` tool
    for chat. Never use shell commands, direct HTTP, or the GitHub CLI.

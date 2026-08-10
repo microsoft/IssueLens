@@ -14,6 +14,7 @@ Both protocols run in the same process and share the same orchestrator, skills, 
 2. Creates a **fresh Copilot session per request** configured with:
    - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
    - the remote **GitHub MCP server**, authenticated with the `github_token` from the payload — so the agent reads issues and applies labels as that token's identity;
+  - the constrained in-process `issuelens-config` tool, authenticated with the same request token;
   - in-process notification tools when their Logic App endpoints are configured.
 3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents.md`. It routes issue-level work to `triage` and critical-issue scans to `find-criticals`. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions.
 4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Critical-issue scans end with a JSON report.
@@ -22,9 +23,10 @@ Both protocols run in the same process and share the same orchestrator, skills, 
 
 1. Receives an OpenAI Responses request (Foundry playground, Teams, or any Responses client), including inline `input_image` and `input_file` content.
 2. Loads the `github-access` skill and calls its skill-owned `github-access` tool. The host image loader and tool resolve the App installation for each `owner/repository`, mint and cache its short-lived installation token, and never return credentials to the model.
-3. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
-4. Performs only allowlisted issue-triage operations: repository/file reads, issue and comment reads/searches, label reads/additions, and assignee updates.
-5. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
+3. Uses the constrained `issuelens-config` tool with the same App client to discover and validate target-repository triage policy.
+4. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
+5. Performs only allowlisted issue-triage operations: repository/file reads, issue and comment reads/searches, label reads/additions, and assignee updates.
+6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
 
 ## Environment Variables
 
@@ -72,6 +74,58 @@ helper caches tokens by installation and refreshes them five minutes before
 expiry. Configure the App with **Metadata: Read**, **Issues: Read and write**,
 and **Contents: Read** (for repository instruction and owner-mapping files).
 It does not start an MCP server and never exposes tokens to the model.
+
+## Target Repository Configuration
+
+A target repository may select capability-specific Markdown instructions with
+one case-insensitive filename match for `.github/issuelens.yml`. The `.github`
+directory and every configured instruction path use their exact repository
+casing. See [examples/issuelens.yml](examples/issuelens.yml) and validate files
+against [schemas/issuelens.schema.json](schemas/issuelens.schema.json).
+
+```yaml
+version: 1
+instructions:
+  criticality:
+    path: .github/issuelens/criticality.md
+  duplicate_detection:
+    path: .github/issuelens/duplicates.md
+  labeling:
+    path: .github/issuelens/labels.md
+  assignment:
+    path: .github/issuelens/assignment.md
+  notification_content:
+    path: .github/issuelens/notifications.md
+```
+
+Every instruction domain is optional:
+
+| Domain | Repository-specific policy it may contain |
+|--------|-------------------------------------------|
+| `criticality` | Core functions, known workarounds, and additional hot/blocking/regression signals |
+| `duplicate_detection` | Canonical issue conventions, exclusions, and stricter matching evidence |
+| `labeling` | Existing-label mappings, priority rubric, and component classification |
+| `assignment` | Area owners, keyword/path mappings, routing rules, and default owners |
+| `notification_content` | Report title, grouping, emphasis, and presentation only |
+
+Fallback behavior is backward compatible:
+
+- If `.github/issuelens.yml` does not exist, labeling still checks
+  `.github/label-instructions.md`, assignment still checks
+  `.github/area_owners.md`, `docs/area_owners.md`, then `area_owners.md`, and
+  all other capabilities use their built-in behavior.
+- If the config exists but omits a domain, that domain uses the same legacy or
+  built-in fallback.
+- If more than one case variant exists, the YAML is invalid, or a configured
+  file is missing or invalid, IssueLens stops that capability and does not
+  perform its related write. It does not silently bypass a present but invalid
+  configuration.
+
+Configuration is limited to one 16 KB YAML document and 64 KB per UTF-8
+Markdown instruction file. Paths must be repository-relative POSIX paths.
+Repository policy cannot authorize writes, weaken mandatory evidence or safety
+rules, change repository scope, choose notification recipients/channels, or
+override response formats.
 
 ### Foundry toolbox
 
@@ -313,7 +367,11 @@ The recommended way to trigger the agent is a **GitHub Actions workflow in the t
 - **Event-driven:** `on: issues` (opened/reopened) → `label` mode.
 - **Scheduled:** `on: schedule` (cron) → `triage` mode.
 
-Copy [templates/github-actions/issuelens.yml](templates/github-actions/issuelens.yml) into a target repo's `.github/workflows/`, then configure the App client id (variable), App private key (secret), and the agent URL/scope. The template's header comments list every required variable and secret.
+Copy [.github/workflows/issue-triage.yml](.github/workflows/issue-triage.yml)
+into a target repository's `.github/workflows/`, then configure the App client
+ID (variable), App private key (secret), agent URL/scope, and notification
+recipients. Keep repository-specific policy in `.github/issuelens.yml`; the
+workflow filename intentionally differs from the policy filename.
 
 > **Alternative (kept as backup):** [webhook_bridge/](webhook_bridge) is a GitHub App **webhook** → Azure Function → queue → agent path (install-and-go, no per-repo files, lowest latency). It's retained as an alternative trigger transport but is not required for the Actions-based setup.
 

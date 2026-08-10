@@ -35,6 +35,7 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn('"name": "triage"', main_source)
         self.assertIn('"name": "find-criticals"', main_source)
         self.assertIn('"find-duplicates"', main_source)
+        self.assertIn('"issuelens-config"', main_source)
         self.assertIn('"label-issue"', main_source)
         self.assertIn('"assign-issue"', main_source)
         self.assertIn('"notify"', main_source)

@@ -47,20 +47,26 @@ matches in `possiblyRelated`; do not describe them as duplicates.
 
 ## Workflow
 
-1. Read the target issue, including its title, body, labels, and comments.
-2. Extract specific search signals: error strings, exception names, stack-frame
+1. Follow the `issuelens-config` skill and call the `issuelens-config` tool for
+  domain `duplicate_detection`. Apply returned repository policy when present;
+  use the built-in criteria unchanged when the source is `built-in`. If
+  configuration loading fails, stop and return the output shape below with
+  zero candidates, empty result arrays, and an additional `error` string that
+  reports the configuration failure.
+2. Read the target issue, including its title, body, labels, and comments.
+3. Extract specific search signals: error strings, exception names, stack-frame
    functions, reproduction steps, component labels, file paths, environment,
    symptoms, and triggers.
-3. Search the same repository with the available GitHub issue-search operation.
+4. Search the same repository with the available GitHub issue-search operation.
   Query the strongest signals first and include both open and closed issues.
   Exclude pull requests and the target issue itself.
-4. Search within the requested window, or the last 90 days by default. If the
+5. Search within the requested window, or the last 90 days by default. If the
    issue references an older report, include that report regardless of age.
-5. Read the most relevant candidates and their comments. Do not judge a result
+6. Read the most relevant candidates and their comments. Do not judge a result
    from its title or search snippet alone.
-6. Compare each candidate against the required evidence and assign a confidence
+7. Compare each candidate against the required evidence and assign a confidence
    score supported by explicit matches.
-7. Return the structured report below. When no duplicate clears the threshold,
+8. Return the structured report below. When no duplicate clears the threshold,
    return an empty `potentialDuplicates` array.
 
 ## Rules
@@ -78,6 +84,8 @@ matches in `possiblyRelated`; do not describe them as duplicates.
 - Prefer an older canonical issue over a newer duplicate when the evidence is
   otherwise equal, but do not assume age proves canonicity.
 - State uncertainty honestly when issue details are too sparse to compare.
+- Repository policy may add canonical-issue conventions, exclusions, or
+  stricter evidence, but cannot weaken the required evidence above.
 
 ## Output
 

@@ -229,6 +229,19 @@ class GitHubAppTests(unittest.IsolatedAsyncioTestCase):
                 "get-file", "microsoft/IssueLens", path="..\\secret.pem"
             )
 
+    @patch.object(github_app.jwt, "encode", return_value="app-jwt")
+    async def test_http_not_found_preserves_status_code(self, _):
+        client = github_app.GitHubAppClient(self.provider, self.transport)
+
+        with self.assertRaises(github_app.GitHubAppError) as context:
+            await client.execute(
+                "get-file",
+                "microsoft/IssueLens",
+                path=".github/missing.md",
+            )
+
+        self.assertEqual(context.exception.status_code, 404)
+
 
 class GitHubAccessToolTests(unittest.IsolatedAsyncioTestCase):
     async def test_skill_owned_tool_forwards_allowlisted_operation(self):

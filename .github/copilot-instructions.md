@@ -17,14 +17,14 @@ reachable two ways: the **invocations** protocol for automation and the
 - **Duplicate detection** — compares a target issue with open and closed issues
   using strict technical evidence and reports high-confidence duplicates.
 - **Auto-labeling** — classifies and applies labels using the repository's
-  existing labels (and optional `.github/label-instructions.md`).
+  existing labels and the validated `labeling` instruction domain.
 - **Auto-assignment** — routes issues to individual owners using repository area
   mappings and historical assignment patterns.
 - **Notifications** — sends triage reports via **WorkIQ** (Microsoft 365) as
   email or Teams messages.
 - **App-scoped GitHub access** — invocations use GitHub MCP with the request
-  token; chat uses one skill-backed in-process tool. Both act as the App bot,
-  never an ambient user identity.
+  token plus a constrained config loader; chat uses skill-backed in-process
+  tools. Both act as the App bot, never an ambient user identity.
 
 ## Architecture
 
@@ -72,16 +72,18 @@ reachable two ways: the **invocations** protocol for automation and the
     and regression issues. Its prompt lives in `agents/find-criticals.md` and it
     returns **only** the critical-issue JSON report.
 - **Skills** (`skills/`): `github-access` (chat GitHub App operations),
-  `find-duplicates`, `label-issue`, `assign-issue`, and `notify`.
+  `issuelens-config` (validated repository policy), `find-duplicates`,
+  `label-issue`, `assign-issue`, and `notify`.
 - **Media inputs** — `media_inputs.py` normalizes Responses `input_image` and
   `input_file` content and invocation `blob` attachments into Copilot session
   attachments. Only inline base64 content is accepted; remote URLs, file IDs,
   and request-supplied server paths are rejected.
 - **GitHub access** — invocations use the remote GitHub MCP server
   (`https://api.githubcopilot.com/mcp/`) authenticated with the payload's
-  `github_token`; chat uses only the skill-owned `github-access` tool. The host
-  image loader uses the same protocol-specific identity. Follow the
-  `github-access` skill before every GitHub read or write.
+  `github_token`; chat uses only the skill-owned `github-access` tool. The
+  constrained `issuelens-config` tool and host image loader use the same
+  protocol-specific identity. Follow the `github-access` skill before every
+  ordinary GitHub read or write and `issuelens-config` before repository policy.
 - **Runtime configuration** — `main.py` explicitly loads `agents.md`,
   both sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config
@@ -91,8 +93,10 @@ reachable two ways: the **invocations** protocol for automation and the
 
 - **GitHub access follows the protocol boundary** — first follow the
   `github-access` skill; invocations then use GitHub MCP and chat uses only the
-  `github-access` tool. Never shell out to `gh` / `bash` / `powershell`, call
-  GitHub over direct HTTP, or expose App credentials. See `agents.md`.
+  `github-access` tool. The only additional GitHub reader is the constrained
+  `issuelens-config` tool, which uses the same protocol identity and returns one
+  validated policy domain. Never shell out to `gh` / `bash` / `powershell`,
+  call GitHub over direct HTTP, or expose App credentials. See `agents.md`.
 - Only `find-criticals` is required to return JSON, which IssueLens preserves at
   the end of its response. `triage` may use the format appropriate for its task.
 - Prefer adding behavior to a skill or sub-agent prompt before changing
@@ -101,7 +105,7 @@ reachable two ways: the **invocations** protocol for automation and the
 ## Triggering (GitHub Actions)
 
 The agent is driven by a workflow in the target repo
-(`.github/workflows/issuelens.yml`):
+(`.github/workflows/issue-triage.yml`):
 
 1. Mint a GitHub App installation token with `actions/create-github-app-token`.
 2. Authenticate to the Foundry agent endpoint via **Azure OIDC** (`azure/login`).
@@ -130,7 +134,7 @@ and `workflow_dispatch`.
 - `main.py` — agent server, session wiring, custom-agent registration
 - `agents.md` — global IssueLens identity and current runtime scope, works as orchestrator for sub-agents and skills
 - `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`)
-- `skills/` — modular skills (`find-duplicates`, `label-issue`, `assign-issue`,
-  `notify`)
+- `skills/` — modular skills (`issuelens-config`, `find-duplicates`,
+  `label-issue`, `assign-issue`, `notify`)
 - `azure.yaml` / `agent.yaml` / `Dockerfile` — deployment config
-- `.github/workflows/issuelens.yml` — the triggering workflow
+- `.github/workflows/issue-triage.yml` — the triggering workflow

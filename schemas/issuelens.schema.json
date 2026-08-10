@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/microsoft/IssueLens/blob/main/schemas/issuelens.schema.json",
+  "title": "IssueLens repository configuration",
+  "description": "Selects repository-relative Markdown instructions for IssueLens triage capabilities.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version"
+  ],
+  "properties": {
+    "version": {
+      "const": 1
+    },
+    "instructions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "criticality": {
+          "$ref": "#/$defs/instructionFile"
+        },
+        "duplicate_detection": {
+          "$ref": "#/$defs/instructionFile"
+        },
+        "labeling": {
+          "$ref": "#/$defs/instructionFile"
+        },
+        "assignment": {
+          "$ref": "#/$defs/instructionFile"
+        },
+        "notification_content": {
+          "$ref": "#/$defs/instructionFile"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "instructionFile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 240,
+          "description": "Repository-relative POSIX path to a Markdown file. Absolute paths, URLs, backslashes, empty segments, dot segments, queries, and fragments are rejected.",
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?![A-Za-z][A-Za-z0-9+.-]*:)(?!.*[?#]).+\\.[mM][dD]$"
+        }
+      }
+    }
+  }
+}

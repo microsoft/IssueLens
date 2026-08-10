@@ -1,0 +1,98 @@
+# IssueLens issue triage via the hosted Foundry agent.
+#
+# Copy this file into a target repository at
+# .github/workflows/issue-triage.yml. Repository-specific triage policy belongs
+# in .github/issuelens.yml, not in this workflow.
+#
+# One-time setup in the repository (or organization, shared to selected repos):
+#   Variables (Settings -> Secrets and variables -> Actions -> Variables):
+#     ISSUELENS_APP_ID          GitHub App numeric App ID
+#   Secrets (... -> Secrets):
+#     ISSUELENS_APP_PRIVATE_KEY GitHub App private key (full PEM contents)
+#     AZURE_CLIENT_ID           Client ID of the OIDC identity (UAMI or app reg)
+#     AZURE_TENANT_ID
+#     AZURE_SUBSCRIPTION_ID
+#     ISSUELENS_AGENT_URL       Full deployed invocations endpoint
+#                               (.../protocols/invocations?api-version=...)
+#     ISSUELENS_AGENT_SCOPE     Entra scope/resource for the endpoint token
+#     RECIPIENTS                Comma-separated email addresses for reports
+#
+# actions/create-github-app-token mints a repository-scoped installation token,
+# so all GitHub writes are attributed to the App bot. Agent endpoint access uses
+# Azure OIDC and does not expose Azure credentials to the agent prompt.
+
+name: IssueLens issue triage
+
+on:
+  issues:
+    types: [opened, reopened]
+  # Uncomment to run batch triage on weekdays at 00:00 UTC.
+  # schedule:
+  #   - cron: "0 0 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: issuelens-triage-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.ISSUELENS_APP_ID }}
+          private-key: ${{ secrets.ISSUELENS_APP_PRIVATE_KEY }}
+
+      - name: Azure login (OIDC) for the agent endpoint
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Invoke IssueLens agent
+        env:
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+          GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
+          AGENT_URL: ${{ secrets.ISSUELENS_AGENT_URL }}
+          AGENT_SCOPE: ${{ secrets.ISSUELENS_AGENT_SCOPE }}
+          RECIPIENTS: ${{ secrets.RECIPIENTS }}
+        run: |
+          set -euo pipefail
+
+          if [ "$EVENT" = "issues" ]; then
+            input="Triage GitHub issue ${REPO}#${ISSUE}. "
+            input+="Find and report potential duplicate or related issues without closing or commenting on the target issue. "
+            input+="When a duplicate meets the required evidence threshold, add the existing 'duplicate' label, then apply other appropriate existing labels using the repository's configured labeling policy. "
+            input+="Assign the issue to the best supported individual owner using the repository's configured assignment policy and historical patterns while preserving existing assignees. "
+            input+="Finally, send a concise Teams notification summarizing duplicate findings, confirmed labels, confirmed assignment, and the issue link to each recipient in this comma-separated list: ${RECIPIENTS}."
+          else
+            since=$(date -u -d '24 hours ago' +'%Y-%m-%dT%H:00:00Z')
+            input="Triage open GitHub issues in ${REPO} updated since ${since}. "
+            input+="Identify critical hot, blocking, and regression issues using repository policy, apply appropriate existing labels, and produce the final JSON summary. "
+            input+="Then email a concise summary to these comma-separated recipients: ${RECIPIENTS}."
+          fi
+
+          payload=$(jq -cn \
+            --arg input "$input" \
+            --arg tok "$GH_APP_TOKEN" \
+            '{input:$input, github_token:$tok}')
+
+          agent_token=$(az account get-access-token \
+            --scope "$AGENT_SCOPE" \
+            --query accessToken \
+            -o tsv)
+
+          curl --fail-with-body -sS -N -X POST "$AGENT_URL" \
+            -H "Authorization: Bearer $agent_token" \
+            -H "Content-Type: application/json" \
+            -d "$payload"

@@ -51,6 +51,10 @@ _REPOSITORY_PATTERN = re.compile(
 class GitHubAppError(RuntimeError):
     """Raised when GitHub App authentication or an API operation fails."""
 
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
 
 @dataclass(frozen=True)
 class GitHubAppConfig:
@@ -441,7 +445,10 @@ class GitHubAppClient:
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             detail = exc.response.text[:500]
-            raise GitHubAppError(f"GitHub API returned HTTP {status}: {detail}") from exc
+            raise GitHubAppError(
+                f"GitHub API returned HTTP {status}: {detail}",
+                status_code=status,
+            ) from exc
         except (httpx.HTTPError, ValueError) as exc:
             raise GitHubAppError("GitHub API request failed") from exc
 
@@ -449,9 +456,14 @@ class GitHubAppClient:
             return [item for item in payload if "pull_request" not in item]
         if operation == "get-file" and isinstance(payload, dict):
             if payload.get("encoding") == "base64" and isinstance(payload.get("content"), str):
-                payload["decoded_content"] = base64.b64decode(
-                    payload["content"], validate=False
-                ).decode("utf-8", errors="replace")
+                try:
+                    payload["decoded_content"] = base64.b64decode(
+                        payload["content"], validate=False
+                    ).decode("utf-8")
+                except (ValueError, UnicodeDecodeError) as exc:
+                    raise GitHubAppError(
+                        "GitHub repository file is not valid UTF-8 text"
+                    ) from exc
                 payload.pop("content", None)
         return payload
 

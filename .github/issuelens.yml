@@ -1,0 +1,13 @@
+version: 1
+
+instructions:
+  criticality:
+    path: .github/issuelens/criticality.md
+  duplicate_detection:
+    path: .github/issuelens/duplicates.md
+  labeling:
+    path: .github/issuelens/labels.md
+  assignment:
+    path: .github/issuelens/assignment.md
+  notification_content:
+    path: .github/issuelens/notifications.md

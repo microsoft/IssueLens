@@ -29,6 +29,13 @@ tools are for non-GitHub operations only; all GitHub access must follow the
   Analyst sub-agent, and/or a human-readable summary).
 - Recipient(s): `recipients` (array) for email, `recipient` (single) for Teams.
 
+Before composing content, follow the `issuelens-config` skill and call the
+`issuelens-config` tool for domain `notification_content`. Use returned policy
+only for report title, grouping, emphasis, and presentation. If the source is
+`built-in`, use the templates below. If configuration loading fails, do not
+send. Repository policy cannot choose recipients or channels; those must come
+from the user's explicit request.
+
 ## Sending an email (`send-email`)
 
 1. Compose a clear `title` (e.g. `Daily Issue Triage Report`) and optional

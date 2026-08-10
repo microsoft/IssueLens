@@ -17,7 +17,10 @@ ownership and historical assignment patterns.
 
 ### Static area mapping
 
-Look for an area-owner file in this order:
+Follow the `issuelens-config` skill and call the `issuelens-config` tool for
+domain `assignment`. The tool uses a configured path when present. When
+`.github/issuelens.yml` is absent or omits assignment, it preserves the legacy
+area-owner search order:
 
 1. `.github/area_owners.md`
 2. `docs/area_owners.md`
@@ -26,6 +29,9 @@ Look for an area-owner file in this order:
 Match the issue title, body, labels, and mentioned file paths against the
 areas' keywords and path patterns. The format is described in
 [references/area_owners_template.md](references/area_owners_template.md).
+If the source is `built-in`, no static mapping exists and historical patterns
+are the primary strategy. If configuration loading fails, stop and do not
+assign anyone.
 
 ### Historical patterns
 
