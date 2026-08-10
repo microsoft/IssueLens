@@ -47,11 +47,13 @@ jobs:
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ vars.ISSUELENS_APP_ID }}
+          client-id: ${{ vars.ISSUELENS_APP_ID }}
           private-key: ${{ secrets.ISSUELENS_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-issues: write
 
       - name: Azure login (OIDC) for the agent endpoint
-        uses: azure/login@v2
+        uses: azure/login@v3
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
