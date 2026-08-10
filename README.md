@@ -103,7 +103,7 @@ Every instruction domain is optional:
 | Domain | Repository-specific policy it may contain |
 |--------|-------------------------------------------|
 | `criticality` | Core functions, known workarounds, and additional hot/blocking/regression signals |
-| `duplicate_detection` | Canonical issue conventions, exclusions, and stricter matching evidence |
+| `duplicate_detection` | Canonical issue conventions, exclusions, stricter matching evidence, and related public repositories for read-only candidate search |
 | `labeling` | Existing-label mappings, priority rubric, and component classification |
 | `assignment` | Area owners, keyword/path mappings, routing rules, and default owners |
 | `notification_content` | Report title, grouping, emphasis, and presentation only |
@@ -124,8 +124,10 @@ Fallback behavior is backward compatible:
 Configuration is limited to one 16 KB YAML document and 64 KB per UTF-8
 Markdown instruction file. Paths must be repository-relative POSIX paths.
 Repository policy cannot authorize writes, weaken mandatory evidence or safety
-rules, change repository scope, choose notification recipients/channels, or
-override response formats.
+rules, choose notification recipients/channels, or override response formats.
+Duplicate instructions may name related public repositories. IssueLens accesses
+them anonymously through fixed read-only issue operations, reports inaccessible
+repositories, and never uses this scope for writes.
 
 ### Foundry toolbox
 

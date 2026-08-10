@@ -78,6 +78,7 @@ from media_inputs import (
     redacted_input_items,
     response_input,
 )
+from related_github_tool import create_tool as create_related_github_tool
 
 load_dotenv(override=False)
 
@@ -498,12 +499,18 @@ _ISSUELENS_CONFIG_TOOL = (
     if _GITHUB_APP_CLIENT
     else None
 )
+_RELATED_GITHUB_TOOL = (
+    create_related_github_tool()
+    if _GITHUB_APP_CLIENT
+    else None
+)
 if _GITHUB_ACCESS_TOOL is None:
     logger.info("GitHub App chat tool is not configured")
 _RUNTIME_TOOLS = [
     *_NOTIFICATION_TOOLS,
     *([_GITHUB_ACCESS_TOOL] if _GITHUB_ACCESS_TOOL else []),
     *([_ISSUELENS_CONFIG_TOOL] if _ISSUELENS_CONFIG_TOOL else []),
+    *([_RELATED_GITHUB_TOOL] if _RELATED_GITHUB_TOOL else []),
 ]
 
 
@@ -526,6 +533,7 @@ async def _stream_response(invocation_id: str, payload: dict):
         _github_app.RequestTokenProvider(payload["github_token"])
     )
     request_config_tool = create_issuelens_config_tool(request_github_client)
+    request_related_tool = create_related_github_tool()
     try:
         issue_attachments = await issue_image_attachments(
             prompt,
@@ -539,7 +547,7 @@ async def _stream_response(invocation_id: str, payload: dict):
     session = await client.create_session(
         **_session_options(
             mcp_servers,
-            [*_NOTIFICATION_TOOLS, request_config_tool],
+            [*_NOTIFICATION_TOOLS, request_config_tool, request_related_tool],
         )
     )
     session_id = getattr(session, "session_id", None)

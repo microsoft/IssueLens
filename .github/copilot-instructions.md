@@ -84,6 +84,8 @@ reachable two ways: the **invocations** protocol for automation and the
   constrained `issuelens-config` tool and host image loader use the same
   protocol-specific identity. Follow the `github-access` skill before every
   ordinary GitHub read or write and `issuelens-config` before repository policy.
+  The `issuelens-related-read` tool performs anonymous read-only access to
+  public repositories named by loaded duplicate instructions.
 - **Runtime configuration** — `main.py` explicitly loads `agents.md`,
   both sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config
@@ -95,8 +97,9 @@ reachable two ways: the **invocations** protocol for automation and the
   `github-access` skill; invocations then use GitHub MCP and chat uses only the
   `github-access` tool. The only additional GitHub reader is the constrained
   `issuelens-config` tool, which uses the same protocol identity and returns one
-  validated policy domain. Never shell out to `gh` / `bash` / `powershell`,
-  call GitHub over direct HTTP, or expose App credentials. See `agents.md`.
+  validated policy domain, plus `issuelens-related-read` for fixed-operation
+  public duplicate evidence. Never shell out to `gh` / `bash` / `powershell`, call
+  GitHub over direct HTTP, or expose App credentials. See `agents.md`.
 - Only `find-criticals` is required to return JSON, which IssueLens preserves at
   the end of its response. `triage` may use the format appropriate for its task.
 - Prefer adding behavior to a skill or sub-agent prompt before changing

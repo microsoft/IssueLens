@@ -37,6 +37,9 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn('"find-duplicates"', main_source)
         self.assertIn('"issuelens-config"', main_source)
         self.assertIn('"label-issue"', main_source)
+        self.assertIn("related public repositories", (
+            ROOT / "skills" / "find-duplicates" / "SKILL.md"
+        ).read_text(encoding="utf-8"))
         self.assertIn('"assign-issue"', main_source)
         self.assertIn('"notify"', main_source)
         self.assertIn("issue_image_attachments", main_source)
