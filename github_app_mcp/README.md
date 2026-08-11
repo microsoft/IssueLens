@@ -85,6 +85,20 @@ For a real local server, authenticate to Azure using a credential supported by
 .\.venv\Scripts\issuelens-github-mcp.exe
 ```
 
+To check whether the configured App is installed for one or more repositories,
+run the diagnostic script from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe .\github_app_mcp\scripts\check_installations.py `
+  microsoft/IssueLens microsoft/another-repository
+```
+
+The script loads the root `.env` file when `python-dotenv` is installed, reads
+the App private key from Key Vault using `DefaultAzureCredential`, and prints
+only the installation status and installation ID. Exit code `0` means every
+target is installed, `1` means at least one target is not installed, and `2`
+means configuration, authentication, or GitHub API validation failed.
+
 Equivalent Copilot SDK stdio configuration shape:
 
 ```python
