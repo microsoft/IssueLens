@@ -9,7 +9,7 @@ built-in minimum evidence requirements.
 Treat these as core IssueLens functions:
 
 - Serving both `POST /invocations` automation and `POST /responses` chat.
-- Reading the requested repository with the correct protocol-specific GitHub
+- Reading the requested repository with the bundled GitHub App MCP
   identity.
 - Preventing credentials from entering model context, logs, or responses.
 - Preserving repository scope and preventing unauthorized GitHub writes.

@@ -5,10 +5,7 @@
 # in .github/issuelens.yml, not in this workflow.
 #
 # One-time setup in the repository (or organization, shared to selected repos):
-#   Variables (Settings -> Secrets and variables -> Actions -> Variables):
-#     ISSUELENS_APP_ID          GitHub App numeric App ID
-#   Secrets (... -> Secrets):
-#     ISSUELENS_APP_PRIVATE_KEY GitHub App private key (full PEM contents)
+#   Secrets (Settings -> Secrets and variables -> Actions -> Secrets):
 #     AZURE_CLIENT_ID           Client ID of the OIDC identity (UAMI or app reg)
 #     AZURE_TENANT_ID
 #     AZURE_SUBSCRIPTION_ID
@@ -17,9 +14,9 @@
 #     ISSUELENS_AGENT_SCOPE     Entra scope/resource for the endpoint token
 #     RECIPIENTS                Comma-separated email addresses for reports
 #
-# actions/create-github-app-token mints a repository-scoped installation token,
-# so all GitHub writes are attributed to the App bot. Agent endpoint access uses
-# Azure OIDC and does not expose Azure credentials to the agent prompt.
+# The hosted agent owns its Key Vault-backed GitHub App identity and mints
+# repository-scoped tokens internally. Target repositories store no App private
+# key. Agent endpoint access uses Azure OIDC.
 
 name: IssueLens issue triage
 
@@ -43,15 +40,6 @@ jobs:
   triage:
     runs-on: ubuntu-latest
     steps:
-      - name: Mint GitHub App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ vars.ISSUELENS_APP_ID }}
-          private-key: ${{ secrets.ISSUELENS_APP_PRIVATE_KEY }}
-          permission-contents: read
-          permission-issues: write
-
       - name: Azure login (OIDC) for the agent endpoint
         uses: azure/login@v3
         with:
@@ -64,7 +52,6 @@ jobs:
           EVENT: ${{ github.event_name }}
           REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
-          GH_APP_TOKEN: ${{ steps.app-token.outputs.token }}
           AGENT_URL: ${{ secrets.ISSUELENS_AGENT_URL }}
           AGENT_SCOPE: ${{ secrets.ISSUELENS_AGENT_SCOPE }}
           RECIPIENTS: ${{ secrets.RECIPIENTS }}
@@ -84,10 +71,7 @@ jobs:
             input+="Then email a concise summary to these comma-separated recipients: ${RECIPIENTS}."
           fi
 
-          payload=$(jq -cn \
-            --arg input "$input" \
-            --arg tok "$GH_APP_TOKEN" \
-            '{input:$input, github_token:$tok}')
+          payload=$(jq -cn --arg input "$input" '{input:$input}')
 
           agent_token=$(az account get-access-token \
             --scope "$AGENT_SCOPE" \

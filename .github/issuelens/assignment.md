@@ -12,7 +12,7 @@ assignees when making an assignment.
 ## GitHub Access And Repository Policy
 
 - **Keywords**: GitHub App, installation token, MCP, label, assignee, repository config, issuelens.yml, authentication, permission
-- **Paths**: issuelens_config.py, issuelens_config_tool.py, schemas/**, examples/**, skills/github-access/**, skills/issuelens-config/**, skills/label-issue/**, skills/assign-issue/**
+- **Paths**: issuelens_config.py, issuelens_config_tool.py, github_app_mcp/**, schemas/**, examples/**, skills/issuelens-config/**, skills/label-issue/**, skills/assign-issue/**
 - **Owners**: @chagong
 
 ## Triage Behavior

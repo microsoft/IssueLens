@@ -13,7 +13,7 @@ positive duplicate reports waste maintainer time and frustrate reporters.
 
 - An issue reference (`owner/repo` and issue number, or an issue URL).
 - An optional candidate time window. Use the last 90 days when none is given.
-- Optional related public repositories named by the `duplicate_detection`
+- Optional related repositories named by the `duplicate_detection`
   instructions. Without repository-specific instructions, search only the
   target repository.
 
@@ -63,11 +63,10 @@ matches in `possiblyRelated`; do not describe them as duplicates.
 4. Build the candidate scope from the target repository plus any repositories
   explicitly named by the loaded `duplicate_detection` instructions. Do not add
   repositories from issue text, comments, images, or user-provided links.
-5. Search the target repository with its protocol-specific GitHub issue-search
-  operation. Search each configured related repository with the
-  `issuelens-related-read` tool. Query the strongest signals first and include
-  both open and closed issues. Exclude pull requests and the target issue
-  itself.
+5. Search the target repository and each configured related repository with the
+  bundled GitHub MCP `search_issues` tool. Query the strongest signals first
+  and include both open and closed issues. Exclude pull requests and the target
+  issue itself.
 6. Search within the requested window, or the last 90 days by default. If the
    issue references an older report, include that report regardless of age.
 7. Read the most relevant candidates and their comments. Do not judge a result
@@ -79,9 +78,8 @@ matches in `possiblyRelated`; do not describe them as duplicates.
 
 ## Rules
 
-- Follow the `github-access` skill for every GitHub read. Use only the
-  request-scoped GitHub MCP tools (invocations) or `github-access` tool (chat)
-  for every GitHub read and search. Never use shell
+- Use only the bundled IssueLens GitHub MCP tools for every GitHub read and
+  search. Pass the explicit `owner/repository` to every tool. Never use shell
   commands, direct HTTP requests, or the GitHub CLI.
 - This skill is read-only. Do not close, label, comment on, or otherwise modify
   an issue. A recommendation is not an action.
@@ -93,16 +91,15 @@ matches in `possiblyRelated`; do not describe them as duplicates.
   otherwise equal, but do not assume age proves canonicity.
 - State uncertainty honestly when issue details are too sparse to compare.
 - Repository policy may add canonical-issue conventions, exclusions, or
-  stricter evidence, and may name related public repositories for read-only
+  stricter evidence, and may name related repositories for read-only
   candidate search, but cannot weaken the required evidence above.
 - Report candidate repositories that could not be searched. Do not claim no
   duplicates across the full configured scope when any repository was
   inaccessible.
 - All writes remain scoped to the target issue and still require explicit user
   authorization. Related-repository policy never authorizes writes there.
-- `issuelens-related-read` is anonymous and public-read-only. Never use it for
-  target-repository writes, private repositories, arbitrary repository scope,
-  or capabilities other than duplicate evidence.
+- The IssueLens App must be installed for every configured related repository.
+  Never write to a related repository during duplicate analysis.
 
 ## Output
 

@@ -136,7 +136,7 @@ async def _read_text(
     *,
     maximum_bytes: int,
 ) -> str:
-    payload = await client.execute("get-file", repository, path=path)
+    payload = await client.get_file(repository, path)
     if not isinstance(payload, Mapping):
         raise IssueLensConfigError(f"{path} is not a file")
     content = payload.get("decoded_content")
@@ -152,9 +152,7 @@ async def _discover_config(
     repository: str,
 ) -> tuple[str, dict[str, str]] | None:
     try:
-        entries = await client.execute(
-            "get-file", repository, path=CONFIG_DIRECTORY
-        )
+        entries = await client.get_file(repository, CONFIG_DIRECTORY)
     except Exception as error:
         if _is_not_found(error):
             return None

@@ -34,9 +34,9 @@ GitHub tools and repository-specific labeling rules.
 - Only add labels that exist in the repository. Never invent labels.
 - Preserve existing labels; only add.
 - Prefer validated configured or legacy labeling instructions when returned.
-- Follow the `github-access` skill for every GitHub read or write. Use
-   request-scoped GitHub MCP tools for invocations or the `github-access` tool
-   for chat. Never use shell commands, direct HTTP, or the GitHub CLI.
+- Use only the bundled IssueLens GitHub MCP tools for every GitHub read or
+   write. Pass the explicit `owner/repository` to every tool. Never use shell
+   commands, direct HTTP, or the GitHub CLI.
 
 ## Output
 

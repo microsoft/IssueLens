@@ -37,13 +37,25 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn('"find-duplicates"', main_source)
         self.assertIn('"issuelens-config"', main_source)
         self.assertIn('"label-issue"', main_source)
-        self.assertIn("related public repositories", (
+        duplicate_skill = (
             ROOT / "skills" / "find-duplicates" / "SKILL.md"
-        ).read_text(encoding="utf-8"))
+        ).read_text(encoding="utf-8")
+        self.assertIn("configured related repository", duplicate_skill)
+        self.assertIn("IssueLens App must be installed", duplicate_skill)
         self.assertIn('"assign-issue"', main_source)
         self.assertIn('"notify"', main_source)
         self.assertIn("issue_image_attachments", main_source)
-        self.assertIn("RequestTokenProvider", main_source)
+        self.assertIn("GitHubAppTokenProvider", main_source)
+        self.assertIn('"type": "stdio"', main_source)
+        self.assertIn('"GITHUB_MCP_ENABLE_WRITES": "true"', main_source)
+        self.assertIn("_new_host_github_client", main_source)
+        self.assertNotIn("RequestTokenProvider", main_source)
+        self.assertNotIn("github-access", main_source)
+        self.assertNotIn("issuelens-related-read", main_source)
+        self.assertNotIn('data.get("github_token")', main_source)
+        self.assertNotIn("api.githubcopilot.com/mcp", main_source)
+        self.assertNotIn("_GITHUB_APP_PROVIDER", main_source)
+        self.assertNotIn("_GITHUB_APP_CLIENT", main_source)
         self.assertNotIn('"name": "issue-triage"', main_source)
         self.assertNotIn("critical-issue-analyst", main_source)
 

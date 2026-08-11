@@ -21,7 +21,7 @@ fabricate a send.
 
 The Foundry toolbox may expose additional notification capabilities. Toolbox
 tools are for non-GitHub operations only; all GitHub access must follow the
-`github-access` skill and use the `github-access` tool in chat.
+bundled IssueLens GitHub MCP tools.
 
 ## Inputs
 

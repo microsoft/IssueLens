@@ -10,20 +10,17 @@ two protocols from a single host:
 * **responses** (``POST /responses``) — interactive chat (playground, Teams,
   any OpenAI Responses client).
 
-The invocation payload has two required fields and one optional field:
+The invocation payload has one required field and one optional field:
 
 * ``input`` — the user's task (a free-form text prompt).
-* ``github_token`` — a GitHub token used to authenticate the remote GitHub MCP
-  server, so the agent reads issues / applies labels as that token's identity.
 * ``attachments`` — optional inline Copilot ``blob`` attachments containing
     base64-encoded images or files.
 
-Chat has no payload token, so the skill-owned ``github-access`` tool uses the
-IssueLens GitHub App. Its bundled skill helper resolves the installation for
-each target repository, mints and caches a short-lived token, and performs only
-the allowlisted issue-triage operations. Tokens are never returned to the model.
-The trusted issue-image loader uses the same protocol-specific GitHub identity
-and attaches validated issue-body images to the Copilot turn as vision content.
+Both protocols use the bundled stdio MCP server. Each Copilot session owns one
+server process, which resolves the IssueLens GitHub App installation for every
+target repository and caches repository- and permission-scoped tokens only for
+that process lifetime. The trusted issue-image and repository-policy loaders use
+separate request-local clients and never return credentials to the model.
 
 Model (inference) auth is selected automatically:
 
@@ -39,7 +36,6 @@ when its endpoint env var is set.
 """
 
 import asyncio
-import importlib.util
 import json
 import logging
 import os
@@ -69,6 +65,16 @@ from copilot.session_events import (
     SessionIdleData,
 )
 from copilot.tools import Tool, ToolInvocation, ToolResult
+
+from github_app_mcp.src.issuelens_github_mcp.auth import (
+    GitHubAppError,
+    GitHubAppTokenProvider,
+)
+from github_app_mcp.src.issuelens_github_mcp.config import (
+    ConfigurationError,
+    GitHubAppConfig,
+)
+from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient
 from issue_image_context import issue_image_attachments
 from issuelens_config_tool import create_tool as create_issuelens_config_tool
 from media_inputs import (
@@ -78,7 +84,9 @@ from media_inputs import (
     redacted_input_items,
     response_input,
 )
-from related_github_tool import create_tool as create_related_github_tool
+
+_project_dir = pathlib.Path(__file__).parent
+_github_mcp_src = _project_dir / "github_app_mcp" / "src"
 
 load_dotenv(override=False)
 
@@ -94,31 +102,8 @@ app = IssueLensHost()
 
 _client: CopilotClient | None = None
 _client_lock = asyncio.Lock()
-_project_dir = pathlib.Path(__file__).parent
 _agents_dir = _project_dir / "agents"
 _skills_dir = str(_project_dir / "skills")
-_github_app_script = (
-    _project_dir / "skills" / "github-access" / "scripts" / "github_app.py"
-)
-_github_access_tool_script = (
-    _project_dir / "skills" / "github-access" / "scripts" / "tool.py"
-)
-
-
-def _load_module(name: str, path: pathlib.Path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"Could not load {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_github_app = _load_module("issuelens_github_app", _github_app_script)
-_github_access_tool = _load_module(
-    "issuelens_github_access_tool", _github_access_tool_script
-)
 _working_dir = (
     os.environ.get("HOME")
     or os.environ.get("USERPROFILE")
@@ -152,7 +137,6 @@ _TRIAGE_AGENT: CustomAgentConfig = {
     ),
     "prompt": _load_prompt(_agents_dir / "triage.md"),
     "skills": [
-        "github-access",
         "issuelens-config",
         "find-duplicates",
         "label-issue",
@@ -171,7 +155,7 @@ _FIND_CRITICALS_AGENT: CustomAgentConfig = {
         "and regression issues."
     ),
     "prompt": _load_prompt(_agents_dir / "find-criticals.md"),
-    "skills": ["github-access", "issuelens-config"],
+    "skills": ["issuelens-config"],
     "infer": True,
 }
 
@@ -224,21 +208,35 @@ def _byok_provider() -> tuple[ProviderConfig | None, str | None]:
 # ── Client & session management ──────────────────────────────────────────────
 
 
-def _github_mcp_server(gh_token: str) -> dict:
-    """Build the remote GitHub MCP server config for the given token.
-
-    Uses the Copilot-hosted GitHub MCP endpoint
-    (https://api.githubcopilot.com/mcp/), authenticated with the token supplied
-    in the invocation payload. GitHub actions are attributed to that token's
-    identity, with its scoped permissions.
-    """
+def _github_mcp_server() -> dict:
+    """Build one session-owned GitHub App stdio MCP server configuration."""
+    config = GitHubAppConfig.from_environment(os.environ)
+    python_path = os.pathsep.join(filter(None, (
+        str(_github_mcp_src),
+        os.environ.get("PYTHONPATH"),
+    )))
     return {
-        "type": "http",
-        "url": os.environ.get(
-            "GITHUB_MCP_URL", "https://api.githubcopilot.com/mcp/"),
-        "headers": {"Authorization": f"Bearer {gh_token}"},
+        "type": "stdio",
+        "command": sys.executable,
+        "args": ["-m", "issuelens_github_mcp.server"],
+        "env": {
+            "GITHUB_APP_ID": config.app_id,
+            "GITHUB_APP_PRIVATE_KEY_SECRET_URI": (
+                config.private_key_secret_uri
+            ),
+            "GITHUB_MCP_ENABLE_WRITES": "true",
+            "PYTHONPATH": python_path,
+        },
+        "working_directory": str(_project_dir),
         "tools": ["*"],
     }
+
+
+def _new_host_github_client() -> GitHubClient:
+    """Create a request-local, read-only client for trusted host loaders."""
+    config = GitHubAppConfig.from_environment(os.environ)
+    provider = GitHubAppTokenProvider(config)
+    return GitHubClient(provider, writes_enabled=False)
 
 
 async def _ensure_client() -> CopilotClient:
@@ -280,19 +278,9 @@ async def _ensure_client() -> CopilotClient:
         return _client
 
 
-def _build_mcp_servers(gh_token: str | None) -> dict:
-    """Build the MCP server config for GitHub resource access.
-
-    Notifications are delivered by in-process tools (see ``_notification_tools``),
-    not via an MCP server.
-    """
-    servers: dict = {}
-    if gh_token:
-        servers["github"] = _github_mcp_server(gh_token)
-    else:
-        logger.warning(
-            "No github_token available; GitHub tools disabled.")
-    return servers
+def _build_mcp_servers() -> dict:
+    """Build the session-owned GitHub MCP server configuration."""
+    return {"github": _github_mcp_server()}
 
 
 def _session_options(
@@ -477,51 +465,19 @@ def _notification_tools() -> list[Tool]:
     return tools
 
 
-# Built once at startup from configured endpoint and App credential variables.
+# Built once at startup from configured notification endpoints.
 _NOTIFICATION_TOOLS = _notification_tools()
-try:
-    _GITHUB_APP_PROVIDER = _github_app.GitHubAppTokenProvider.from_environment()
-except _github_app.GitHubAppError:
-    _GITHUB_APP_PROVIDER = None
-
-_GITHUB_APP_CLIENT = (
-    _github_app.GitHubAppClient(_GITHUB_APP_PROVIDER)
-    if _GITHUB_APP_PROVIDER
-    else None
-)
-_GITHUB_ACCESS_TOOL = (
-    _github_access_tool.create_tool(_github_app, client=_GITHUB_APP_CLIENT)
-    if _GITHUB_APP_CLIENT
-    else None
-)
-_ISSUELENS_CONFIG_TOOL = (
-    create_issuelens_config_tool(_GITHUB_APP_CLIENT)
-    if _GITHUB_APP_CLIENT
-    else None
-)
-_RELATED_GITHUB_TOOL = (
-    create_related_github_tool()
-    if _GITHUB_APP_CLIENT
-    else None
-)
-if _GITHUB_ACCESS_TOOL is None:
-    logger.info("GitHub App chat tool is not configured")
-_RUNTIME_TOOLS = [
-    *_NOTIFICATION_TOOLS,
-    *([_GITHUB_ACCESS_TOOL] if _GITHUB_ACCESS_TOOL else []),
-    *([_ISSUELENS_CONFIG_TOOL] if _ISSUELENS_CONFIG_TOOL else []),
-    *([_RELATED_GITHUB_TOOL] if _RELATED_GITHUB_TOOL else []),
-]
+_RUNTIME_TOOLS = [*_NOTIFICATION_TOOLS]
 
 
 async def _stream_response(invocation_id: str, payload: dict):
     """Create a fresh session for this invocation and stream its events as SSE.
 
-    A new session is created per request so its GitHub MCP server and issue-image
-    tool use only that request's token and repository context.
+    A new session is created per request, so its stdio MCP process and token
+    cache are destroyed when the request session disconnects.
     """
     client = await _ensure_client()
-    mcp_servers = _build_mcp_servers(payload.get("github_token"))
+    mcp_servers = _build_mcp_servers()
     prompt = _build_prompt(payload)
     attachments = payload.get("_copilot_attachments") or []
 
@@ -529,25 +485,22 @@ async def _stream_response(invocation_id: str, payload: dict):
         yield f"data: {json.dumps({'type': 'error', 'message': 'empty task'})}\n\n".encode()
         return
 
-    request_github_client = _github_app.GitHubAppClient(
-        _github_app.RequestTokenProvider(payload["github_token"])
-    )
+    request_github_client = _new_host_github_client()
     request_config_tool = create_issuelens_config_tool(request_github_client)
-    request_related_tool = create_related_github_tool()
     try:
         issue_attachments = await issue_image_attachments(
             prompt,
             request_github_client,
             maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
         )
-    except _github_app.GitHubAppError:
+    except GitHubAppError:
         logger.info("Invocation issue-body images could not be loaded")
         issue_attachments = []
     attachments = [*attachments, *issue_attachments]
     session = await client.create_session(
         **_session_options(
             mcp_servers,
-            [*_NOTIFICATION_TOOLS, request_config_tool, request_related_tool],
+            [*_NOTIFICATION_TOOLS, request_config_tool],
         )
     )
     session_id = getattr(session, "session_id", None)
@@ -594,12 +547,7 @@ async def handle_invoke(request: Request) -> Response:
         has_input = isinstance(data.get("input"), str) and data["input"].strip()
         if not has_input:
             raise ValueError('provide a non-empty "input"')
-        has_token = (
-            isinstance(data.get("github_token"), str)
-            and data["github_token"].strip()
-        )
-        if not has_token:
-            raise ValueError('provide a "github_token"')
+        _github_mcp_server()
         data["_copilot_attachments"] = invocation_attachments(
             data.get("attachments")
         )
@@ -614,7 +562,6 @@ async def handle_invoke(request: Request) -> Response:
                         "Triage open issues in owner/repo and label the "
                         "critical ones."
                     ),
-                    "github_token": "ghs_...",
                     "attachments": [
                         {
                             "type": "blob",
@@ -635,8 +582,8 @@ async def handle_invoke(request: Request) -> Response:
 
 # ── Chat (responses protocol) ────────────────────────────────────────────────
 #
-# Chat uses the skill-owned GitHub tools registered above for GitHub.
-# A Foundry toolbox MCP server supplies only non-GitHub capabilities.
+# Chat uses the session-owned GitHub App stdio MCP server. A Foundry toolbox
+# MCP server supplies only non-GitHub capabilities.
 
 _TOOLBOX_ENDPOINT_ENV = "TOOLBOX_ENDPOINT"
 _TOOLBOX_SCOPE = "https://ai.azure.com/.default"
@@ -652,9 +599,8 @@ _GREETING = (
 )
 _ATTACHMENT_ONLY_PROMPT = "Analyze the attached content for this issue-triage task."
 _GITHUB_APP_UNCONFIGURED = (
-    "GitHub access for chat isn't configured. Set `GITHUB_APP_ID` and "
-    "`GITHUB_APP_PRIVATE_KEY_SECRET_URI` (hosted) or "
-    "`GITHUB_APP_PRIVATE_KEY_PATH` (local)."
+    "GitHub access isn't configured. Set `GITHUB_APP_ID` and "
+    "`GITHUB_APP_PRIVATE_KEY_SECRET_URI`."
 )
 
 # Copilot session id per conversation, so chat stays multi-turn.
@@ -704,13 +650,17 @@ async def _close_session(session) -> None:
         logger.debug("session.disconnect() failed", exc_info=True)
 
 
-async def _chat_session(conversation: str, mcp_servers: dict):
+async def _chat_session(
+    conversation: str,
+    mcp_servers: dict,
+    runtime_tools: list[Tool],
+):
     """Open this conversation's Copilot session, resuming it when one exists.
 
     A session is resumed per conversation so chat history is preserved.
     """
     client = await _ensure_client()
-    options = _session_options(mcp_servers)
+    options = _session_options(mcp_servers, runtime_tools)
 
     session_id = _chat_session_ids.get(conversation)
     if session_id:
@@ -769,23 +719,26 @@ async def handle_chat(
             yield stream.emit_completed()
             return
 
-    if not any(tool.name == "github-access" for tool in _RUNTIME_TOOLS):
+    try:
+        request_github_client = _new_host_github_client()
+        github_mcp_server = _github_mcp_server()
+    except (ConfigurationError, GitHubAppError):
         for event in stream.output_item_message(_GITHUB_APP_UNCONFIGURED):
             yield event
         yield stream.emit_completed()
         return
 
-    if _GITHUB_APP_CLIENT:
-        try:
-            issue_attachments = await issue_image_attachments(
-                prompt,
-                _GITHUB_APP_CLIENT,
-                maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
-            )
-        except _github_app.GitHubAppError:
-            logger.info("Chat issue-body images could not be loaded")
-            issue_attachments = []
-        attachments = [*attachments, *issue_attachments]
+    request_config_tool = create_issuelens_config_tool(request_github_client)
+    try:
+        issue_attachments = await issue_image_attachments(
+            prompt,
+            request_github_client,
+            maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
+        )
+    except GitHubAppError:
+        logger.info("Chat issue-body images could not be loaded")
+        issue_attachments = []
+    attachments = [*attachments, *issue_attachments]
 
     conversation = (
         context.conversation_id
@@ -793,12 +746,16 @@ async def handle_chat(
         or _ANONYMOUS_CONVERSATION
     )
     toolbox_endpoint = os.environ.get(_TOOLBOX_ENDPOINT_ENV, "").strip()
-    mcp_servers = {}
+    mcp_servers = {"github": github_mcp_server}
     if toolbox_endpoint:
         mcp_servers["toolbox"] = _toolbox_mcp_server(
             toolbox_endpoint, context.platform_context.call_id
         )
-    session = await _chat_session(conversation, mcp_servers)
+    session = await _chat_session(
+        conversation,
+        mcp_servers,
+        [*_NOTIFICATION_TOOLS, request_config_tool],
+    )
 
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -826,6 +783,12 @@ async def handle_chat(
                 raise item
             if item:
                 yield text.emit_delta(item)
+    except Exception:
+        _chat_session_ids.pop(conversation, None)
+        logger.info("Chat session failed; discarded resumable session", exc_info=True)
+        yield text.emit_delta(
+            "GitHub tool session failed. Start a new turn to retry."
+        )
     finally:
         unsubscribe()
         await _close_session(session)
@@ -847,4 +810,8 @@ if __name__ == "__main__":
             "Error: Set GITHUB_TOKEN (Copilot model) or "
             "FOUNDRY_PROJECT_ENDPOINT + AZURE_AI_MODEL_DEPLOYMENT_NAME "
             "(BYOK Foundry model)")
+    try:
+        GitHubAppConfig.from_environment(os.environ)
+    except ConfigurationError as error:
+        sys.exit(f"Error: {error}")
     app.run()

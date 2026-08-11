@@ -72,10 +72,10 @@ returns no similar issues with a clear, recurring assignee.
 
 ## Rules
 
-- Follow the `github-access` skill for every GitHub read or write. Use only the
-  request-scoped GitHub MCP tools (invocations) or `github-access` tool (chat)
-  for every read, search, and write. Never use a
-  shell command, bundled script, direct HTTP request, or GitHub CLI command.
+- Use only the bundled IssueLens GitHub MCP tools for every GitHub read or
+  write. Pass the explicit `owner/repository` to every read, search, and write.
+  Never use a shell command, bundled script, direct HTTP request, or GitHub CLI
+  command.
 - Never remove or replace existing assignees.
 - Do not assign a team handle directly; GitHub issue assignees must be
   individual users. Resolve a team to an eligible individual only when the

@@ -26,8 +26,7 @@ class RepositoryClient:
     def __init__(self, files):
         self.files = files
 
-    async def execute(self, operation, repository, *, path):
-        self.assert_operation(operation)
+    async def get_file(self, repository, path):
         if path == ".github":
             entries = []
             for file_path in self.files:
@@ -40,10 +39,6 @@ class RepositoryClient:
         if path not in self.files:
             raise NotFoundError("Not Found")
         return {"type": "file", "decoded_content": self.files[path]}
-
-    def assert_operation(self, operation):
-        if operation != "get-file":
-            raise AssertionError(f"Unexpected operation: {operation}")
 
 
 class IssueLensConfigTests(unittest.IsolatedAsyncioTestCase):

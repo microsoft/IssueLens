@@ -1,0 +1,105 @@
+# IssueLens GitHub MCP server
+
+This subproject is the stdio MCP server for the GitHub operations that IssueLens
+currently needs. `main.py` starts one server process for each Copilot session.
+
+## Security model
+
+- The GitHub App private key is loaded only from an Azure Key Vault secret URI
+  through `DefaultAzureCredential`. Private-key contents are never accepted as
+  command-line arguments or environment variables.
+- Every tool requires an explicit `owner/repository` argument.
+- The GitHub App installation is the repository authorization boundary. A
+  request fails when the App is not installed for its repository.
+- Installation tokens are minted for one repository using GitHub's
+  `repositories` restriction and for only the permission required by the tool.
+  The cache key includes the repository and permission set.
+- Write tools are absent from MCP discovery unless the trusted host sets
+  `GITHUB_MCP_ENABLE_WRITES=true`. The GitHub client enforces the same gate.
+- The server exposes fixed GitHub REST routes. It has no generic HTTP, REST, or
+  GraphQL tool.
+- Search qualifiers cannot change repository, organization, or user scope.
+  Repository paths, pagination, file sizes, comments, names, and tool results
+  are bounded.
+- The stdio server writes no application output to stdout outside MCP framing.
+
+Install the App only on repositories IssueLens is authorized to access. Adding
+a repository to the installation grants IssueLens access to that repository.
+
+## Tools
+
+Read tools are always registered:
+
+| Tool | Minimum token permission |
+|---|---|
+| `get_repository` | Metadata: read |
+| `list_issues` | Issues: read |
+| `get_issue` | Issues: read |
+| `list_issue_comments` | Issues: read |
+| `list_issue_reactions` | Issues: read |
+| `search_issues` | Issues: read |
+| `list_labels` | Issues: read |
+| `get_file` | Contents: read |
+
+Write tools are registered only when writes are enabled:
+
+| Tool | Minimum token permission |
+|---|---|
+| `add_labels` | Issues: write |
+| `set_assignees` | Issues: write |
+| `add_issue_comment` | Issues: write |
+
+## Configuration
+
+| Environment variable | Required | Description |
+|---|---|---|
+| `GITHUB_APP_ID` | Yes | Numeric GitHub App ID |
+| `GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Yes | Azure Key Vault secret URI containing the App PEM |
+| `GITHUB_MCP_ENABLE_WRITES` | No | `false` by default; set `true` only for an authorized session |
+
+The process identity needs Azure Key Vault secret `get` permission. The GitHub
+App needs Metadata read, Contents read, and Issues read/write for the complete
+toolset. GitHub narrows each minted token below the App's maximum permissions.
+All private-key, installation, and token caches live only in the stdio process
+and are discarded when that session-owned process exits.
+
+## Local verification
+
+Install the subproject into the repository virtual environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .\github_app_mcp
+```
+
+Run all isolated tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover `
+  -s .\github_app_mcp\tests -p "test_*.py" -v
+```
+
+For a real local server, authenticate to Azure using a credential supported by
+`DefaultAzureCredential`, set the required variables above, and run:
+
+```powershell
+.\.venv\Scripts\issuelens-github-mcp.exe
+```
+
+Equivalent Copilot SDK stdio configuration shape:
+
+```python
+{
+    "type": "stdio",
+    "command": r"C:\path\to\.venv\Scripts\issuelens-github-mcp.exe",
+    "env": {
+        "GITHUB_APP_ID": "123456",
+        "GITHUB_APP_PRIVATE_KEY_SECRET_URI": (
+            "https://vault-name.vault.azure.net/secrets/github-app-key"
+        ),
+        "GITHUB_MCP_ENABLE_WRITES": "false",
+    },
+    "tools": ["*"],
+}
+```
+
+Do not add private-key contents to this configuration.

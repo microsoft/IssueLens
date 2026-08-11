@@ -6,26 +6,37 @@ A GitHub issue-triage agent built on the [GitHub Copilot SDK](https://pypi.org/p
 
 ## How It Works
 
-Both protocols run in the same process and share the same orchestrator, skills, and two sub-agents; only how the GitHub token is obtained differs.
+Both protocols run in the same process and share the same orchestrator, skills,
+two sub-agents, and bundled GitHub App stdio MCP server.
 
 ### Automation — `POST /invocations`
 
-1. Receives a JSON task. The payload requires `input` (the task, a free-form text prompt) and `github_token` (used to authenticate the GitHub MCP server), with optional inline `attachments`, e.g. `{"input": "Triage open issues in owner/repo", "github_token": "ghs_..."}`.
+1. Receives a JSON task. The payload requires `input` (the task, a free-form
+   text prompt), with optional inline `attachments`, e.g.
+   `{"input": "Triage open issues in owner/repo"}`.
 2. Creates a **fresh Copilot session per request** configured with:
    - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
-   - the remote **GitHub MCP server**, authenticated with the `github_token` from the payload — so the agent reads issues and applies labels as that token's identity;
-  - the constrained in-process `issuelens-config` tool, authenticated with the same request token;
-  - in-process notification tools when their Logic App endpoints are configured.
+   - the bundled **GitHub App stdio MCP server**, whose process and token cache
+     belong only to that Copilot session;
+   - the constrained in-process `issuelens-config` tool, backed by a separate
+     request-local read-only App client;
+   - in-process notification tools when their Logic App endpoints are configured.
 3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents.md`. It routes issue-level work to `triage` and critical-issue scans to `find-criticals`. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions.
 4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Critical-issue scans end with a JSON report.
 
 ### Chat — `POST /responses`
 
 1. Receives an OpenAI Responses request (Foundry playground, Teams, or any Responses client), including inline `input_image` and `input_file` content.
-2. Loads the `github-access` skill and calls its skill-owned `github-access` tool. The host image loader and tool resolve the App installation for each `owner/repository`, mint and cache its short-lived installation token, and never return credentials to the model.
-3. Uses the constrained `issuelens-config` tool with the same App client to discover and validate target-repository triage policy.
+2. Starts the bundled GitHub App stdio MCP server for the Copilot session. It
+  resolves the installation for each `owner/repository`, mints tokens limited
+  to that repository and the minimum required permissions, and never returns
+  credentials to the model.
+3. Uses a request-local read-only App client for issue-body images and the
+  constrained `issuelens-config` tool.
 4. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
-5. Performs only allowlisted issue-triage operations: repository/file reads, issue and comment reads/searches, label reads/additions, and assignee updates.
+5. Performs only the bundled issue-triage operations: repository/file reads,
+   issue and comment reads/searches, label reads/additions, assignee updates,
+   and explicitly requested issue comments.
 6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
 
 ## Environment Variables
@@ -42,18 +53,14 @@ If the Foundry variables are set they take precedence over `GITHUB_TOKEN`.
 
 ### GitHub resource access
 
-For **invocations**, the agent authenticates the remote GitHub MCP server with the `github_token` supplied in each payload — there is nothing to configure via environment variables.
-
-For **chat**, configure the IssueLens GitHub App registration. Every request
-names its target as `owner/repository`, and the tool resolves the matching App
+Configure the IssueLens GitHub App registration for both protocols. Every tool
+names its target as `owner/repository`, and the server resolves the matching App
 installation dynamically:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GITHUB_APP_ID` | For chat | Numeric GitHub App ID |
-| `GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Hosted chat | Azure Key Vault secret URI containing the App PEM |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | Local chat | Path to an ignored local PEM, such as `.secrets/issuelens.pem` |
-| `GITHUB_MCP_URL` | No | GitHub MCP endpoint used by the **invocations** path (default `https://api.githubcopilot.com/mcp/`). Override for GitHub Enterprise |
+| `GITHUB_APP_ID` | Yes | Numeric GitHub App ID |
+| `GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Yes | Azure Key Vault secret URI containing the App PEM |
 
 Store the PEM in Key Vault; never place it in `.env`, an azd environment, or a
 deployment manifest. Grant the hosted agent's managed identity **Key Vault
@@ -69,11 +76,13 @@ azd env set GITHUB_APP_PRIVATE_KEY_SECRET_URI `
   "https://<vault>.vault.azure.net/secrets/issuelens-github-app-key"
 ```
 
-Each target repository must be included in an installation of the App. The
-helper caches tokens by installation and refreshes them five minutes before
-expiry. Configure the App with **Metadata: Read**, **Issues: Read and write**,
-and **Contents: Read** (for repository instruction and owner-mapping files).
-It does not start an MCP server and never exposes tokens to the model.
+Each accessible repository must be included in an installation of the App;
+installation membership is IssueLens's repository authorization boundary. Each
+Copilot session owns one stdio MCP process. That process caches tokens only in
+memory by repository and permission set, refreshes them five minutes before
+expiry, and discards them when the process exits. Configure the App with
+**Metadata: Read**, **Issues: Read and write**, and **Contents: Read**. Tokens
+and the private key never enter model context.
 
 ## Target Repository Configuration
 
@@ -103,7 +112,7 @@ Every instruction domain is optional:
 | Domain | Repository-specific policy it may contain |
 |--------|-------------------------------------------|
 | `criticality` | Core functions, known workarounds, and additional hot/blocking/regression signals |
-| `duplicate_detection` | Canonical issue conventions, exclusions, stricter matching evidence, and related public repositories for read-only candidate search |
+| `duplicate_detection` | Canonical issue conventions, exclusions, stricter matching evidence, and related repositories for read-only candidate search |
 | `labeling` | Existing-label mappings, priority rubric, and component classification |
 | `assignment` | Area owners, keyword/path mappings, routing rules, and default owners |
 | `notification_content` | Report title, grouping, emphasis, and presentation only |
@@ -125,21 +134,15 @@ Configuration is limited to one 16 KB YAML document and 64 KB per UTF-8
 Markdown instruction file. Paths must be repository-relative POSIX paths.
 Repository policy cannot authorize writes, weaken mandatory evidence or safety
 rules, choose notification recipients/channels, or override response formats.
-Duplicate instructions may name related public repositories. IssueLens accesses
-them anonymously through fixed read-only issue operations, reports inaccessible
-repositories, and never uses this scope for writes.
+Duplicate instructions may name related repositories. IssueLens accesses them
+through the same App-backed MCP tools, reports repositories without a matching
+App installation, and never uses this scope for writes.
 
 ### Foundry toolbox
 
 Set `TOOLBOX_ENDPOINT` to the versioned MCP endpoint for the toolbox containing
 non-GitHub chat capabilities. GitHub must remain excluded from this toolbox;
-chat GitHub access is provided only by the `github-access` tool.
-
-Verify a repository installation locally without printing the token:
-
-```powershell
-python skills/github-access/scripts/github_app.py microsoft/IssueLens
-```
+GitHub access is provided only by the bundled stdio MCP server.
 
 ### Notifications
 
@@ -150,8 +153,9 @@ App endpoint variables are configured.
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.12+
 - A GitHub fine-grained PAT (`github_pat_` prefix)
+- Azure credentials that can read the configured Key Vault secret
 
 Create one at [github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new) with **Account permissions → Copilot Requests → Read-only**.
 
@@ -162,18 +166,18 @@ Create one at [github.com/settings/personal-access-tokens/new](https://github.co
 <details>
 <summary><strong>Show steps</strong></summary>
 
-Create a local `.env` file from the sample template and set `GITHUB_TOKEN`:
+Create a local `.env` file from the sample template. Configure one model backend
+plus the GitHub App ID and Key Vault secret URI:
 
 ```bash
 cp .env.example .env  # skip if .env already exists
-# Edit .env and set GITHUB_TOKEN=github_pat_...
+# Edit .env and set the model variables plus GITHUB_APP_ID and
+# GITHUB_APP_PRIVATE_KEY_SECRET_URI.
 ```
 
-The sample loads `.env` automatically when running locally. If you plan to deploy with `azd`, also add the token to your azd environment so it can be injected into the hosted agent:
-
-```bash
-azd env set GITHUB_TOKEN="github_pat_..."
-```
+The sample loads `.env` automatically when running locally. `GITHUB_TOKEN` is
+needed only when using the optional GitHub Copilot model for local inference;
+Foundry BYOK deployments do not use or inject it.
 
 Next, start the agent locally with the `run` command:
 
@@ -200,7 +204,8 @@ Chat with a running agent using the **Agent Inspector**:
 ```bash
 pip install -r requirements.txt
 cp .env.example .env  # skip if .env already exists
-# Edit .env and set GITHUB_TOKEN=github_pat_...
+# Edit .env and set the model variables plus GITHUB_APP_ID and
+# GITHUB_APP_PRIVATE_KEY_SECRET_URI.
 python main.py
 ```
 
@@ -215,12 +220,12 @@ The agent starts on `http://localhost:8088/`.
 
 **Bash:**
 ```bash
-azd ai agent invoke --local '{"input": "Triage open issues in microsoft/vscode-java-pack and label the critical ones", "github_token": "ghs_..."}'
+azd ai agent invoke --local '{"input": "Triage open issues in microsoft/vscode-java-pack and label the critical ones"}'
 ```
 
 **PowerShell:**
 ```powershell
-azd ai agent invoke --local '{\"input\": \"Triage open issues in microsoft/vscode-java-pack and label the critical ones\", \"github_token\": \"ghs_...\"}'
+azd ai agent invoke --local '{\"input\": \"Triage open issues in microsoft/vscode-java-pack and label the critical ones\"}'
 ```
 
 ### Test with curl
@@ -229,30 +234,30 @@ azd ai agent invoke --local '{\"input\": \"Triage open issues in microsoft/vscod
 # Triage a repository (find critical issues) and notify
 curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
-  -d '{"input": "Triage open issues updated in the last 24h in owner/repo, then send the report", "github_token": "ghs_..."}'
+  -d '{"input": "Triage open issues updated in the last 24h in owner/repo, then send the report"}'
 
 # Label a single issue
 curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
-  -d '{"input": "Label issue owner/repo#123", "github_token": "ghs_..."}'
+  -d '{"input": "Label issue owner/repo#123"}'
 
 # Assign a single issue using area ownership and historical patterns
 curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
-  -d '{"input": "Assign issue owner/repo#123 to the right owner", "github_token": "ghs_..."}'
+  -d '{"input": "Assign issue owner/repo#123 to the right owner"}'
 
 # Find duplicate or related reports for a single issue
 curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
-  -d '{"input": "Find duplicates for issue owner/repo#123", "github_token": "ghs_..."}'
+  -d '{"input": "Find duplicates for issue owner/repo#123"}'
 
 # Free-form instruction
 curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
-  -d '{"input": "Summarize open issues in owner/repo", "github_token": "ghs_..."}'
+  -d '{"input": "Summarize open issues in owner/repo"}'
 
-# Chat (responses protocol) — no token in the body; the skill-backed tool
-# resolves the repository's App installation internally.
+# Chat (responses protocol) — no token in the body; the bundled server resolves
+# the repository's App installation internally.
 curl -N -X POST http://localhost:8088/responses \
   -H "Content-Type: application/json" \
   -d '{"input": "Find duplicates for issue owner/repo#123", "stream": true}'
@@ -266,7 +271,6 @@ base64 without a data-URL prefix:
 ```json
 {
   "input": "Use this screenshot while triaging owner/repo#123",
-  "github_token": "ghs_...",
   "attachments": [
     {
       "type": "blob",
@@ -341,12 +345,10 @@ Invocations (`POST /invocations`):
 | Field | Required | Description |
 |-------|----------|-------------|
 | `input` | Yes | The task — a free-form text prompt describing what to triage, label, or report |
-| `github_token` | Yes | GitHub token used to authenticate the remote GitHub MCP server (e.g. minted by a GitHub Actions workflow) |
 | `attachments` | No | Inline Copilot `blob` attachments with base64 `data`, `mimeType`, and optional `displayName` |
 
-Chat (`POST /responses`) takes a standard OpenAI Responses body; GitHub auth is
-handled internally by the `github-access` skill helper and tool
-tool.
+Chat (`POST /responses`) takes a standard OpenAI Responses body; both protocols
+use the same internal GitHub App MCP authentication.
 
 ### SSE Event Format
 
@@ -364,15 +366,18 @@ data: {"invocation_id": "...", "session_id": "..."}
 
 ## Triggering with GitHub Actions
 
-The recommended way to trigger the agent is a **GitHub Actions workflow in the target repository**. The workflow authenticates as the IssueLens GitHub App with [`actions/create-github-app-token`](https://github.com/actions/create-github-app-token) and passes the resulting installation token to the agent (via the `github_token` field), so the agent acts on GitHub as the App bot — no PAT, and no App private key on the agent for this path.
+The recommended trigger is a **GitHub Actions workflow in the target
+repository**. It authenticates only to the Foundry endpoint through Azure OIDC
+and sends the task. The hosted agent owns its Key Vault-backed App identity, so
+target repositories store no App private key and transmit no GitHub token.
 
 - **Event-driven:** `on: issues` (opened/reopened) → `label` mode.
 - **Scheduled:** `on: schedule` (cron) → `triage` mode.
 
 Copy [.github/workflows/issue-triage.yml](.github/workflows/issue-triage.yml)
-into a target repository's `.github/workflows/`, then configure the App client
-ID (variable), App private key (secret), agent URL/scope, and notification
-recipients. Keep repository-specific policy in `.github/issuelens.yml`; the
+into a target repository's `.github/workflows/`, then configure the Azure OIDC
+identity, agent URL/scope, and notification recipients. Keep repository-specific
+policy in `.github/issuelens.yml`; the
 workflow filename intentionally differs from the policy filename.
 
 > **Alternative (kept as backup):** [webhook_bridge/](webhook_bridge) is a GitHub App **webhook** → Azure Function → queue → agent path (install-and-go, no per-repo files, lowest latency). It's retained as an alternative trigger transport but is not required for the Actions-based setup.
@@ -448,18 +453,18 @@ agents/
 └── find-criticals.md        ← critical-issue scan and JSON report
 
 skills/
-├── github-access/   ← instructions, App client, and skill-owned SDK tool
 ├── find-duplicates/ ← identify duplicate and related issues
 ├── label-issue/     ← classify and apply labels
 ├── assign-issue/    ← route and assign issues
 └── notify/          ← send the report via configured notification tools
+github_app_mcp/             ← bundled GitHub App stdio MCP server
 ```
 
 Both sub-agents are available to IssueLens through runtime inference. `triage`
 analyzes target issues and owns requested duplicate, label, assignment, and
 notification work. `find-criticals` scans a repository and time scope for hot,
-blocking, and regression issues and returns the structured report. Both follow
-the `github-access` boundary, while `agents.md` keeps the parent IssueLens agent
+blocking, and regression issues and returns the structured report. Both use the
+same GitHub App MCP tools, while `agents.md` keeps the parent IssueLens agent
 responsible for selecting and sequencing them.
 
 Any subdirectory under `skills/` containing a `SKILL.md` file is loaded by the Copilot SDK.

@@ -9,7 +9,7 @@ thresholds.
 Compare candidates on the most specific applicable dimensions:
 
 - Protocol: `invocations` or `responses`.
-- Authentication path: request-scoped GitHub token, GitHub App installation,
+- Authentication path: session-owned GitHub MCP, GitHub App installation,
   Foundry model identity, or notification endpoint.
 - Failing operation or route, including the same HTTP status, exception, or
   Copilot session event when available.

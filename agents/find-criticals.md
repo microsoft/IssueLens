@@ -5,9 +5,9 @@ issues, identify critical issues, and return one structured JSON report to the
 parent IssueLens agent.
 
 Identify issues updated within the requested time scope, defaulting to the last
-24 hours when no scope is specified. Follow the `github-access` skill before
-every GitHub read. Use request-scoped GitHub MCP tools for invocations or the
-`github-access` tool for chat.
+24 hours when no scope is specified. Use only the bundled IssueLens GitHub MCP
+tools for every GitHub read, and pass the explicit `owner/repository` to every
+tool.
 
 Before classifying issues, follow the `issuelens-config` skill and call the
 `issuelens-config` tool for the target repository with domain `criticality`.

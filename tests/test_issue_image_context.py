@@ -17,8 +17,8 @@ class IssueImageContextTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_issue_url_images_become_copilot_blob_attachments(self):
         class Client:
-            async def execute(self, operation, repository, **arguments):
-                self.call = (operation, repository, arguments)
+            async def get_issue_images(self, repository, issue_number):
+                self.call = (repository, issue_number)
                 return {
                     "images": [{
                         "data": "aW1hZ2U=",
@@ -33,11 +33,7 @@ class IssueImageContextTests(unittest.IsolatedAsyncioTestCase):
             client,
         )
 
-        self.assertEqual(client.call, (
-            "get-issue-images",
-            "microsoft/IssueLens",
-            {"issue_number": 7},
-        ))
+        self.assertEqual(client.call, ("microsoft/IssueLens", 7))
         self.assertEqual(attachments, [{
             "type": "blob",
             "data": "aW1hZ2U=",

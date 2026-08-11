@@ -54,10 +54,8 @@ async def issue_image_attachments(
         return []
     attachments: list[Attachment] = []
     for repository, issue_number in issue_references(prompt):
-        result = await github_client.execute(
-            "get-issue-images",
-            repository,
-            issue_number=issue_number,
+        result = await github_client.get_issue_images(
+            repository, issue_number
         )
         for image_index, image in enumerate(result.get("images", []), start=1):
             media_type = image["mime_type"]

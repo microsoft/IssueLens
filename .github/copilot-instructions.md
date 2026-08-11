@@ -20,11 +20,12 @@ reachable two ways: the **invocations** protocol for automation and the
   existing labels and the validated `labeling` instruction domain.
 - **Auto-assignment** — routes issues to individual owners using repository area
   mappings and historical assignment patterns.
-- **Notifications** — sends triage reports via **WorkIQ** (Microsoft 365) as
-  email or Teams messages.
-- **App-scoped GitHub access** — invocations use GitHub MCP with the request
-  token plus a constrained config loader; chat uses skill-backed in-process
-  tools. Both act as the App bot, never an ambient user identity.
+- **Notifications** — sends triage reports through Logic App-backed email and
+  Teams notification tools.
+- **App-scoped GitHub access** — both protocols use the bundled stdio MCP
+  server. It resolves the App installation for each explicit repository and
+  mints repository- and permission-scoped tokens, so writes are always
+  attributed to the App bot rather than an ambient user identity.
 
 ## Architecture
 
@@ -33,19 +34,16 @@ reachable two ways: the **invocations** protocol for automation and the
   two protocols in one process:
   - **`POST /invocations`** — automation (GitHub Actions). Each request opens a
     fresh Copilot session and streams session events back as SSE.
-    **Invocation payload:** two required fields and one optional field —
-    `{ "input": "<free-form task>", "github_token": "<token>", "attachments": [] }`.
-    `input` is the task; `github_token` authenticates the GitHub MCP server;
+    **Invocation payload:** one required field and one optional field —
+    `{ "input": "<free-form task>", "attachments": [] }`. `input` is the task;
     `attachments` contains validated inline Copilot `blob` attachments.
-    If the GitHub MCP server returns an authentication or permission error,
-    respond immediately with HTTP 400 and body
-    `{ "error": "github_token invalid or insufficient scopes" }`; do not proceed
-    with any GitHub operations.
   - **`POST /responses`** — chat (playground, Teams, any Responses client).
-    There is no payload token, so the `github-access` tool loads the App private key
-    from Azure Key Vault, resolves the installation for each target repository,
-    and caches its short-lived token. The token never enters model context. The
-    conversation's Copilot session is resumed each turn.
+    The conversation's Copilot session is resumed each turn.
+  - **Session-owned GitHub MCP** — every Copilot session starts the bundled
+    `github_app_mcp` stdio process with the App ID and Key Vault secret URI. The
+    process loads the private key lazily, resolves installations, and caches
+    short-lived tokens only in memory for its process/session lifetime. A token
+    is restricted to one repository and the minimum tool permission set.
   - **Issue-body images** — before the model turn, the trusted host loader
     resolves explicit issue URLs or `owner/repository#number` references using
     the protocol's GitHub identity, accepts only allowlisted GitHub-hosted image
@@ -71,21 +69,19 @@ reachable two ways: the **invocations** protocol for automation and the
   - **`find-criticals`** — scans a repository and time scope for hot, blocking,
     and regression issues. Its prompt lives in `agents/find-criticals.md` and it
     returns **only** the critical-issue JSON report.
-- **Skills** (`skills/`): `github-access` (chat GitHub App operations),
-  `issuelens-config` (validated repository policy), `find-duplicates`,
-  `label-issue`, `assign-issue`, and `notify`.
+- **Skills** (`skills/`): `issuelens-config` (validated repository policy),
+  `find-duplicates`, `label-issue`, `assign-issue`, and `notify`.
 - **Media inputs** — `media_inputs.py` normalizes Responses `input_image` and
   `input_file` content and invocation `blob` attachments into Copilot session
   attachments. Only inline base64 content is accepted; remote URLs, file IDs,
   and request-supplied server paths are rejected.
-- **GitHub access** — invocations use the remote GitHub MCP server
-  (`https://api.githubcopilot.com/mcp/`) authenticated with the payload's
-  `github_token`; chat uses only the skill-owned `github-access` tool. The
-  constrained `issuelens-config` tool and host image loader use the same
-  protocol-specific identity. Follow the `github-access` skill before every
-  ordinary GitHub read or write and `issuelens-config` before repository policy.
-  The `issuelens-related-read` tool performs anonymous read-only access to
-  public repositories named by loaded duplicate instructions.
+- **GitHub access** — both protocols use only the bundled GitHub App stdio MCP
+  tools for model-facing GitHub reads and writes. Every tool requires an
+  explicit `owner/repository`; successful App installation resolution is the
+  repository authorization boundary. The constrained `issuelens-config` tool
+  and host image loader create separate request-local, read-only App clients.
+  Related repositories named by duplicate instructions use the same MCP tools
+  and must be included in an App installation.
 - **Runtime configuration** — `main.py` explicitly loads `agents.md`,
   both sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config
@@ -93,13 +89,11 @@ reachable two ways: the **invocations** protocol for automation and the
 
 ## Conventions
 
-- **GitHub access follows the protocol boundary** — first follow the
-  `github-access` skill; invocations then use GitHub MCP and chat uses only the
-  `github-access` tool. The only additional GitHub reader is the constrained
-  `issuelens-config` tool, which uses the same protocol identity and returns one
-  validated policy domain, plus `issuelens-related-read` for fixed-operation
-  public duplicate evidence. Never shell out to `gh` / `bash` / `powershell`, call
-  GitHub over direct HTTP, or expose App credentials. See `agents.md`.
+- **GitHub access has one model-facing boundary** — use only the bundled
+  IssueLens GitHub MCP tools for both protocols. The constrained
+  `issuelens-config` host tool returns one validated policy domain. Never shell
+  out to `gh` / `bash` / `powershell`, call GitHub over direct HTTP, use a
+  Foundry GitHub toolbox connection, or expose App credentials. See `agents.md`.
 - Only `find-criticals` is required to return JSON, which IssueLens preserves at
   the end of its response. `triage` may use the format appropriate for its task.
 - Prefer adding behavior to a skill or sub-agent prompt before changing
@@ -110,10 +104,10 @@ reachable two ways: the **invocations** protocol for automation and the
 The agent is driven by a workflow in the target repo
 (`.github/workflows/issue-triage.yml`):
 
-1. Mint a GitHub App installation token with `actions/create-github-app-token`.
-2. Authenticate to the Foundry agent endpoint via **Azure OIDC** (`azure/login`).
-3. POST `{ input, github_token, attachments? }` to the agent's invocations
-  endpoint.
+1. Authenticate to the Foundry agent endpoint via **Azure OIDC** (`azure/login`).
+2. POST `{ input, attachments? }` to the agent's invocations endpoint. The
+  hosted agent owns the App credentials; target repositories do not store the
+  App private key or mint tokens.
 
 Triggers: `issues` opened/reopened (label the issue), `schedule` (batch triage),
 and `workflow_dispatch`.
@@ -135,6 +129,7 @@ and `workflow_dispatch`.
 ## Layout
 
 - `main.py` — agent server, session wiring, custom-agent registration
+- `github_app_mcp/` — bundled GitHub App stdio MCP server and isolated tests
 - `agents.md` — global IssueLens identity and current runtime scope, works as orchestrator for sub-agents and skills
 - `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`)
 - `skills/` — modular skills (`issuelens-config`, `find-duplicates`,
