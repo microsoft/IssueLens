@@ -29,7 +29,8 @@ def create_server(
         ),
         instructions=(
             "Every tool requires an explicit owner/repository value. The "
-            "GitHub App must be installed for each requested repository."
+            "server prefers repository-scoped GitHub App access and may fall "
+            "back to anonymous access for bounded reads of public repositories."
         ),
         version="0.1.0",
     )
@@ -154,7 +155,7 @@ def create_server(
             issue_number: int,
             body: str,
         ) -> Any:
-            """Post an issue-triage comment to one issue."""
+            """Post one issue-triage comment to an issue."""
             return await github.add_issue_comment(
                 repository,
                 issue_number,

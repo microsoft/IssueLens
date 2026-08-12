@@ -9,8 +9,9 @@ currently needs. `main.py` starts one server process for each Copilot session.
   through `DefaultAzureCredential`. Private-key contents are never accepted as
   command-line arguments or environment variables.
 - Every tool requires an explicit `owner/repository` argument.
-- The GitHub App installation is the repository authorization boundary. A
-  request fails when the App is not installed for its repository.
+- Reads prefer a repository-scoped GitHub App token and fall back to anonymous
+  access only for public repositories. Private reads and every write require an
+  App installation.
 - Installation tokens are minted for one repository using GitHub's
   `repositories` restriction and for only the permission required by the tool.
   The cache key includes the repository and permission set.
@@ -23,14 +24,17 @@ currently needs. `main.py` starts one server process for each Copilot session.
   are bounded.
 - The stdio server writes no application output to stdout outside MCP framing.
 
-Install the App only on repositories IssueLens is authorized to access. Adding
-a repository to the installation grants IssueLens access to that repository.
+Install the App on every target repository and any private related repository
+IssueLens is authorized to access. Public related repositories can be searched
+through bounded anonymous reads without an installation.
 
 ## Tools
 
-Read tools are always registered:
+Read tools are always registered. The permission shown is used when an App
+installation is available; public repositories can fall back to anonymous
+access:
 
-| Tool | Minimum token permission |
+| Tool | Preferred App permission |
 |---|---|
 | `get_repository` | Metadata: read |
 | `list_issues` | Issues: read |

@@ -449,13 +449,22 @@ class GitHubClient:
         write: bool = False,
     ) -> Any:
         repository = self._authorize(repository, write=write)
-        credential = await self._token_provider.get_token(repository, permissions)
         headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {credential.token}",
             "User-Agent": "IssueLens-GitHub-MCP/0.1",
             "X-GitHub-Api-Version": _API_VERSION,
         }
+        anonymous_fallback = False
+        try:
+            credential = await self._token_provider.get_token(
+                repository,
+                permissions,
+            )
+            headers["Authorization"] = f"Bearer {credential.token}"
+        except GitHubAppError:
+            if write or method != "GET":
+                raise
+            anonymous_fallback = True
         url = absolute_url or f"{_API_ROOT}/repos/{repository}{path}"
         try:
             async with httpx.AsyncClient(
@@ -480,6 +489,18 @@ class GitHubClient:
                             )
                 payload = json.loads(content)
         except httpx.HTTPStatusError as error:
+            if anonymous_fallback:
+                if (
+                    error.response.status_code == 403
+                    and error.response.headers.get("x-ratelimit-remaining") == "0"
+                ):
+                    raise GitHubAppError(
+                        "GitHub anonymous public-read rate limit exceeded"
+                    ) from error
+                raise GitHubAppError(
+                    f"{repository} is not publicly readable and the "
+                    "IssueLens App cannot access it"
+                ) from error
             raise GitHubAppError(
                 f"GitHub API returned HTTP {error.response.status_code}"
             ) from error

@@ -67,6 +67,11 @@ matches in `possiblyRelated`; do not describe them as duplicates.
   bundled GitHub MCP `search_issues` tool. Query the strongest signals first
   and include both open and closed issues. Exclude pull requests and the target
   issue itself.
+  - For each related repository, start with one query containing its strongest
+    distinctive error, stack, or reproduction signal. Do not retry equivalent
+    broad queries when that search returns no candidate.
+  - Use `get_issue` and `list_issue_comments` to inspect promising candidates;
+    do not spend additional search requests collecting superficial matches.
 6. Search within the requested window, or the last 90 days by default. If the
    issue references an older report, include that report regardless of age.
 7. Read the most relevant candidates and their comments. Do not judge a result
@@ -95,11 +100,15 @@ matches in `possiblyRelated`; do not describe them as duplicates.
   candidate search, but cannot weaken the required evidence above.
 - Report candidate repositories that could not be searched. Do not claim no
   duplicates across the full configured scope when any repository was
-  inaccessible.
+  inaccessible. This is internal triage status for the parent agent; never put
+  repository-access or coverage diagnostics in a public issue comment.
 - All writes remain scoped to the target issue and still require explicit user
   authorization. Related-repository policy never authorizes writes there.
-- The IssueLens App must be installed for every configured related repository.
-  Never write to a related repository during duplicate analysis.
+- Public related repositories may be read anonymously when the IssueLens App is
+  not installed. Private related repositories still require an App
+  installation. Anonymous GitHub search is rate-limited, so do not retry failed
+  or redundant searches. Never write to a related repository during duplicate
+  analysis.
 
 ## Output
 

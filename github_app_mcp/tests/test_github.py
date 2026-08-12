@@ -33,6 +33,15 @@ class RecordingProvider:
         )
 
 
+class FailingProvider:
+    def __init__(self):
+        self.calls = []
+
+    async def get_token(self, repository, permissions):
+        self.calls.append((repository, permissions))
+        raise GitHubAppError("App installation unavailable")
+
+
 class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.requests = []
@@ -148,6 +157,47 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
             "repo:microsoft/IssueLens is:issue startup crash",
         )
 
+    async def test_read_falls_back_to_anonymous_for_public_repository(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json={"full_name": "public/repo"})
+
+        client = GitHubClient(
+            FailingProvider(),
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = await client.get_repository("public/repo")
+
+        self.assertEqual(result["full_name"], "public/repo")
+        self.assertNotIn("Authorization", requests[0].headers)
+
+    async def test_anonymous_fallback_reports_inaccessible_repository(self):
+        client = GitHubClient(
+            FailingProvider(),
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(404, json={"message": "Not Found"})
+            ),
+        )
+
+        with self.assertRaisesRegex(GitHubAppError, "not publicly readable"):
+            await client.get_repository("private/repo")
+
+    async def test_anonymous_fallback_reports_rate_limit(self):
+        client = GitHubClient(
+            FailingProvider(),
+            transport=httpx.MockTransport(lambda request: httpx.Response(
+                403,
+                headers={"X-RateLimit-Remaining": "0"},
+                json={"message": "rate limit"},
+            )),
+        )
+
+        with self.assertRaisesRegex(GitHubAppError, "rate limit exceeded"):
+            await client.search_issues("public/repo", "startup failure")
+
     async def test_get_file_decodes_bounded_utf8_content(self):
         result = await self.client().get_file(
             "microsoft/IssueLens", "README.md"
@@ -230,6 +280,50 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(
             all(call[1] == {"issues": "write"} for call in self.provider.calls)
+        )
+
+    async def test_write_never_falls_back_to_anonymous(self):
+        requests = []
+        client = GitHubClient(
+            FailingProvider(),
+            writes_enabled=True,
+            transport=httpx.MockTransport(
+                lambda request: requests.append(request) or httpx.Response(201)
+            ),
+        )
+
+        with self.assertRaisesRegex(GitHubAppError, "installation unavailable"):
+            await client.add_labels("public/repo", 1, ["bug"])
+
+        self.assertEqual(requests, [])
+
+    async def test_multiple_comments_are_allowed_in_one_session(self):
+        client = self.client(writes_enabled=True)
+
+        await client.add_issue_comment(
+            "microsoft/IssueLens",
+            1,
+            "First requested comment",
+        )
+        await client.add_issue_comment(
+            "microsoft/IssueLens",
+            1,
+            "Second requested comment",
+        )
+
+        comment_requests = [
+            request
+            for request in self.requests
+            if request.url.path.endswith("/issues/1/comments")
+        ]
+        self.assertEqual(len(comment_requests), 2)
+        self.assertEqual(
+            json.loads(comment_requests[0].content),
+            {"body": "First requested comment"},
+        )
+        self.assertEqual(
+            json.loads(comment_requests[1].content),
+            {"body": "Second requested comment"},
         )
 
     async def test_issue_images_are_allowlisted_without_redirect_token_leak(self):

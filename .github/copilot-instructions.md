@@ -24,8 +24,10 @@ reachable two ways: the **invocations** protocol for automation and the
   Teams notification tools.
 - **App-scoped GitHub access** — both protocols use the bundled stdio MCP
   server. It resolves the App installation for each explicit repository and
-  mints repository- and permission-scoped tokens, so writes are always
-  attributed to the App bot rather than an ambient user identity.
+  mints repository- and permission-scoped tokens. Bounded reads fall back to
+  anonymous access for public repositories without an installation. Writes
+  always require App access and are attributed to the App bot rather than an
+  ambient user identity.
 
 ## Architecture
 
@@ -77,11 +79,12 @@ reachable two ways: the **invocations** protocol for automation and the
   and request-supplied server paths are rejected.
 - **GitHub access** — both protocols use only the bundled GitHub App stdio MCP
   tools for model-facing GitHub reads and writes. Every tool requires an
-  explicit `owner/repository`; successful App installation resolution is the
-  repository authorization boundary. The constrained `issuelens-config` tool
-  and host image loader create separate request-local, read-only App clients.
-  Related repositories named by duplicate instructions use the same MCP tools
-  and must be included in an App installation.
+  explicit `owner/repository`; reads prefer App access and may fall back to
+  anonymous access for public repositories, while writes require successful
+  App installation resolution. The constrained `issuelens-config` tool and
+  host image loader create separate request-local, read-only App clients.
+  Related public repositories named by duplicate instructions use the same MCP
+  read tools without requiring an App installation.
 - **Runtime configuration** — `main.py` explicitly loads `agents.md`,
   both sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config

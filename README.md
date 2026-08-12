@@ -76,13 +76,15 @@ azd env set GITHUB_APP_PRIVATE_KEY_SECRET_URI `
   "https://<vault>.vault.azure.net/secrets/issuelens-github-app-key"
 ```
 
-Each accessible repository must be included in an installation of the App;
-installation membership is IssueLens's repository authorization boundary. Each
-Copilot session owns one stdio MCP process. That process caches tokens only in
-memory by repository and permission set, refreshes them five minutes before
-expiry, and discards them when the process exits. Configure the App with
-**Metadata: Read**, **Issues: Read and write**, and **Contents: Read**. Tokens
-and the private key never enter model context.
+Target repositories and all repositories receiving writes must be included in
+an installation of the App. Bounded reads prefer App authentication but fall
+back to anonymous access for public repositories when no installation is
+available. Private repository reads still require an installation. Each Copilot
+session owns one stdio MCP process. That process caches tokens only in memory by
+repository and permission set, refreshes them five minutes before expiry, and
+discards them when the process exits. Configure the App with **Metadata: Read**,
+**Issues: Read and write**, and **Contents: Read**. Tokens and the private key
+never enter model context.
 
 ## Target Repository Configuration
 
@@ -135,8 +137,8 @@ Markdown instruction file. Paths must be repository-relative POSIX paths.
 Repository policy cannot authorize writes, weaken mandatory evidence or safety
 rules, choose notification recipients/channels, or override response formats.
 Duplicate instructions may name related repositories. IssueLens accesses them
-through the same App-backed MCP tools, reports repositories without a matching
-App installation, and never uses this scope for writes.
+through the same MCP tools, using anonymous fallback for public repositories
+without an App installation, and never uses this scope for writes.
 
 ### Foundry toolbox
 

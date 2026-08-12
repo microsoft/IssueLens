@@ -19,8 +19,10 @@ The invocation payload has one required field and one optional field:
 Both protocols use the bundled stdio MCP server. Each Copilot session owns one
 server process, which resolves the IssueLens GitHub App installation for every
 target repository and caches repository- and permission-scoped tokens only for
-that process lifetime. The trusted issue-image and repository-policy loaders use
-separate request-local clients and never return credentials to the model.
+that process lifetime. Bounded reads fall back to anonymous access when a
+repository is public and has no App installation; writes always require the
+App. The trusted issue-image and repository-policy loaders use separate
+request-local clients and never return credentials to the model.
 
 Model (inference) auth is selected automatically:
 
