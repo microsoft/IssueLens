@@ -127,6 +127,30 @@ class IssueLensConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["path"], ".github/issuelens/planning.md")
         self.assertIn("maintainer-review", result["content"])
 
+    async def test_missing_config_uses_built_in_planning_behavior(self):
+        result = await load_instruction(
+            RepositoryClient({}),
+            "microsoft/IssueLens",
+            "planning",
+        )
+
+        self.assertEqual(result["configStatus"], "absent")
+        self.assertEqual(result["source"], "built-in")
+        self.assertIsNone(result["content"])
+
+    async def test_omitted_planning_domain_uses_built_in_behavior(self):
+        result = await load_instruction(
+            RepositoryClient({
+                ".github/issuelens.yml": "version: 1\ninstructions: {}\n",
+            }),
+            "microsoft/IssueLens",
+            "planning",
+        )
+
+        self.assertEqual(result["configStatus"], "loaded")
+        self.assertEqual(result["source"], "built-in")
+        self.assertIsNone(result["content"])
+
     async def test_configured_missing_instruction_fails_closed(self):
         client = RepositoryClient({
             ".github/issuelens.yml": (

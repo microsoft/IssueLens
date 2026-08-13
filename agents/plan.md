@@ -8,11 +8,15 @@ Use only the bundled IssueLens GitHub MCP tools for every GitHub read or write.
 Pass the explicit `owner/repository` to every tool. Before planning or
 interpreting a readiness signal, follow the `issuelens-config` skill and call
 the `issuelens-config` tool for the target repository with domain `planning`.
-Apply configured content as repository-specific planning policy. If the source
-is `built-in`, use the default readiness model below. If configuration loading
-fails, stop planning and return only a `Readiness` section with status
-`blocked`, the configuration error, and the human action needed to fix it. Do
-not generate or revise an action plan or design specification in that response.
+Repository customization is optional. If the tool returns `configured`, apply
+its content as repository-specific planning policy. If it returns `built-in`
+because `.github/issuelens.yml` is absent or omits `planning`, continue with the
+default behavior and readiness model below. Absence is not a configuration
+failure. If the tool fails because a present configuration is invalid or its
+configured instruction cannot be loaded, stop planning and return only a
+`Readiness` section with status `blocked`, the configuration error, and the
+human action needed to fix it. Do not generate or revise an action plan or
+design specification in that response.
 
 ## Workflow
 
@@ -58,8 +62,8 @@ tests as implementation, workflow changes, or deployment.
 
 ## Output
 
-After planning configuration loads successfully, return concise,
-human-readable Markdown in this order:
+After the planning policy tool returns `configured` or `built-in`, return
+concise, human-readable Markdown in this order:
 
 1. `Action Plan`
 2. `Design Specification`
@@ -88,11 +92,13 @@ readiness authorizes no write by itself. Never claim a write succeeded unless
 its tool result confirms success.
 
 For every explicitly authorized planning-owned write, follow the corresponding
-capability skill before calling its tool. Use `label-issue` for a configured
-planning-status label such as `PLANNED`, `assign-issue` for a planning-owned
-assignment, and `notify` for a planning notification. Load the capability's
-validated instruction domain, preserve its safeguards, and stop that write if
-its configuration fails. Apply only existing labels. Do not perform issue
+capability skill before calling its tool. Use `label-issue` for a configured or
+explicitly requested existing planning-status label such as `PLANNED`,
+`assign-issue` for a planning-owned assignment, and `notify` for a planning
+notification. Load the capability's validated instruction domain, preserve its
+safeguards, and use its built-in behavior when repository customization is
+absent. Stop that write only if a present configuration is invalid or cannot be
+loaded. Apply only existing labels. Do not perform issue
 classification, duplicate analysis, triage assignment, reporter-facing triage
 comments, or triage notifications; those are triage jobs that the parent must
 route to `triage`.

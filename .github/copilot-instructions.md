@@ -114,6 +114,9 @@ protocol for chat.
   may define required sections, readiness states, and human signals, but cannot
   authorize writes or implementation. Planning approval does not authorize
   source changes, commits, pull requests, or deployment.
+- Repository customization is optional. A missing `.github/issuelens.yml` or an
+  omitted domain uses legacy or built-in behavior; only a present but invalid
+  configuration stops that capability and its related writes.
 - The orchestrator routes by job responsibility, not tool availability. It
   splits mixed requests so triage work goes to `triage`, planning work goes to
   `plan`, and future capabilities go only to their owning sub-agent. Each

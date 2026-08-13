@@ -122,6 +122,11 @@ Every instruction domain is optional:
 | `notification_content` | Report title, grouping, emphasis, and presentation only |
 | `planning` | Required planning sections, repository design expectations, readiness statuses, and human signals |
 
+Target repositories do not need `.github/issuelens.yml` or any customization
+Markdown files. When the config is absent, or when it omits a capability,
+IssueLens uses that capability's legacy or built-in behavior. Only a present but
+invalid config or an unreadable configured instruction stops the capability.
+
 Planning instructions can replace the built-in readiness names and define how
 explicit human signals move a proposal between states. They cannot authorize a
 GitHub write or implementation. Without configured planning instructions,
@@ -153,7 +158,8 @@ The orchestrator assigns work by responsibility rather than tool availability:
 triage follow-up actions stay with `triage`, while planning-status labels,
 planning-artifact comments, and planning notifications stay with `plan`. For a
 planning-owned write, `plan` applies the same label, assignment, or notification
-skill safeguards before using the shared tool.
+skill safeguards before using the shared tool. Those skills also use built-in
+behavior when the target repository has no customization files.
 
 Fallback behavior is backward compatible:
 
