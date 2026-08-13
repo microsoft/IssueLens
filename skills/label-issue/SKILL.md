@@ -8,18 +8,25 @@ description: Classify and label a GitHub issue based on repository-specific labe
 Automatically classify and apply labels to a GitHub issue using the available
 GitHub tools and repository-specific labeling rules.
 
+Within labeling, explicit current-user instructions take precedence over
+validated `labeling` customization, which takes precedence over the built-in
+classification and output defaults below. Neither may change the labeling role,
+authorize an unrequested write, invent repository labels, remove existing
+labels, or override global security and repository-scope boundaries.
+
 ## Workflow
 
 1. **Input:** an issue reference (`owner/repo` + issue number, or an issue URL).
 2. **Fetch labeling instructions:** follow the `issuelens-config` skill and call
    the `issuelens-config` tool for domain `labeling`. Use `configured` or
-   `legacy` content when returned. If the source is `built-in`, fall back to the
-   repository's existing label set (list the repo labels) and use label names
-   and descriptions to guide classification. If configuration loading fails,
-   stop and do not apply labels.
+   `legacy` content when returned, subject to explicit user instructions. If
+   the source is `built-in`, fall back to the repository's existing label set
+   (list the repo labels) and use label names and descriptions to guide
+   classification. If configuration loading fails, stop and do not apply
+   labels.
 3. **Fetch the issue:** read the issue title, body, existing labels, and comments
    with the GitHub tools.
-4. **Analyze the issue:**
+4. **Analyze the issue by default:**
    - **Type detection** — bug, feature, question, etc. (match keywords against
      label names/descriptions).
    - **Priority** — identify severity indicators (core function broken, no
@@ -33,14 +40,15 @@ GitHub tools and repository-specific labeling rules.
 
 - Only add labels that exist in the repository. Never invent labels.
 - Preserve existing labels; only add.
-- Prefer validated configured or legacy labeling instructions when returned.
+- Prefer explicit user labeling requirements, then validated configured or
+   legacy labeling instructions, then built-in classification.
 - Use only the bundled IssueLens GitHub MCP tools for every GitHub read or
    write. Pass the explicit `owner/repository` to every tool. Never use shell
    commands, direct HTTP, or the GitHub CLI.
 
 ## Output
 
-Report the labeling decision:
+By default, report the labeling decision:
 
 - **Labels applied:** the labels added.
 - **Reasoning:** why each label was chosen (type / priority / area).

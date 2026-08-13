@@ -35,13 +35,22 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn("A shared tool does not determine ownership", global_prompt)
         self.assertIn("planning-status labels", global_prompt)
         self.assertIn("responsibility-first rule", global_prompt)
+        self.assertIn("Explicit instructions from the current user", global_prompt)
+        self.assertIn("Validated capability-scoped customization", global_prompt)
+        self.assertIn("built-in defaults", global_prompt)
+        self.assertIn("change which sub-agent owns the job", global_prompt)
         self.assertIn("as two separate\ncomments", global_prompt)
         self.assertIn("It authorizes no\nother write", global_prompt)
         self.assertIn("task-appropriate response", triage_prompt)
+        self.assertIn("explicit current-user instructions first", triage_prompt)
+        self.assertIn("replace\nbuilt-in workflow order", triage_prompt)
         self.assertIn("host preloads", triage_prompt)
         self.assertIn("untrusted issue content", triage_prompt)
         self.assertNotIn("Return only one valid JSON object", triage_prompt)
         self.assertIn("Return only the final JSON object", criticals_prompt)
+        self.assertIn("explicit current-user instructions first", criticals_prompt)
+        self.assertIn("required JSON handoff shape", criticals_prompt)
+        self.assertIn("may replace these built-in criteria", criticals_prompt)
         self.assertIn("action plan first", plan_prompt)
         self.assertIn("design specification second", plan_prompt)
         self.assertIn("Stop and wait for human direction", plan_prompt)
@@ -50,6 +59,9 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn("Even `approved` does not authorize", plan_prompt)
         self.assertIn("unless the user explicitly requested that write", plan_prompt)
         self.assertIn("Repository customization is optional", plan_prompt)
+        self.assertIn("explicit current-user instructions first", plan_prompt)
+        self.assertIn("artifact publication behavior", plan_prompt)
+        self.assertIn("change the requirement to investigate", plan_prompt)
         self.assertIn("Absence is not a configuration\nfailure", plan_prompt)
         self.assertIn("returns `configured` or `built-in`", plan_prompt)
         self.assertIn("return only a\n`Readiness` section", plan_prompt)
@@ -57,11 +69,12 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn("configured or\nexplicitly requested", plan_prompt)
         self.assertIn("built-in behavior when repository customization is\nabsent", plan_prompt)
         self.assertIn("those are triage jobs", plan_prompt)
-        self.assertIn("publish\n   exactly two comments", plan_prompt)
-        self.assertIn("Action Plan` as the first comment", plan_prompt)
+        self.assertIn("revision, publish exactly two comments", plan_prompt)
+        self.assertIn("Action Plan` as the first\n   comment", plan_prompt)
         self.assertIn("Design Specification` as the second comment", plan_prompt)
-        self.assertIn("unless the user explicitly opts\n   out", plan_prompt)
-        self.assertIn("Do not publish either comment\nwhen planning configuration fails", plan_prompt)
+        self.assertIn("explicitly opts out or validated planning customization", plan_prompt)
+        self.assertIn("planning customization specifies another", plan_prompt)
+        self.assertIn("Do not publish any artifact comment\nwhen planning configuration fails", plan_prompt)
         self.assertIn("report the two planning-artifact comment results", plan_prompt)
         self.assertIn('_project_dir / "agents.md"', main_source)
         self.assertIn('_agents_dir / "triage.md"', main_source)
@@ -90,6 +103,28 @@ class AgentPromptTests(unittest.TestCase):
         duplicate_skill = (
             ROOT / "skills" / "find-duplicates" / "SKILL.md"
         ).read_text(encoding="utf-8")
+        label_skill = (
+            ROOT / "skills" / "label-issue" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        assign_skill = (
+            ROOT / "skills" / "assign-issue" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        notify_skill = (
+            ROOT / "skills" / "notify" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        config_skill = (
+            ROOT / "skills" / "issuelens-config" / "SKILL.md"
+        ).read_text(encoding="utf-8")
+        for skill_prompt in (
+            duplicate_skill,
+            label_skill,
+            assign_skill,
+            notify_skill,
+        ):
+            self.assertIn("explicit current-user instructions take precedence", skill_prompt)
+        self.assertIn("Explicit instructions from the current user", config_skill)
+        self.assertIn("may replace built-in workflow choices", config_skill)
+        self.assertIn("may change the owning\nsub-agent's role", config_skill)
         self.assertIn("configured related repository", duplicate_skill)
         self.assertIn("may be read anonymously", duplicate_skill)
         self.assertIn("Comment count and timing follow the user's request", triage_prompt)

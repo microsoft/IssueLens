@@ -1,5 +1,9 @@
 # IssueLens Planning Policy
 
+Explicit instructions from the current user take precedence over this policy.
+This policy replaces built-in planning defaults for IssueLens but cannot change
+the planning role or global security and authorization boundaries.
+
 Create planning artifacts for human review in this order:
 
 1. Action plan
@@ -21,7 +25,8 @@ App MCP boundary unless the issue explicitly requires an infrastructure change.
 
 ## Artifact publication
 
-After each successful initial plan or requested revision, post exactly two
+Unless the current user specifies another planning-artifact publication
+behavior, after each successful initial plan or requested revision post exactly two
 comments to the target issue unless the user explicitly opts out:
 
 1. The complete Action Plan

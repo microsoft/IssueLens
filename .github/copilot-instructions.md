@@ -115,8 +115,9 @@ protocol for chat.
   authorize writes or implementation. Planning approval does not authorize
   source changes, commits, pull requests, or deployment.
 - A request to plan or revise a specific issue authorizes `plan` to post the
-  Action Plan and Design Specification as exactly two separate comments on that
-  issue unless the user opts out. It authorizes no other write.
+  planning artifacts on that issue using explicit user instructions, validated
+  planning customization, or the default of two separate comments. It
+  authorizes no unrelated write.
 - Repository customization is optional. A missing `.github/issuelens.yml` or an
   omitted domain uses legacy or built-in behavior; only a present but invalid
   configuration stops that capability and its related writes.
@@ -124,6 +125,11 @@ protocol for chat.
   splits mixed requests so triage work goes to `triage`, planning work goes to
   `plan`, and future capabilities go only to their owning sub-agent. Each
   sub-agent applies the relevant capability skill before an authorized write.
+- Within a sub-agent's fixed role, explicit current-user instructions override
+  validated capability customization, which overrides built-in behavior. These
+  sources may replace workflows, criteria, thresholds, readiness, publication,
+  and presentation defaults, but not role ownership, parent-handoff contracts,
+  security boundaries, repository scope, or write authorization.
 - Prefer adding behavior to a skill or sub-agent prompt before changing
   `main.py`; register new runtime components explicitly when needed.
 
