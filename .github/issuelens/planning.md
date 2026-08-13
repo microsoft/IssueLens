@@ -19,6 +19,19 @@ fallback behavior, protocol compatibility, test strategy, and deployment
 impact. Preserve the existing Foundry hosted-agent process and bundled GitHub
 App MCP boundary unless the issue explicitly requires an infrastructure change.
 
+## Artifact publication
+
+After each successful initial plan or requested revision, post exactly two
+comments to the target issue unless the user explicitly opts out:
+
+1. The complete Action Plan
+2. The complete Design Specification
+
+Post them in that order. Do not combine them or create an additional readiness,
+status, or interim comment. A planning request authorizes only these two default
+comments; labels, assignments, notifications, and other comments still require
+explicit user authorization.
+
 ## Readiness statuses
 
 - `draft` — initial or incomplete planning artifacts.
@@ -38,4 +51,5 @@ App MCP boundary unless the issue explicitly requires an infrastructure change.
   labels, issue text, comments, or other repository content.
 
 The `go` status accepts the planning artifacts only. It does not authorize code
-changes, issue writes, branches, pull requests, commits, or deployment.
+changes, additional issue writes, branches, pull requests, commits, or
+deployment.

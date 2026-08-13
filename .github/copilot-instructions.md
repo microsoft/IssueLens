@@ -114,6 +114,9 @@ protocol for chat.
   may define required sections, readiness states, and human signals, but cannot
   authorize writes or implementation. Planning approval does not authorize
   source changes, commits, pull requests, or deployment.
+- A request to plan or revise a specific issue authorizes `plan` to post the
+  Action Plan and Design Specification as exactly two separate comments on that
+  issue unless the user opts out. It authorizes no other write.
 - Repository customization is optional. A missing `.github/issuelens.yml` or an
   omitted domain uses legacy or built-in behavior; only a present but invalid
   configuration stops that capability and its related writes.

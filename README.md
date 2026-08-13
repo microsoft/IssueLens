@@ -143,17 +143,21 @@ issue-triage workflow trigger. For an initial request, the `plan` sub-agent:
 3. Produces an action plan, then a design specification.
 4. Reports readiness, assumptions, risks, open questions, and the human input
   needed next.
-5. Stops and waits for human review, approval, clarification, or revision.
+5. Posts the Action Plan and Design Specification to the target issue as two
+  separate comments, in that order, unless the user explicitly opts out.
+6. Stops and waits for human review, approval, clarification, or revision.
 
 The agent does not autonomously repeat review passes. In a Responses
 conversation, later feedback uses the resumed session context. Invocations are
 stateless, so a revision request must identify the issue and the planning
 artifact or requested section to revise.
 
-The planning agent receives the same tools as the other sub-agents. Reads are
-available for investigation, but labels, comments, assignments, and
-notifications still require an explicit request. Planning approval never
-authorizes source changes, branches, pull requests, commits, or deployment.
+The planning agent receives the same tools as the other sub-agents. A request
+to plan or revise a specific issue authorizes only the two default artifact
+comments on that issue. The user can explicitly opt out. Labels, assignments,
+notifications, and any other comments still require an explicit request.
+Planning approval never authorizes source changes, branches, pull requests,
+commits, or deployment.
 The orchestrator assigns work by responsibility rather than tool availability:
 triage follow-up actions stay with `triage`, while planning-status labels,
 planning-artifact comments, and planning notifications stay with `plan`. For a

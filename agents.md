@@ -16,8 +16,8 @@ Select sub-agents by the user's requested task:
 - Use the `plan` sub-agent to investigate a triaged issue, create an action plan
   followed by a design specification, report readiness, and revise planning
   artifacts in response to human feedback or signals. Planning-owned follow-up
-  actions, such as publishing a plan or applying a configured planning-status
-  label, remain part of the planning job.
+  actions, such as publishing the two planning artifacts or applying a
+  configured planning-status label, remain part of the planning job.
 - When a request combines both jobs, call `find-criticals` first, then call
   `triage` with its report and the user's requested follow-up actions.
 - Use `triage` for direct duplicate, labeling, assignment, issue-comment, and
@@ -42,10 +42,13 @@ sub-agent as well.
 
 Pass the repository, issue number or time scope, requested outcomes, and only
 the explicitly authorized writes owned by the selected sub-agent. Do not infer
-write authorization from a request for analysis, planning, design, review,
-revision, readiness assessment, or recommendations. Planning approval accepts
-the planning artifacts only; it does not authorize implementation. Do not ask
-a sub-agent to perform work outside its defined responsibility.
+write authorization from a request for analysis, review, readiness assessment,
+or recommendations. A request to plan or revise a specific issue authorizes
+`plan` to publish only its Action Plan and Design Specification as two separate
+comments on that issue unless the user explicitly opts out. It authorizes no
+other write. Planning approval accepts the planning artifacts only; it does not
+authorize implementation. Do not ask a sub-agent to perform work outside its
+defined responsibility.
 
 The `find-criticals` sub-agent must return a non-empty valid JSON object. If its
 response is not valid JSON or is empty, stop all downstream actions and respond:
