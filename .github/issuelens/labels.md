@@ -7,8 +7,9 @@ labels and never create, remove, or rename labels.
 
 - `bug`: Reproducible behavior where IssueLens does not meet its documented
   runtime, security, protocol, or triage contract.
-- `enhancement`: A request for new behavior or an intentional expansion of the
-  current IssueLens scope.
+- `feature-request`: A request for a new capability or an intentional expansion
+  of the current IssueLens scope.
+- `enhancement`: An improvement to existing IssueLens behavior or capabilities.
 - `documentation`: A correction or improvement limited to documentation,
   examples, schemas, or setup guidance.
 - `question`: A usage, configuration, design, or support question without
@@ -18,10 +19,10 @@ labels and never create, remove, or rename labels.
 - `needs more info`: The report lacks enough detail to identify the failing
   protocol, operation, trigger, environment, or expected behavior.
 
-Choose the single best primary type label among `bug`, `enhancement`,
-`documentation`, and `question`. Add `needs more info` when the missing evidence
-prevents reliable triage. Add `duplicate` only when a specific canonical issue
-has been identified with sufficient technical evidence.
+Choose the single best primary type label among `bug`, `feature-request`,
+`enhancement`, `documentation`, and `question`. Add `needs more info` when the
+missing evidence prevents reliable triage. Add `duplicate` only when a specific
+canonical issue has been identified with sufficient technical evidence.
 
 Do not infer a priority or component label unless that label exists and its
 repository description supports the classification. Security-sensitive impact
