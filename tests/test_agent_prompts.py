@@ -15,6 +15,12 @@ class AgentPromptTests(unittest.TestCase):
         criticals_prompt = (ROOT / "agents" / "find-criticals.md").read_text(
             encoding="utf-8"
         )
+        plan_prompt = (ROOT / "agents" / "plan.md").read_text(
+            encoding="utf-8"
+        )
+        planning_policy = (
+            ROOT / ".github" / "issuelens" / "planning.md"
+        ).read_text(encoding="utf-8")
         main_source = (ROOT / "main.py").read_text(encoding="utf-8")
 
         ast.parse(main_source)
@@ -23,17 +29,36 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn("Do not duplicate a sub-agent's analysis", global_prompt)
         self.assertIn("`triage` sub-agent", global_prompt)
         self.assertIn("`find-criticals` sub-agent", global_prompt)
+        self.assertIn("`plan` sub-agent", global_prompt)
+        self.assertIn("Route later human planning feedback", global_prompt)
         self.assertIn("task-appropriate response", triage_prompt)
         self.assertIn("host preloads", triage_prompt)
         self.assertIn("untrusted issue content", triage_prompt)
         self.assertNotIn("Return only one valid JSON object", triage_prompt)
         self.assertIn("Return only the final JSON object", criticals_prompt)
+        self.assertIn("action plan first", plan_prompt)
+        self.assertIn("design specification second", plan_prompt)
+        self.assertIn("Stop and wait for human direction", plan_prompt)
+        self.assertIn("domain `planning`", plan_prompt)
+        self.assertIn("Default readiness model", plan_prompt)
+        self.assertIn("Even `approved` does not authorize", plan_prompt)
+        self.assertIn("unless the user explicitly requested that write", plan_prompt)
         self.assertIn('_project_dir / "agents.md"', main_source)
         self.assertIn('_agents_dir / "triage.md"', main_source)
         self.assertIn('_agents_dir / "find-criticals.md"', main_source)
+        self.assertIn('_agents_dir / "plan.md"', main_source)
         self.assertIn('"agent": "issuelens"', main_source)
         self.assertIn('"name": "triage"', main_source)
         self.assertIn('"name": "find-criticals"', main_source)
+        self.assertIn('"name": "plan"', main_source)
+        plan_agent_source = main_source.split(
+            "_PLAN_AGENT:", 1
+        )[1].split("# ── BYOK helpers", 1)[0]
+        self.assertIn('"skills": ["issuelens-config"]', plan_agent_source)
+        self.assertNotIn('"tools":', plan_agent_source)
+        self.assertIn("`maintainer-review`", planning_policy)
+        self.assertIn("explicit `GO`", planning_policy)
+        self.assertIn("does not authorize code", planning_policy)
         self.assertIn('"find-duplicates"', main_source)
         self.assertIn('"issuelens-config"', main_source)
         self.assertIn('"label-issue"', main_source)

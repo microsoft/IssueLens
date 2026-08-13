@@ -1,13 +1,13 @@
 **IMPORTANT!** All samples and other resources made available in this GitHub repository ("samples") are designed to assist in accelerating development of agents, solutions, and agent workflows for various scenarios. Review all provided resources and carefully test output behavior in the context of your use case. AI responses may be inaccurate and AI actions should be monitored with human oversight.
 
-# IssueLens — GitHub Issue Triage Agent (Foundry hosted)
+# IssueLens — GitHub Issue Triage and Planning Agent (Foundry hosted)
 
-A GitHub issue-triage agent built on the [GitHub Copilot SDK](https://pypi.org/project/github-copilot-sdk/) (`CopilotClient`), serving both the [invocations](https://pypi.org/project/azure-ai-agentserver-invocations/) protocol (automation) and the [responses](https://pypi.org/project/azure-ai-agentserver-responses/) protocol (chat). It identifies critical issues (hot / blocking / regression), detects duplicates, applies labels, assigns owners, and sends notifications — deployable as a Foundry hosted agent.
+A GitHub issue-triage and planning agent built on the [GitHub Copilot SDK](https://pypi.org/project/github-copilot-sdk/) (`CopilotClient`), serving both the [invocations](https://pypi.org/project/azure-ai-agentserver-invocations/) protocol (automation) and the [responses](https://pypi.org/project/azure-ai-agentserver-responses/) protocol (chat). It identifies critical issues (hot / blocking / regression), detects duplicates, applies labels, assigns owners, sends notifications, and turns triaged issues into action plans followed by design specifications — deployable as a Foundry hosted agent.
 
 ## How It Works
 
 Both protocols run in the same process and share the same orchestrator, skills,
-two sub-agents, and bundled GitHub App stdio MCP server.
+three sub-agents, and bundled GitHub App stdio MCP server.
 
 ### Automation — `POST /invocations`
 
@@ -21,7 +21,7 @@ two sub-agents, and bundled GitHub App stdio MCP server.
    - the constrained in-process `issuelens-config` tool, backed by a separate
      request-local read-only App client;
    - in-process notification tools when their Logic App endpoints are configured.
-3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents.md`. It routes issue-level work to `triage` and critical-issue scans to `find-criticals`. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions.
+3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents.md`. It routes issue-level work to `triage`, critical-issue scans to `find-criticals`, and planning work to `plan`. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions. The `plan` sub-agent investigates a triaged issue, returns an action plan followed by a design specification, reports readiness, and waits for human direction.
 4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Critical-issue scans end with a JSON report.
 
 ### Chat — `POST /responses`
@@ -107,6 +107,8 @@ instructions:
     path: .github/issuelens/assignment.md
   notification_content:
     path: .github/issuelens/notifications.md
+  planning:
+    path: .github/issuelens/planning.md
 ```
 
 Every instruction domain is optional:
@@ -118,6 +120,35 @@ Every instruction domain is optional:
 | `labeling` | Existing-label mappings, priority rubric, and component classification |
 | `assignment` | Area owners, keyword/path mappings, routing rules, and default owners |
 | `notification_content` | Report title, grouping, emphasis, and presentation only |
+| `planning` | Required planning sections, repository design expectations, readiness statuses, and human signals |
+
+Planning instructions can replace the built-in readiness names and define how
+explicit human signals move a proposal between states. They cannot authorize a
+GitHub write or implementation. Without configured planning instructions,
+IssueLens uses `draft`, `needs-review`, `needs-clarification`, `blocked`, and
+`approved`. Even `approved` describes only the planning artifact.
+
+### Planning loop
+
+Planning is available on demand through both protocols and does not change the
+issue-triage workflow trigger. For an initial request, the `plan` sub-agent:
+
+1. Loads the validated `planning` instruction domain.
+2. Re-reads the authoritative issue and investigates relevant repository files.
+3. Produces an action plan, then a design specification.
+4. Reports readiness, assumptions, risks, open questions, and the human input
+  needed next.
+5. Stops and waits for human review, approval, clarification, or revision.
+
+The agent does not autonomously repeat review passes. In a Responses
+conversation, later feedback uses the resumed session context. Invocations are
+stateless, so a revision request must identify the issue and the planning
+artifact or requested section to revise.
+
+The planning agent receives the same tools as the other sub-agents. Reads are
+available for investigation, but labels, comments, assignments, and
+notifications still require an explicit request. Planning approval never
+authorizes source changes, branches, pull requests, commits, or deployment.
 
 Fallback behavior is backward compatible:
 
@@ -253,6 +284,11 @@ curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
   -d '{"input": "Find duplicates for issue owner/repo#123"}'
 
+# Create an action plan followed by a design specification
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Plan implementation for triaged issue owner/repo#123. Return an action plan followed by a design specification, then wait for human review."}'
+
 # Free-form instruction
 curl -N -X POST http://localhost:8088/invocations \
   -H "Content-Type: application/json" \
@@ -346,7 +382,7 @@ Invocations (`POST /invocations`):
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `input` | Yes | The task — a free-form text prompt describing what to triage, label, or report |
+| `input` | Yes | The task — a free-form text prompt describing what to triage, plan, label, or report |
 | `attachments` | No | Inline Copilot `blob` attachments with base64 `data`, `mimeType`, and optional `displayName` |
 
 Chat (`POST /responses`) takes a standard OpenAI Responses body; both protocols
@@ -447,16 +483,18 @@ For the full deployment guide, see [Azure AI Foundry hosted agents](https://aka.
 
 ## Sub-agent and skills
 
-The Foundry hosted agent registers the `issuelens` orchestrator and its two sub-agents, `triage` and `find-criticals`, as Copilot SDK `CustomAgentConfig` objects in `main.py`. All prompts are loaded explicitly at startup so their behavior is consistent locally and in the hosted package:
+The Foundry hosted agent registers the `issuelens` orchestrator and its three sub-agents, `triage`, `find-criticals`, and `plan`, as Copilot SDK `CustomAgentConfig` objects in `main.py`. All prompts are loaded explicitly at startup so their behavior is consistent locally and in the hosted package:
 
 ```
 agents.md                   ← global IssueLens identity and current scope
 
 agents/
 ├── triage.md               ← issue-level triage and recommendations
-└── find-criticals.md        ← critical-issue scan and JSON report
+├── find-criticals.md        ← critical-issue scan and JSON report
+└── plan.md                  ← action plan, design specification, and readiness
 
 skills/
+├── issuelens-config/ ← load validated repository policy
 ├── find-duplicates/ ← identify duplicate and related issues
 ├── label-issue/     ← classify and apply labels
 ├── assign-issue/    ← route and assign issues
@@ -464,12 +502,13 @@ skills/
 github_app_mcp/             ← bundled GitHub App stdio MCP server
 ```
 
-Both sub-agents are available to IssueLens through runtime inference. `triage`
+All three sub-agents are available to IssueLens through runtime inference. `triage`
 analyzes target issues and owns requested duplicate, label, assignment, and
 notification work. `find-criticals` scans a repository and time scope for hot,
-blocking, and regression issues and returns the structured report. Both use the
-same GitHub App MCP tools, while `agents.md` keeps the parent IssueLens agent
-responsible for selecting and sequencing them.
+blocking, and regression issues and returns the structured report. `plan`
+investigates a triaged issue, produces ordered planning artifacts, and waits for
+human direction. They use the same GitHub App MCP tools, while `agents.md` keeps
+the parent IssueLens agent responsible for selecting and sequencing them.
 
 Any subdirectory under `skills/` containing a `SKILL.md` file is loaded by the Copilot SDK.
 

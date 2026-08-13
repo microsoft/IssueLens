@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/microsoft/IssueLens/blob/main/schemas/issuelens.schema.json",
   "title": "IssueLens repository configuration",
-  "description": "Selects repository-relative Markdown instructions for IssueLens triage capabilities.",
+  "description": "Selects repository-relative Markdown instructions for IssueLens triage and planning capabilities.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -29,6 +29,9 @@
           "$ref": "#/$defs/instructionFile"
         },
         "notification_content": {
+          "$ref": "#/$defs/instructionFile"
+        },
+        "planning": {
           "$ref": "#/$defs/instructionFile"
         }
       }
