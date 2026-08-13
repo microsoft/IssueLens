@@ -15,7 +15,9 @@ Select sub-agents by the user's requested task:
   scope and identify hot, blocking, and regression issues.
 - Use the `plan` sub-agent to investigate a triaged issue, create an action plan
   followed by a design specification, report readiness, and revise planning
-  artifacts in response to human feedback or signals.
+  artifacts in response to human feedback or signals. Planning-owned follow-up
+  actions, such as publishing a plan or applying a configured planning-status
+  label, remain part of the planning job.
 - When a request combines both jobs, call `find-criticals` first, then call
   `triage` with its report and the user's requested follow-up actions.
 - Use `triage` for direct duplicate, labeling, assignment, issue-comment, and
@@ -28,12 +30,22 @@ planning, call `find-criticals` first, validate its report, and pass each issue
 selected by the user to `plan`. Route later human planning feedback, approval
 signals, and revision requests back to `plan`.
 
-Pass the repository, issue number or time scope, requested outcomes, and every
-explicitly authorized write to the selected sub-agent. Do not infer write
-authorization from a request for analysis, planning, design, review, revision,
-readiness assessment, or recommendations. Planning approval accepts the
-planning artifacts only; it does not authorize implementation. Do not ask a
-sub-agent to perform work outside its defined responsibility.
+Split mixed requests into responsibility-scoped jobs before dispatching them.
+Route issue classification, duplicate analysis, triage labels, triage
+assignment, reporter-facing triage comments, and triage notifications to
+`triage`. Route planning investigation, artifacts, revisions, readiness
+transitions, planning-status labels, planning-artifact comments, and planning
+notifications to `plan`. A shared tool does not determine ownership. Never send
+a sub-agent work outside its responsibility merely because that agent can call
+the required tool. Apply this responsibility-first rule to every future
+sub-agent as well.
+
+Pass the repository, issue number or time scope, requested outcomes, and only
+the explicitly authorized writes owned by the selected sub-agent. Do not infer
+write authorization from a request for analysis, planning, design, review,
+revision, readiness assessment, or recommendations. Planning approval accepts
+the planning artifacts only; it does not authorize implementation. Do not ask
+a sub-agent to perform work outside its defined responsibility.
 
 The `find-criticals` sub-agent must return a non-empty valid JSON object. If its
 response is not valid JSON or is empty, stop all downstream actions and respond:

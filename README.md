@@ -149,6 +149,11 @@ The planning agent receives the same tools as the other sub-agents. Reads are
 available for investigation, but labels, comments, assignments, and
 notifications still require an explicit request. Planning approval never
 authorizes source changes, branches, pull requests, commits, or deployment.
+The orchestrator assigns work by responsibility rather than tool availability:
+triage follow-up actions stay with `triage`, while planning-status labels,
+planning-artifact comments, and planning notifications stay with `plan`. For a
+planning-owned write, `plan` applies the same label, assignment, or notification
+skill safeguards before using the shared tool.
 
 Fallback behavior is backward compatible:
 
@@ -508,7 +513,9 @@ notification work. `find-criticals` scans a repository and time scope for hot,
 blocking, and regression issues and returns the structured report. `plan`
 investigates a triaged issue, produces ordered planning artifacts, and waits for
 human direction. They use the same GitHub App MCP tools, while `agents.md` keeps
-the parent IssueLens agent responsible for selecting and sequencing them.
+the parent IssueLens agent responsible for splitting mixed requests, selecting
+the owner for each job, and sequencing them. This responsibility-first routing
+rule also applies when new sub-agents are added.
 
 Any subdirectory under `skills/` containing a `SKILL.md` file is loaded by the Copilot SDK.
 

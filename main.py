@@ -170,7 +170,12 @@ _PLAN_AGENT: CustomAgentConfig = {
         "a design specification for human review."
     ),
     "prompt": _load_prompt(_agents_dir / "plan.md"),
-    "skills": ["issuelens-config"],
+    "skills": [
+        "issuelens-config",
+        "label-issue",
+        "assign-issue",
+        "notify",
+    ],
     "infer": True,
 }
 

@@ -78,9 +78,10 @@ protocol for chat.
     returns **only** the critical-issue JSON report.
   - **`plan`** — investigates a triaged issue and relevant repository context,
     then returns an action plan followed by a design specification. Its prompt
-    lives in `agents/plan.md`. It uses the shared tools, requires explicit
-    authorization for writes, and waits for human feedback or configured
-    readiness signals rather than autonomously revising.
+    lives in `agents/plan.md`. It uses the shared tools and preloads the label,
+    assignment, and notification safeguards for planning-owned writes. It
+    requires explicit authorization for writes and waits for human feedback or
+    configured readiness signals rather than autonomously revising.
 - **Skills** (`skills/`): `issuelens-config` (validated repository policy),
   `find-duplicates`, `label-issue`, `assign-issue`, and `notify`.
 - **Media inputs** — `media_inputs.py` normalizes Responses `input_image` and
@@ -113,6 +114,10 @@ protocol for chat.
   may define required sections, readiness states, and human signals, but cannot
   authorize writes or implementation. Planning approval does not authorize
   source changes, commits, pull requests, or deployment.
+- The orchestrator routes by job responsibility, not tool availability. It
+  splits mixed requests so triage work goes to `triage`, planning work goes to
+  `plan`, and future capabilities go only to their owning sub-agent. Each
+  sub-agent applies the relevant capability skill before an authorized write.
 - Prefer adding behavior to a skill or sub-agent prompt before changing
   `main.py`; register new runtime components explicitly when needed.
 

@@ -10,7 +10,9 @@ interpreting a readiness signal, follow the `issuelens-config` skill and call
 the `issuelens-config` tool for the target repository with domain `planning`.
 Apply configured content as repository-specific planning policy. If the source
 is `built-in`, use the default readiness model below. If configuration loading
-fails, stop planning and return a blocked result that explains the failure.
+fails, stop planning and return only a `Readiness` section with status
+`blocked`, the configuration error, and the human action needed to fix it. Do
+not generate or revise an action plan or design specification in that response.
 
 ## Workflow
 
@@ -56,7 +58,8 @@ tests as implementation, workflow changes, or deployment.
 
 ## Output
 
-Return concise, human-readable Markdown in this order:
+After planning configuration loads successfully, return concise,
+human-readable Markdown in this order:
 
 1. `Action Plan`
 2. `Design Specification`
@@ -83,6 +86,16 @@ perform any other write unless the user explicitly requested that write. A
 request to investigate, plan, design, review, revise, approve, or change
 readiness authorizes no write by itself. Never claim a write succeeded unless
 its tool result confirms success.
+
+For every explicitly authorized planning-owned write, follow the corresponding
+capability skill before calling its tool. Use `label-issue` for a configured
+planning-status label such as `PLANNED`, `assign-issue` for a planning-owned
+assignment, and `notify` for a planning notification. Load the capability's
+validated instruction domain, preserve its safeguards, and stop that write if
+its configuration fails. Apply only existing labels. Do not perform issue
+classification, duplicate analysis, triage assignment, reporter-facing triage
+comments, or triage notifications; those are triage jobs that the parent must
+route to `triage`.
 
 Do not modify repository source, create branches or pull requests, implement
 tests, review code, manage GitHub Actions, or deploy the agent. Never use shell
