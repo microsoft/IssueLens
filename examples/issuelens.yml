@@ -12,3 +12,5 @@ instructions:
     path: .github/issuelens/assignment.md
   notification_content:
     path: .github/issuelens/notifications.md
+  planning:
+    path: .github/issuelens/planning.md

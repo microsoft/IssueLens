@@ -1,12 +1,13 @@
 # IssueLens — Copilot instructions
 
-IssueLens is a **GitHub issue-triage agent** that runs as a **Microsoft Foundry
-hosted agent**, built on the **GitHub Copilot SDK**. It analyzes issues across
-repositories, identifies critical (hot / blocking / regression) issues, applies
-labels, and sends notifications — acting on GitHub as a **GitHub App**, so all
-writes are attributed to the App bot with the App's scoped permissions. It is
-reachable two ways: the **invocations** protocol for automation and the
-**responses** protocol for chat.
+IssueLens is a **GitHub issue-triage and planning agent** that runs as a
+**Microsoft Foundry hosted agent**, built on the **GitHub Copilot SDK**. It
+analyzes issues across repositories, identifies critical (hot / blocking /
+regression) issues, creates planning artifacts, applies labels, and sends
+notifications — acting on GitHub as a **GitHub App**, so all writes are
+attributed to the App bot with the App's scoped permissions. It is reachable
+two ways: the **invocations** protocol for automation and the **responses**
+protocol for chat.
 
 ## Main features
 
@@ -22,6 +23,10 @@ reachable two ways: the **invocations** protocol for automation and the
   mappings and historical assignment patterns.
 - **Notifications** — sends triage reports through Logic App-backed email and
   Teams notification tools.
+- **Planning loop** — the `plan` sub-agent investigates a triaged issue,
+  produces an action plan followed by a design specification, reports readiness
+  using validated repository policy or built-in defaults, and waits for human
+  direction before revising or advancing the proposal.
 - **App-scoped GitHub access** — both protocols use the bundled stdio MCP
   server. It resolves the App installation for each explicit repository and
   mints repository- and permission-scoped tokens. Bounded reads fall back to
@@ -71,6 +76,12 @@ reachable two ways: the **invocations** protocol for automation and the
   - **`find-criticals`** — scans a repository and time scope for hot, blocking,
     and regression issues. Its prompt lives in `agents/find-criticals.md` and it
     returns **only** the critical-issue JSON report.
+  - **`plan`** — investigates a triaged issue and relevant repository context,
+    then returns an action plan followed by a design specification. Its prompt
+    lives in `agents/plan.md`. It uses the shared tools and preloads the label,
+    assignment, and notification safeguards for planning-owned writes. It
+    requires explicit authorization for writes and waits for human feedback or
+    configured readiness signals rather than autonomously revising.
 - **Skills** (`skills/`): `issuelens-config` (validated repository policy),
   `find-duplicates`, `label-issue`, `assign-issue`, and `notify`.
 - **Media inputs** — `media_inputs.py` normalizes Responses `input_image` and
@@ -85,8 +96,8 @@ reachable two ways: the **invocations** protocol for automation and the
   host image loader create separate request-local, read-only App clients.
   Related public repositories named by duplicate instructions use the same MCP
   read tools without requiring an App installation.
-- **Runtime configuration** — `main.py` explicitly loads `agents.md`,
-  both sub-agent prompts under `agents/`, and the skill directories. Explicit
+- **Runtime configuration** — `main.py` explicitly loads `agents.md`, all three
+  sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config
   discovery in the read-only hosted code directory.
 
@@ -99,6 +110,26 @@ reachable two ways: the **invocations** protocol for automation and the
   Foundry GitHub toolbox connection, or expose App credentials. See `agents.md`.
 - Only `find-criticals` is required to return JSON, which IssueLens preserves at
   the end of its response. `triage` may use the format appropriate for its task.
+- Planning loads the validated `planning` instruction domain. Repository policy
+  may define required sections, readiness states, and human signals, but cannot
+  authorize writes or implementation. Planning approval does not authorize
+  source changes, commits, pull requests, or deployment.
+- A request to plan or revise a specific issue authorizes `plan` to post the
+  planning artifacts on that issue using explicit user instructions, validated
+  planning customization, or the default of two separate comments. It
+  authorizes no unrelated write.
+- Repository customization is optional. A missing `.github/issuelens.yml` or an
+  omitted domain uses legacy or built-in behavior; only a present but invalid
+  configuration stops that capability and its related writes.
+- The orchestrator routes by job responsibility, not tool availability. It
+  splits mixed requests so triage work goes to `triage`, planning work goes to
+  `plan`, and future capabilities go only to their owning sub-agent. Each
+  sub-agent applies the relevant capability skill before an authorized write.
+- Within a sub-agent's fixed role, explicit current-user instructions override
+  validated capability customization, which overrides built-in behavior. These
+  sources may replace workflows, criteria, thresholds, readiness, publication,
+  and presentation defaults, but not role ownership, parent-handoff contracts,
+  security boundaries, repository scope, or write authorization.
 - Prefer adding behavior to a skill or sub-agent prompt before changing
   `main.py`; register new runtime components explicitly when needed.
 
@@ -134,7 +165,7 @@ and `workflow_dispatch`.
 - `main.py` — agent server, session wiring, custom-agent registration
 - `github_app_mcp/` — bundled GitHub App stdio MCP server and isolated tests
 - `agents.md` — global IssueLens identity and current runtime scope, works as orchestrator for sub-agents and skills
-- `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`)
+- `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`, `plan.md`)
 - `skills/` — modular skills (`issuelens-config`, `find-duplicates`,
   `label-issue`, `assign-issue`, `notify`)
 - `azure.yaml` / `agent.yaml` / `Dockerfile` — deployment config

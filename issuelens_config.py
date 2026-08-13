@@ -21,6 +21,7 @@ INSTRUCTION_DOMAINS = frozenset({
     "duplicate_detection",
     "labeling",
     "notification_content",
+    "planning",
 })
 
 LEGACY_INSTRUCTION_PATHS: dict[str, tuple[str, ...]] = {

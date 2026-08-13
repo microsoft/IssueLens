@@ -13,6 +13,15 @@ ownership and historical assignment patterns.
 - An issue reference (`owner/repo` and issue number, or an issue URL).
 - Optional assignment constraints supplied by the user.
 
+## Behavior precedence
+
+Within assignment, explicit current-user instructions take precedence over
+validated `assignment` customization, which takes precedence over the static
+mapping, historical search, confidence, and output defaults below. Neither may
+change the assignment role, authorize an unrequested write, remove existing
+assignees, assign unsupported principals, or override global security and
+repository-scope boundaries.
+
 ## Assignment Strategies
 
 ### Static area mapping
@@ -26,8 +35,9 @@ area-owner search order:
 2. `docs/area_owners.md`
 3. `area_owners.md`
 
-Match the issue title, body, labels, and mentioned file paths against the
-areas' keywords and path patterns. The format is described in
+Subject to explicit user constraints, match the issue title, body, labels, and
+mentioned file paths against the areas' keywords and path patterns. The format
+is described in
 [references/area_owners_template.md](references/area_owners_template.md).
 If the source is `built-in`, no static mapping exists and historical patterns
 are the primary strategy. If configuration loading fails, stop and do not
@@ -46,12 +56,13 @@ recently resolved) issues in the same repository:
 
 Do not infer ownership from issue authorship alone.
 
-This is the **primary** strategy when the repository has no area-owner file. In
-that case, always run this search and assign the best-matching individual from
+By default, this is the **primary** strategy when the repository has no
+area-owner file. In that case, always run this search and assign the
+best-matching individual from
 the historical data (see the Workflow). Only skip assignment when the search
 returns no similar issues with a clear, recurring assignee.
 
-## Workflow
+## Default workflow
 
 1. Read the target issue and preserve its existing assignees.
 2. Apply the static area mapping when an area-owner file exists.
@@ -88,7 +99,7 @@ returns no similar issues with a clear, recurring assignee.
   no reasonable candidate.
 - If no confident match exists, do not guess and do not modify the issue.
 
-## Output
+## Default output
 
 - **Assigned to:** the selected username, or `None`.
 - **Confidence:** High, Medium, or Low.

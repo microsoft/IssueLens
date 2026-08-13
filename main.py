@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft. All rights reserved.
 
-"""IssueLens — a GitHub issue-triage agent (GitHub Copilot SDK + Foundry).
+"""IssueLens — a GitHub issue-triage and planning agent (Copilot SDK + Foundry).
 
 Triages GitHub issues (finds critical hot/blocking/regression issues), applies
 labels, and sends notifications. It runs as a Foundry hosted agent that serves
@@ -123,8 +123,8 @@ _ISSUELENS_AGENT: CustomAgentConfig = {
     "name": "issuelens",
     "display_name": "IssueLens",
     "description": (
-        "Triages GitHub repository issues and performs requested duplicate, "
-        "labeling, assignment, and notification follow-up actions."
+        "Triages GitHub issues, performs requested follow-up actions, and "
+        "creates action plans followed by design specifications."
     ),
     "prompt": _load_prompt(_project_dir / "agents.md"),
 }
@@ -158,6 +158,24 @@ _FIND_CRITICALS_AGENT: CustomAgentConfig = {
     ),
     "prompt": _load_prompt(_agents_dir / "find-criticals.md"),
     "skills": ["issuelens-config"],
+    "infer": True,
+}
+
+
+_PLAN_AGENT: CustomAgentConfig = {
+    "name": "plan",
+    "display_name": "Plan",
+    "description": (
+        "Investigates a triaged issue and returns an action plan followed by "
+        "a design specification for human review."
+    ),
+    "prompt": _load_prompt(_agents_dir / "plan.md"),
+    "skills": [
+        "issuelens-config",
+        "label-issue",
+        "assign-issue",
+        "notify",
+    ],
     "infer": True,
 }
 
@@ -308,6 +326,7 @@ def _session_options(
             _ISSUELENS_AGENT,
             _TRIAGE_AGENT,
             _FIND_CRITICALS_AGENT,
+            _PLAN_AGENT,
         ],
         "agent": "issuelens",
     }
@@ -596,8 +615,8 @@ _ANONYMOUS_CONVERSATION = "anonymous"
 _MAX_CHAT_SESSIONS = 500
 
 _GREETING = (
-    "I'm IssueLens. Ask me to triage a repository's issues, find duplicates, "
-    "label an issue, assign an owner, or send a triage report."
+    "I'm IssueLens. Ask me to triage issues, find duplicates, label or assign "
+    "an issue, send a report, or plan a triaged issue."
 )
 _ATTACHMENT_ONLY_PROMPT = "Analyze the attached content for this issue-triage task."
 _GITHUB_APP_UNCONFIGURED = (
