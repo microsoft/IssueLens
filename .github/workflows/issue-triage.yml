@@ -12,7 +12,6 @@
 #     ISSUELENS_AGENT_URL       Full deployed invocations endpoint
 #                               (.../protocols/invocations?api-version=...)
 #     ISSUELENS_AGENT_SCOPE     Entra scope/resource for the endpoint token
-#     RECIPIENTS                Comma-separated email addresses for reports
 #
 # The hosted agent owns its Key Vault-backed GitHub App identity and mints
 # repository-scoped tokens internally. Target repositories store no App private
@@ -23,10 +22,12 @@ name: IssueLens issue triage
 on:
   issues:
     types: [opened, reopened]
-  # Uncomment to run batch triage on weekdays at 00:00 UTC.
-  # schedule:
-  #   - cron: "0 0 * * 1-5"
   workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Issue number to triage
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -49,27 +50,23 @@ jobs:
 
       - name: Invoke IssueLens agent
         env:
-          EVENT: ${{ github.event_name }}
           REPO: ${{ github.repository }}
-          ISSUE: ${{ github.event.issue.number }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
           AGENT_URL: ${{ secrets.ISSUELENS_AGENT_URL }}
           AGENT_SCOPE: ${{ secrets.ISSUELENS_AGENT_SCOPE }}
-          RECIPIENTS: ${{ secrets.RECIPIENTS }}
         run: |
           set -euo pipefail
 
-          if [ "$EVENT" = "issues" ]; then
-            input="Triage GitHub issue ${REPO}#${ISSUE}. "
-            input+="Find and report potential duplicate or related issues without closing or commenting on the target issue. "
-            input+="When a duplicate meets the required evidence threshold, add the existing 'duplicate' label, then apply other appropriate existing labels using the repository's configured labeling policy. "
-            input+="Assign the issue to the best supported individual owner using the repository's configured assignment policy and historical patterns while preserving existing assignees. "
-            input+="Finally, send a concise Teams notification summarizing duplicate findings, confirmed labels, confirmed assignment, and the issue link to each recipient in this comma-separated list: ${RECIPIENTS}."
-          else
-            since=$(date -u -d '24 hours ago' +'%Y-%m-%dT%H:00:00Z')
-            input="Triage open GitHub issues in ${REPO} updated since ${since}. "
-            input+="Identify critical hot, blocking, and regression issues using repository policy, apply appropriate existing labels, and produce the final JSON summary. "
-            input+="Then email a concise summary to these comma-separated recipients: ${RECIPIENTS}."
+          if [[ ! "$ISSUE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::issue_number must be a positive integer"
+            exit 1
           fi
+
+          input="Triage GitHub issue ${REPO}#${ISSUE} without closing it. "
+          input+="Find and report potential duplicate or related issues. "
+          input+="When a duplicate meets the required evidence threshold, add the existing 'duplicate' label, then apply other appropriate existing labels using the repository's configured labeling policy. "
+          input+="Assign the issue to the best supported individual owner using the repository's configured assignment policy and historical patterns while preserving existing assignees. "
+          input+="After completing the triage actions, post one concise reporter-facing comment that summarizes the findings and provides an actionable next step."
 
           payload=$(jq -cn --arg input "$input" '{input:$input}')
 

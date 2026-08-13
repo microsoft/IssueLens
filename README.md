@@ -373,13 +373,15 @@ repository**. It authenticates only to the Foundry endpoint through Azure OIDC
 and sends the task. The hosted agent owns its Key Vault-backed App identity, so
 target repositories store no App private key and transmit no GitHub token.
 
-- **Event-driven:** `on: issues` (opened/reopened) → `label` mode.
-- **Scheduled:** `on: schedule` (cron) → `triage` mode.
+- **Event-driven:** `on: issues` (opened/reopened) → duplicate detection,
+  labeling, assignment, and one reporter-facing comment.
+- **Manual:** `workflow_dispatch` with a required `issue_number` input runs the
+  same triage flow for an existing issue.
 
 Copy [.github/workflows/issue-triage.yml](.github/workflows/issue-triage.yml)
 into a target repository's `.github/workflows/`, then configure the Azure OIDC
-identity, agent URL/scope, and notification recipients. Keep repository-specific
-policy in `.github/issuelens.yml`; the
+identity and agent URL/scope. Keep repository-specific policy in
+`.github/issuelens.yml`; the
 workflow filename intentionally differs from the policy filename.
 
 > **Alternative (kept as backup):** [webhook_bridge/](webhook_bridge) is a GitHub App **webhook** → Azure Function → queue → agent path (install-and-go, no per-repo files, lowest latency). It's retained as an alternative trigger transport but is not required for the Actions-based setup.
