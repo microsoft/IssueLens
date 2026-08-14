@@ -34,7 +34,9 @@ permissions:
   id-token: write
 
 concurrency:
-  group: issuelens-triage-${{ github.ref }}
+  # Keep one active run per issue without making unrelated issues compete for
+  # the same default-branch concurrency group.
+  group: issuelens-triage-${{ github.repository }}-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
