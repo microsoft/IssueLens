@@ -12,6 +12,7 @@ READ_TOOLS = {
     "list_issues",
     "get_issue",
     "list_issue_comments",
+    "get_issue_comment",
     "list_issue_reactions",
     "search_issues",
     "list_labels",

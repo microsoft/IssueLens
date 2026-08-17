@@ -53,6 +53,7 @@ class IssueTriageWorkflowTests(unittest.TestCase):
             "actor_type",
             "issue_author_association",
             "comment_id",
+            "comment_author_login",
             "comment_author_association",
             "comment_added",
             "comment_edited",
@@ -74,21 +75,26 @@ class IssueTriageWorkflowTests(unittest.TestCase):
             self.source,
         )
         self.assertIn(
+            'comment_author_login: (if $comment_author_login == "" '
+            'then null else $comment_author_login end)',
+            self.source,
+        )
+        self.assertIn(
             'comment_id: (if $comment_id == "" then null else '
             '($comment_id | tonumber) end)',
             self.source,
         )
 
     def test_invocation_is_neutral_and_supports_no_action(self):
-        self.assertIn("initial triage, re-triage with new evidence", self.source)
-        self.assertIn("initial planning, re-planning from feedback", self.source)
-        self.assertIn("or no action", self.source)
-        self.assertIn("responsibility-first rules", self.source)
-        self.assertIn("perform no GitHub write", self.source)
-        self.assertIn("as a privileged maintainer command", self.source)
-        self.assertIn("this workflow authorizes appropriate existing labels", self.source)
-        self.assertIn("assignment that preserves current assignees", self.source)
-        self.assertIn("publication of planning artifacts", self.source)
+        self.assertIn("trusted IssueLens issue-loop event", self.source)
+        self.assertIn("global built-in command and trusted issue-loop contracts", self.source)
+        self.assertIn("Trusted event metadata: ${EVENT_METADATA}", self.source)
+        self.assertNotIn("@issuelens ", self.source)
+        self.assertNotIn("initial triage, re-triage", self.source)
+        self.assertNotIn("responsibility-first rules", self.source)
+        self.assertNotIn("this workflow authorizes", self.source)
+        self.assertNotIn("validated planning policy", self.source)
+        self.assertNotIn("privileged authorization", self.source)
         self.assertNotIn('input="Triage GitHub issue', self.source)
 
     def test_documentation_describes_event_loop_boundaries(self):
@@ -98,6 +104,9 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertIn("does not currently trigger on issue title/body edits", readme)
         self.assertIn("rejects PR-backed comments", readme)
         self.assertIn("bursts may coalesce", readme)
+        self.assertIn("### Built-in commands", readme)
+        self.assertIn("`@issuelens go` is not planning approval", readme)
+        self.assertIn("workflow carries that provenance but does not parse", readme)
         self.assertIn("no-action decision performs no GitHub write", readme)
 
 

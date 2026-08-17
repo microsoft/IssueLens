@@ -66,6 +66,22 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, json=[{"name": "bug"}])
             if request.url.path.endswith("/comments"):
                 return httpx.Response(201, json={"id": 42})
+            if request.url.path == "/repos/microsoft/IssueLens/issues/comments/99":
+                return httpx.Response(200, json={
+                    "id": 99,
+                    "body": "@issuelens replan",
+                    "author_association": "MEMBER",
+                    "user": {"login": "maintainer", "type": "User"},
+                    "issue_url": (
+                        "https://api.github.com/repos/microsoft/IssueLens/issues/1"
+                    ),
+                    "html_url": (
+                        "https://github.com/microsoft/IssueLens/issues/1#issuecomment-99"
+                    ),
+                    "created_at": "2026-08-17T00:00:00Z",
+                    "updated_at": "2026-08-17T00:00:00Z",
+                    "ignored_field": "not exposed",
+                })
             if request.url.path == "/repos/microsoft/IssueLens/issues/1":
                 return httpx.Response(200, json={
                     "number": 1,
@@ -130,6 +146,142 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
             ("microsoft/IssueLens", {"issues": "read"}),
         )
         self.assertEqual(self.requests[-1].url.params["page"], "2")
+
+    async def test_get_issue_comment_is_bounded_to_requested_issue(self):
+        result = await self.client().get_issue_comment(
+            "microsoft/IssueLens", 1, 99
+        )
+
+        self.assertEqual(result, {
+            "id": 99,
+            "body": "@issuelens replan",
+            "author_association": "MEMBER",
+            "user": {"login": "maintainer", "type": "User"},
+            "created_at": "2026-08-17T00:00:00Z",
+            "updated_at": "2026-08-17T00:00:00Z",
+            "html_url": (
+                "https://github.com/microsoft/IssueLens/issues/1#issuecomment-99"
+            ),
+        })
+        self.assertEqual(
+            self.requests[-1].url.path,
+            "/repos/microsoft/IssueLens/issues/comments/99",
+        )
+        self.assertEqual(
+            self.provider.calls[-1],
+            ("microsoft/IssueLens", {"issues": "read"}),
+        )
+
+    async def test_get_issue_comment_rejects_cross_issue_comment(self):
+        with self.assertRaisesRegex(GitHubAppError, "requested issue"):
+            await self.client().get_issue_comment(
+                "microsoft/IssueLens", 2, 99
+            )
+
+    async def test_get_issue_comment_accepts_canonical_repository_casing(self):
+        payload = {
+            "id": 99,
+            "body": "@issuelens replan",
+            "author_association": "MEMBER",
+            "user": {"login": "maintainer", "type": "User"},
+            "issue_url": (
+                "https://api.github.com/repos/microsoft/IssueLens/issues/1"
+            ),
+        }
+        client = GitHubClient(
+            self.provider,
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=payload)
+            ),
+        )
+
+        result = await client.get_issue_comment(
+            "microsoft/issuelens",
+            1,
+            99,
+        )
+
+        self.assertEqual(result["id"], 99)
+        self.assertEqual(
+            self.provider.calls[-1],
+            ("microsoft/issuelens", {"issues": "read"}),
+        )
+
+    async def test_get_issue_comment_validates_ids_before_token_minting(self):
+        for issue_number, comment_id in ((0, 99), (1, 0)):
+            with self.subTest(
+                issue_number=issue_number,
+                comment_id=comment_id,
+            ):
+                with self.assertRaisesRegex(GitHubAppError, "positive integer"):
+                    await self.client().get_issue_comment(
+                        "microsoft/IssueLens",
+                        issue_number,
+                        comment_id,
+                    )
+
+        self.assertEqual(self.provider.calls, [])
+
+    async def test_get_issue_comment_rejects_invalid_authoritative_shape(self):
+        issue_url = "https://api.github.com/repos/microsoft/IssueLens/issues/1"
+        invalid_payloads = (
+            {
+                "id": 100,
+                "body": "@issuelens plan",
+                "author_association": "MEMBER",
+                "user": {"login": "maintainer", "type": "User"},
+                "issue_url": issue_url,
+            },
+            {
+                "id": 99,
+                "body": None,
+                "author_association": "MEMBER",
+                "user": {"login": "maintainer", "type": "User"},
+                "issue_url": issue_url,
+            },
+            {
+                "id": 99,
+                "body": "@issuelens plan",
+                "author_association": None,
+                "user": {"login": "maintainer", "type": "User"},
+                "issue_url": issue_url,
+            },
+            {
+                "id": 99,
+                "body": "@issuelens plan",
+                "author_association": "MEMBER",
+                "user": {"login": "", "type": "User"},
+                "issue_url": issue_url,
+            },
+            {
+                "id": 99,
+                "body": "@issuelens plan",
+                "author_association": "MEMBER",
+                "user": {"login": "maintainer", "type": None},
+                "issue_url": issue_url,
+            },
+        )
+
+        for payload in invalid_payloads:
+            with self.subTest(payload=payload):
+                client = GitHubClient(
+                    self.provider,
+                    transport=httpx.MockTransport(
+                        lambda request, response=payload: httpx.Response(
+                            200,
+                            json=response,
+                        )
+                    ),
+                )
+                with self.assertRaisesRegex(
+                    GitHubAppError,
+                    "invalid issue comment",
+                ):
+                    await client.get_issue_comment(
+                        "microsoft/IssueLens",
+                        1,
+                        99,
+                    )
 
     async def test_search_rejects_scope_override_before_token_minting(self):
         for query in (

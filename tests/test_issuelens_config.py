@@ -113,7 +113,7 @@ class IssueLensConfigTests(unittest.IsolatedAsyncioTestCase):
                 "    path: .github/issuelens/planning.md\n"
             ),
             ".github/issuelens/planning.md": (
-                "Use maintainer-review and go readiness states."
+                "Use maintainer-review and approved readiness states."
             ),
         })
 

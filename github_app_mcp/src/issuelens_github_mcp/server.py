@@ -78,6 +78,19 @@ def create_server(
         )
 
     @server.tool()
+    async def get_issue_comment(
+        repository: str,
+        issue_number: int,
+        comment_id: int,
+    ) -> Any:
+        """Read one comment only when it belongs to the target issue."""
+        return await github.get_issue_comment(
+            repository,
+            issue_number,
+            comment_id,
+        )
+
+    @server.tool()
     async def list_issue_reactions(
         repository: str,
         issue_number: int,

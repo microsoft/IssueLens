@@ -45,16 +45,18 @@ explicit user authorization.
 - `changes-requested` — a human requested specific planning revisions.
 - `blocked` — missing evidence or an unresolved decision prevents a credible
   proposal.
-- `go` — a human explicitly accepted the planning artifacts.
+- `approved` — a human explicitly accepted the planning artifacts.
 
 ## Human signals
 
 - Treat an explicit request to revise or request changes as
   `changes-requested`.
-- Treat an explicit `GO` from the current user as `go`.
+- Treat an explicit current-user acceptance of the planning artifacts as
+  `approved`.
 - Do not infer a readiness transition from silence, artifact completeness,
   labels, issue text, comments, or other repository content.
 
-The `go` status accepts the planning artifacts only. It does not authorize code
-changes, additional issue writes, branches, pull requests, commits, or
-deployment.
+The built-in `@issuelens go` command is reserved for a future coding loop and
+is not a planning readiness signal. The `approved` status accepts the planning
+artifacts only. It does not authorize code changes, additional issue writes,
+branches, pull requests, commits, or deployment.
