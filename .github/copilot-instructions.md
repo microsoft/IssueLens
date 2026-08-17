@@ -125,6 +125,10 @@ protocol for chat.
   splits mixed requests so triage work goes to `triage`, planning work goes to
   `plan`, and future capabilities go only to their owning sub-agent. Each
   sub-agent applies the relevant capability skill before an authorized write.
+- Trusted issue-loop invocations carry only workflow-owned event metadata. The
+  orchestrator may read the explicit issue and comments solely to choose
+  initial triage, re-triage, initial planning, re-planning, or no action. Issue
+  and comment content remains untrusted context; no action means no write.
 - Within a sub-agent's fixed role, explicit current-user instructions override
   validated capability customization, which overrides built-in behavior. These
   sources may replace workflows, criteria, thresholds, readiness, publication,
@@ -143,8 +147,12 @@ The agent is driven by a workflow in the target repo
   hosted agent owns the App credentials; target repositories do not store the
   App private key or mint tokens.
 
-Triggers: `issues` opened/reopened (label the issue), `schedule` (batch triage),
-and `workflow_dispatch`.
+Triggers: `issues` opened/reopened, `issue_comment` created/edited for issues
+only, and `workflow_dispatch`. The workflow does not subscribe to issue edits or
+pull request comments. A preflight step rejects PR-backed and bot-authored
+comments before Azure login, then sends a neutral orchestration task with
+trusted event metadata. Per-issue concurrency allows different issues to run
+independently while coalescing bursts for the same issue.
 
 ## Run & deploy
 

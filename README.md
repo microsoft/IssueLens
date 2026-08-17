@@ -21,7 +21,7 @@ three sub-agents, and bundled GitHub App stdio MCP server.
    - the constrained in-process `issuelens-config` tool, backed by a separate
      request-local read-only App client;
    - in-process notification tools when their Logic App endpoints are configured.
-3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents.md`. It routes issue-level work to `triage`, critical-issue scans to `find-criticals`, and planning work to `plan`. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions. The `plan` sub-agent investigates a triaged issue, returns an action plan followed by a design specification, reports readiness, and waits for human direction.
+3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents.md`. It routes issue-level work to `triage`, critical-issue scans to `find-criticals`, and planning work to `plan`. For trusted issue-loop events it re-reads current issue context and chooses initial triage, re-triage, initial planning, re-planning, or no action. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions. The `plan` sub-agent investigates a triaged issue, returns an action plan followed by a design specification, reports readiness, and waits for human direction.
 4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Critical-issue scans end with a JSON report.
 
 ### Chat — `POST /responses`
@@ -441,10 +441,29 @@ repository**. It authenticates only to the Foundry endpoint through Azure OIDC
 and sends the task. The hosted agent owns its Key Vault-backed App identity, so
 target repositories store no App private key and transmit no GitHub token.
 
-- **Event-driven:** `on: issues` (opened/reopened) → duplicate detection,
-  labeling, assignment, and one reporter-facing comment.
-- **Manual:** `workflow_dispatch` with a required `issue_number` input runs the
-  same triage flow for an existing issue.
+- **Event-driven:** issue opened/reopened and human-authored issue-comment
+  created/edited events send a neutral issue-loop task. IssueLens re-reads the
+  issue and comments, then chooses triage, re-triage, planning, re-planning, or
+  no action.
+- **Manual:** `workflow_dispatch` with a required `issue_number` input sends the
+  same neutral issue-loop task for an existing issue.
+
+The workflow does not currently trigger on issue title/body edits or pull
+request comments. Its preflight step rejects PR-backed comments and comments
+whose sender or author is a bot, records the accepted/skipped reason before
+Azure login, and passes only trusted event metadata to the agent. It never
+copies issue or comment body text into the workflow-generated control prompt.
+
+Runs are grouped by repository and issue. Different issues run independently;
+events for one issue are serialized. GitHub Actions keeps one active and one
+pending run per group by default, so bursts may coalesce by replacing an older
+pending run. The eventual invocation re-reads current issue state.
+
+For an eligible event, the trusted workflow task authorizes only the selected
+role's bounded writes on that issue. Comment text remains untrusted context and
+cannot act as a privileged maintainer command or authorize implementation,
+deployment, external notification, cross-repository writes, or role changes. A
+no-action decision performs no GitHub write.
 
 Copy [.github/workflows/issue-triage.yml](.github/workflows/issue-triage.yml)
 into a target repository's `.github/workflows/`, then configure the Azure OIDC
