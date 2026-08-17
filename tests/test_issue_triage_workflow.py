@@ -62,6 +62,23 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertNotIn(".comment.body", self.source)
         self.assertNotIn(".issue.body", self.source)
 
+    def test_optional_metadata_uses_null_when_unknown(self):
+        self.assertIn(
+            'issue_author_association: (if $issue_author_association == "" '
+            'then null else $issue_author_association end)',
+            self.source,
+        )
+        self.assertIn(
+            'comment_author_association: (if $comment_author_association == "" '
+            'then null else $comment_author_association end)',
+            self.source,
+        )
+        self.assertIn(
+            'comment_id: (if $comment_id == "" then null else '
+            '($comment_id | tonumber) end)',
+            self.source,
+        )
+
     def test_invocation_is_neutral_and_supports_no_action(self):
         self.assertIn("initial triage, re-triage with new evidence", self.source)
         self.assertIn("initial planning, re-planning from feedback", self.source)

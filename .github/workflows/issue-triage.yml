@@ -126,9 +126,9 @@ jobs:
                 issue_number: $issue_number,
                 actor_login: $actor_login,
                 actor_type: $actor_type,
-                issue_author_association: $issue_author_association,
+                issue_author_association: (if $issue_author_association == "" then null else $issue_author_association end),
                 comment_id: (if $comment_id == "" then null else ($comment_id | tonumber) end),
-                comment_author_association: $comment_author_association,
+                comment_author_association: (if $comment_author_association == "" then null else $comment_author_association end),
                 comment_added: $comment_added,
                 comment_edited: $comment_edited,
                 manual_dispatch: $manual_dispatch
