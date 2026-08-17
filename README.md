@@ -140,11 +140,48 @@ parent-facing data contract, security or repository-scope boundaries, or write
 authorization. Explicit user instructions win when they conflict with
 customization.
 
+The global IssueLens command language is outside this precedence and has no
+configuration domain. Target repositories cannot rename commands, add aliases,
+change command routing or authorization, or assign a meaning to a reserved
+command.
+
 Planning instructions can replace the built-in readiness names and define how
 explicit human signals move a proposal between states. They cannot authorize a
 GitHub write or implementation. Without configured planning instructions,
 IssueLens uses `draft`, `needs-review`, `needs-clarification`, `blocked`, and
 `approved`. Even `approved` describes only the planning artifact.
+
+### Built-in commands
+
+IssueLens recognizes these immutable commands in the complete current
+Responses user turn or in an exact, validated GitHub issue comment:
+
+| Command | Current behavior |
+|---|---|
+| `@issuelens triage` | Run initial issue triage through `triage` |
+| `@issuelens retriage` | Re-run triage from current evidence through `triage` |
+| `@issuelens plan` | Create initial planning artifacts through `plan` |
+| `@issuelens replan` | Revise planning artifacts through `plan` |
+| `@issuelens go` | Reserved for a future coding loop; currently no action or write |
+
+Responses chat clients, including Teams, treat the current authenticated user
+as a trusted team maintainer. A command may include an explicit target such as
+`@issuelens plan microsoft/IssueLens#14`, or use an issue already established
+unambiguously in the conversation. IssueLens asks for a target when neither is
+available. The Responses endpoint is therefore a trusted team surface and must
+remain protected by the hosting platform's access controls.
+
+For a GitHub issue-loop invocation, the issue containing the comment is the
+target. IssueLens accepts a command only for an `issue_comment.created` event,
+after using the trusted repository, issue number, comment ID, actor, and author
+association to retrieve and verify the exact comment. The author must be a
+human `OWNER`, `MEMBER`, or `COLLABORATOR`. Reporter commands, bot comments,
+edited comments, actor mismatches, aliases, prose, quotes, logs, code blocks,
+extra arguments, and other non-exact forms are not commands.
+
+`@issuelens go` is not planning approval or a readiness signal. Planning
+artifacts may be explicitly accepted as `approved`, but that status still does
+not authorize coding, pull requests, merges, or deployment.
 
 ### Planning loop
 
@@ -461,8 +498,11 @@ pending run. The eventual invocation re-reads current issue state.
 
 For an eligible event, the trusted workflow task authorizes only the selected
 role's bounded writes on that issue. Comment text remains untrusted context and
-cannot act as a privileged maintainer command or authorize implementation,
-deployment, external notification, cross-repository writes, or role changes. A
+cannot authorize implementation, deployment, external notification,
+cross-repository writes, or role changes. The sole command exception is an
+exact built-in command whose triggering comment and maintainer association are
+validated by the global IssueLens contract against trusted event provenance.
+The workflow carries that provenance but does not parse commands. A
 no-action decision performs no GitHub write.
 
 Copy [.github/workflows/issue-triage.yml](.github/workflows/issue-triage.yml)

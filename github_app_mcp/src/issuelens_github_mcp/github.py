@@ -129,6 +129,56 @@ class GitHubClient:
             params=_pagination(per_page, page),
         )
 
+    async def get_issue_comment(
+        self,
+        repository: str,
+        issue_number: int,
+        comment_id: int,
+    ) -> dict[str, Any]:
+        """Read one comment and verify that it belongs to the target issue."""
+        repository = validate_repository(repository)
+        issue_number = _positive(issue_number, "issue_number")
+        comment_id = _positive(comment_id, "comment_id")
+        payload = await self._request(
+            "GET",
+            repository,
+            f"/issues/comments/{comment_id}",
+            permissions={"issues": "read"},
+        )
+        expected_issue_url = (
+            f"{_API_ROOT}/repos/{repository}/issues/{issue_number}"
+        )
+        if not isinstance(payload, Mapping) or payload.get("issue_url") != expected_issue_url:
+            raise GitHubAppError(
+                "GitHub comment does not belong to the requested issue"
+            )
+        user = payload.get("user")
+        body = payload.get("body")
+        author_association = payload.get("author_association")
+        if (
+            payload.get("id") != comment_id
+            or not isinstance(body, str)
+            or not isinstance(author_association, str)
+            or not isinstance(user, Mapping)
+            or not isinstance(user.get("login"), str)
+            or not user.get("login")
+            or not isinstance(user.get("type"), str)
+            or not user.get("type")
+        ):
+            raise GitHubAppError("GitHub returned an invalid issue comment")
+        return {
+            "id": comment_id,
+            "body": body,
+            "author_association": author_association,
+            "user": {
+                "login": user.get("login"),
+                "type": user.get("type"),
+            },
+            "created_at": payload.get("created_at"),
+            "updated_at": payload.get("updated_at"),
+            "html_url": payload.get("html_url"),
+        }
+
     async def list_issue_reactions(
         self,
         repository: str,

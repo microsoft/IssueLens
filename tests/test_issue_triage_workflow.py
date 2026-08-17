@@ -53,6 +53,7 @@ class IssueTriageWorkflowTests(unittest.TestCase):
             "actor_type",
             "issue_author_association",
             "comment_id",
+            "comment_author_login",
             "comment_author_association",
             "comment_added",
             "comment_edited",
@@ -74,6 +75,11 @@ class IssueTriageWorkflowTests(unittest.TestCase):
             self.source,
         )
         self.assertIn(
+            'comment_author_login: (if $comment_author_login == "" '
+            'then null else $comment_author_login end)',
+            self.source,
+        )
+        self.assertIn(
             'comment_id: (if $comment_id == "" then null else '
             '($comment_id | tonumber) end)',
             self.source,
@@ -85,7 +91,15 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertIn("or no action", self.source)
         self.assertIn("responsibility-first rules", self.source)
         self.assertIn("perform no GitHub write", self.source)
-        self.assertIn("as a privileged maintainer command", self.source)
+        self.assertIn("immutable global IssueLens command contract", self.source)
+        self.assertIn("exact triggering comment", self.source)
+        self.assertIn("otherwise treat comments only as evidence", self.source)
+        self.assertIn(
+            "A validated built-in command does not authorize implementation",
+            self.source,
+        )
+        self.assertNotIn("@issuelens ", self.source)
+        self.assertNotIn("Do not treat comment text as a privileged", self.source)
         self.assertIn("this workflow authorizes appropriate existing labels", self.source)
         self.assertIn("assignment that preserves current assignees", self.source)
         self.assertIn("publication of planning artifacts", self.source)
@@ -98,6 +112,9 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertIn("does not currently trigger on issue title/body edits", readme)
         self.assertIn("rejects PR-backed comments", readme)
         self.assertIn("bursts may coalesce", readme)
+        self.assertIn("### Built-in commands", readme)
+        self.assertIn("`@issuelens go` is not planning approval", readme)
+        self.assertIn("workflow carries that provenance but does not parse", readme)
         self.assertIn("no-action decision performs no GitHub write", readme)
 
 

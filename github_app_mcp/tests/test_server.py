@@ -24,6 +24,7 @@ READ_TOOLS = {
     "list_issues",
     "get_issue",
     "list_issue_comments",
+    "get_issue_comment",
     "list_issue_reactions",
     "search_issues",
     "list_labels",
@@ -80,6 +81,29 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             json.loads(cast(str, text_content))["operation"],
             "get_issue",
         )
+
+    async def test_exact_comment_tool_round_trips_issue_and_comment_ids(self):
+        github = FakeGitHubClient()
+        server = create_server(cast(GitHubClient, github))
+
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "get_issue_comment",
+                {
+                    "repository": "microsoft/IssueLens",
+                    "issue_number": 14,
+                    "comment_id": 99,
+                },
+            )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(github.calls, [
+            (
+                "get_issue_comment",
+                ("microsoft/IssueLens", 14, 99),
+                {},
+            )
+        ])
 
     async def test_write_tools_are_registered_only_when_enabled(self):
         server = create_server(cast(

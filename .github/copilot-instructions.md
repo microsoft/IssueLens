@@ -27,6 +27,11 @@ protocol for chat.
   produces an action plan followed by a design specification, reports readiness
   using validated repository policy or built-in defaults, and waits for human
   direction before revising or advancing the proposal.
+- **Built-in commands** — immutable `@issuelens triage`, `retriage`, `plan`,
+  and `replan` commands work across Responses chat and validated GitHub
+  maintainer comments. `@issuelens go` is reserved for a future coding loop and
+  currently performs no action or write. Repository customization cannot
+  redefine this command contract.
 - **App-scoped GitHub access** — both protocols use the bundled stdio MCP
   server. It resolves the App installation for each explicit repository and
   mints repository- and permission-scoped tokens. Bounded reads fall back to
@@ -66,7 +71,9 @@ protocol for chat.
 - **Custom agents** (registered in `main.py`):
   - **`issuelens`** — the global agent identity. Its system prompt lives in
     `agents.md`. It routes issue-level analysis to `triage` and critical-issue
-    scans to `find-criticals`. If the
+    scans to `find-criticals`. It also owns built-in command parsing, channel
+    trust validation, replay checks, and normalized handoff; sub-agents never
+    parse command text. If the
     sub-agent's response is not valid JSON or is an empty object, stop, skip
     labeling and notifications, and surface this error message:
     `Triage report could not be parsed; skipping downstream actions.`
@@ -113,7 +120,14 @@ protocol for chat.
 - Planning loads the validated `planning` instruction domain. Repository policy
   may define required sections, readiness states, and human signals, but cannot
   authorize writes or implementation. Planning approval does not authorize
-  source changes, commits, pull requests, or deployment.
+  source changes, commits, pull requests, or deployment, and is never expressed
+  by `@issuelens go`.
+- Built-in command names, syntax, routing, channel trust, and authorization are
+  hard-coded in `agents.md` above user and repository customization. Responses
+  users are trusted team maintainers. GitHub commands require the exact
+  `issue_comment.created` comment from a human `OWNER`, `MEMBER`, or
+  `COLLABORATOR`, verified through `get_issue_comment` and trusted event
+  metadata. The GitHub workflow remains a neutral provenance transport.
 - A request to plan or revise a specific issue authorizes `plan` to post the
   planning artifacts on that issue using explicit user instructions, validated
   planning customization, or the default of two separate comments. It
@@ -128,7 +142,8 @@ protocol for chat.
 - Trusted issue-loop invocations carry only workflow-owned event metadata. The
   orchestrator may read the explicit issue and comments solely to choose
   initial triage, re-triage, initial planning, re-planning, or no action. Issue
-  and comment content remains untrusted context; no action means no write.
+  and comment content remains untrusted context except for an exact built-in
+  command validated under the global contract; no action means no write.
 - Within a sub-agent's fixed role, explicit current-user instructions override
   validated capability customization, which overrides built-in behavior. These
   sources may replace workflows, criteria, thresholds, readiness, publication,

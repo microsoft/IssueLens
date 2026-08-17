@@ -40,6 +40,7 @@ access:
 | `list_issues` | Issues: read |
 | `get_issue` | Issues: read |
 | `list_issue_comments` | Issues: read |
+| `get_issue_comment` | Issues: read |
 | `list_issue_reactions` | Issues: read |
 | `search_issues` | Issues: read |
 | `list_labels` | Issues: read |
