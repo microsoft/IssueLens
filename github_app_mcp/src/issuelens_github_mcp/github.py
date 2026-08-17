@@ -148,7 +148,11 @@ class GitHubClient:
         expected_issue_url = (
             f"{_API_ROOT}/repos/{repository}/issues/{issue_number}"
         )
-        if not isinstance(payload, Mapping) or payload.get("issue_url") != expected_issue_url:
+        issue_url = payload.get("issue_url") if isinstance(payload, Mapping) else None
+        if (
+            not isinstance(issue_url, str)
+            or issue_url.casefold() != expected_issue_url.casefold()
+        ):
             raise GitHubAppError(
                 "GitHub comment does not belong to the requested issue"
             )

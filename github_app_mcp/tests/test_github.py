@@ -178,6 +178,35 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
                 "microsoft/IssueLens", 2, 99
             )
 
+    async def test_get_issue_comment_accepts_canonical_repository_casing(self):
+        payload = {
+            "id": 99,
+            "body": "@issuelens replan",
+            "author_association": "MEMBER",
+            "user": {"login": "maintainer", "type": "User"},
+            "issue_url": (
+                "https://api.github.com/repos/microsoft/IssueLens/issues/1"
+            ),
+        }
+        client = GitHubClient(
+            self.provider,
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json=payload)
+            ),
+        )
+
+        result = await client.get_issue_comment(
+            "microsoft/issuelens",
+            1,
+            99,
+        )
+
+        self.assertEqual(result["id"], 99)
+        self.assertEqual(
+            self.provider.calls[-1],
+            ("microsoft/issuelens", {"issues": "read"}),
+        )
+
     async def test_get_issue_comment_validates_ids_before_token_minting(self):
         for issue_number, comment_id in ((0, 99), (1, 0)):
             with self.subTest(
