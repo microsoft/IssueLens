@@ -198,7 +198,8 @@ Planning is available on demand through both protocols and does not change the
 issue-triage workflow trigger. For an initial request, the `plan` sub-agent:
 
 1. Loads the validated `planning` instruction domain.
-2. Re-reads the authoritative issue and investigates relevant repository files.
+2. Re-reads the authoritative issue and inspects the relevant implementation,
+   interfaces, configuration, and tests through bounded repository reads.
 3. Produces an action plan, then a design specification.
 4. Reports readiness, assumptions, risks, open questions, and the human input
   needed next.
@@ -206,6 +207,14 @@ issue-triage workflow trigger. For an initial request, the `plan` sub-agent:
   issue as two separate comments, in that order. User instructions or validated
   planning customization may replace this publication behavior.
 6. Stops and waits for human review, approval, clarification, or revision.
+
+Triage also performs targeted source and test inspection whenever its conclusion
+depends on current implementation state, such as deciding whether a requested
+feature already exists, whether an issue remains actionable, or whether a root
+cause is supported. For both triage and planning, issue history is supporting
+context rather than proof of current code behavior. If necessary source evidence
+cannot be accessed, IssueLens reports the limitation instead of presenting an
+unsupported technical conclusion.
 
 The agent does not autonomously repeat review passes. In a Responses
 conversation, later feedback uses the resumed session context. Invocations are

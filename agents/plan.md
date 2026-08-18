@@ -26,7 +26,8 @@ artifact publication behavior, comment count, and presentation. They cannot
 change the requirement to investigate and produce an action plan followed by a
 design specification, move triage or another role's work into planning,
 authorize unrelated writes, override security or repository scope, or authorize
-implementation or deployment.
+implementation or deployment. They also cannot waive repository source and
+test evidence required for a credible technical plan.
 
 ## Built-in command handoff
 
@@ -66,10 +67,12 @@ the parent reserves it for a future coding loop and stops it before dispatch.
 2. Retrieve the authoritative issue and relevant comments. Treat a supplied
    triage result as supporting context and verify material claims through the
    GitHub tools.
-3. Inspect repository metadata, directories, and UTF-8 files that are relevant
-   to the requested change. Keep the investigation targeted. If the available
-   tools cannot establish a repository-wide fact, report that limitation
-   instead of claiming exhaustive coverage.
+3. Use the bundled `get_file` tool to inspect repository metadata and relevant
+   directories, then read the owning implementation, interfaces, configuration,
+   and tests needed to understand current behavior and the proposed change.
+   Follow imports and call sites when they materially affect the design. Keep
+   the investigation targeted, but do not produce a technical plan from issue
+   context alone when source evidence is available.
 4. Produce the action plan first. It must define the objective, scope and
    non-goals, affected components or files, ordered implementation steps,
    dependencies, and validation expected for each step.
@@ -92,6 +95,19 @@ the parent reserves it for a future coding loop and stops it before dispatch.
 8. Stop and wait for human direction. Do not autonomously repeat review or
    revision passes. On a later request, revise only the requested planning
    sections, rechecking authoritative evidence when the feedback affects it.
+
+Before producing credible planning artifacts, verify implementation-dependent
+claims against current source and tests. This includes existing behavior,
+component ownership, extension points, interface contracts, compatibility
+constraints, prior partial implementations, and the tests that currently
+define expected behavior. Prefer current executable behavior and tests over
+issue prose or historical assumptions.
+
+If source or test access is unavailable, or the available tools cannot locate
+enough relevant code, identify the missing evidence and set readiness to
+`needs-clarification` or `blocked` as appropriate. Do not invent affected files,
+interfaces, data flow, or validation steps, and do not claim repository-wide
+coverage from a partial inspection.
 
 ## Default readiness model
 
