@@ -183,10 +183,13 @@ For a GitHub issue-loop invocation, the issue containing the comment is the
 target. IssueLens accepts a command only for an `issue_comment.created` event,
 after using the trusted repository, issue number, comment ID, actor, and author
 association to retrieve and verify the authoritative comment. The author must
-be a human `OWNER`, `MEMBER`, or `COLLABORATOR`. Reporter commands, bot
-comments, edited comments, actor mismatches, aliases, commands inside Markdown
-block quotes, inline code, fenced code blocks, or pasted logs, and ambiguous
-multiple-command inputs are rejected.
+be a human `OWNER`, `MEMBER`, or `COLLABORATOR` in both the event and current
+authoritative comment snapshots. The two trusted association labels may differ,
+for example `MEMBER` and `COLLABORATOR`, because GitHub can classify the same
+maintainer differently across API contexts. Reporter commands, bot comments,
+edited comments, actor mismatches, untrusted associations, aliases, commands
+inside Markdown block quotes, inline code, fenced code blocks, or pasted logs,
+and ambiguous multiple-command inputs are rejected.
 
 `@issuelens go` is not planning approval or a readiness signal. Planning
 artifacts may be explicitly accepted as `approved`, but that status still does

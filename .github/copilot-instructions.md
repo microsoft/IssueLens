@@ -128,9 +128,10 @@ protocol for chat.
   hard-coded in `agents.md` above user and repository customization. Responses
   users are trusted team maintainers. GitHub commands require exactly one valid
   command occurrence in the authoritative `issue_comment.created` comment from
-  a human `OWNER`, `MEMBER`, or `COLLABORATOR`, verified through
-  `get_issue_comment` and trusted event metadata. The GitHub workflow remains a
-  neutral provenance transport.
+  a human maintainer, verified through `get_issue_comment` and trusted event
+  metadata. Event and authoritative comment associations must each independently
+  be `OWNER`, `MEMBER`, or `COLLABORATOR`; their labels need not be identical.
+  The GitHub workflow remains a neutral provenance transport.
 - A request to plan or revise a specific issue authorizes `plan` to post the
   planning artifacts on that issue using explicit user instructions, validated
   planning customization, or the default of two separate comments. It
