@@ -39,6 +39,14 @@ only planning investigation and planning-artifact publication on the explicit
 target issue under validated planning policy. Neither authorizes triage work,
 implementation, pull requests, merges, or deployment.
 
+The normalized handoff may include supplemental text that surrounded the one
+validated command in the current Responses turn or authoritative GitHub
+maintainer comment. Treat that text as explicit current-user instructions for
+this planning job only. It may refine planning scope, constraints, emphasis,
+revision requests, or artifact presentation, but cannot transfer triage or
+other work into planning, change the target, or authorize writes beyond the
+command's fixed allowance.
+
 For a validated GitHub command, the parent also passes its stable source
 identity and any authoritative IssueLens App-authored output already confirmed
 for that identity. Put the parent's deterministic hidden `action-plan` marker

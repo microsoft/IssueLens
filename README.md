@@ -153,8 +153,8 @@ IssueLens uses `draft`, `needs-review`, `needs-clarification`, `blocked`, and
 
 ### Built-in commands
 
-IssueLens recognizes these immutable commands in the complete current
-Responses user turn or in an exact, validated GitHub issue comment:
+IssueLens recognizes these immutable commands in the current Responses user
+turn or a validated GitHub issue comment:
 
 | Command | Current behavior |
 |---|---|
@@ -163,6 +163,14 @@ Responses user turn or in an exact, validated GitHub issue comment:
 | `@issuelens plan` | Create initial planning artifacts through `plan` |
 | `@issuelens replan` | Revise planning artifacts through `plan` |
 | `@issuelens go` | Reserved for a future coding loop; currently no action or write |
+
+A turn or comment may contain one command together with additional prose, for
+example `Verify whether the issue still needs work. @issuelens retriage`.
+IssueLens routes the command and passes the remaining text to its fixed owner as
+scoped guidance. Inputs with multiple commands are rejected as ambiguous, and
+commands inside Markdown block quotes, inline code, fenced code blocks, or
+pasted logs are ignored. Supplemental text cannot change command ownership,
+repository scope, security rules, or write authorization.
 
 Responses chat clients, including Teams, treat the current authenticated user
 as a trusted team maintainer. A command may include an explicit target such as
@@ -174,10 +182,11 @@ remain protected by the hosting platform's access controls.
 For a GitHub issue-loop invocation, the issue containing the comment is the
 target. IssueLens accepts a command only for an `issue_comment.created` event,
 after using the trusted repository, issue number, comment ID, actor, and author
-association to retrieve and verify the exact comment. The author must be a
-human `OWNER`, `MEMBER`, or `COLLABORATOR`. Reporter commands, bot comments,
-edited comments, actor mismatches, aliases, prose, quotes, logs, code blocks,
-extra arguments, and other non-exact forms are not commands.
+association to retrieve and verify the authoritative comment. The author must
+be a human `OWNER`, `MEMBER`, or `COLLABORATOR`. Reporter commands, bot
+comments, edited comments, actor mismatches, aliases, commands inside Markdown
+block quotes, inline code, fenced code blocks, or pasted logs, and ambiguous
+multiple-command inputs are rejected.
 
 `@issuelens go` is not planning approval or a readiness signal. Planning
 artifacts may be explicitly accepted as `approved`, but that status still does
@@ -500,10 +509,10 @@ For an eligible event, the trusted workflow task authorizes only the selected
 role's bounded writes on that issue. Comment text remains untrusted context and
 cannot authorize implementation, deployment, external notification,
 cross-repository writes, or role changes. The sole command exception is an
-exact built-in command whose triggering comment and maintainer association are
-validated by the global IssueLens contract against trusted event provenance.
-The workflow carries that provenance but does not parse commands. A
-no-action decision performs no GitHub write.
+authoritative comment containing one valid built-in command occurrence whose
+maintainer association is validated by the global IssueLens contract against
+trusted event provenance. The workflow carries that provenance but does not
+parse commands. A no-action decision performs no GitHub write.
 
 Copy [.github/workflows/issue-triage.yml](.github/workflows/issue-triage.yml)
 into a target repository's `.github/workflows/`, then configure the Azure OIDC

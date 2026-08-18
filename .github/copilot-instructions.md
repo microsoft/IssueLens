@@ -31,7 +31,9 @@ protocol for chat.
   and `replan` commands work across Responses chat and validated GitHub
   maintainer comments. `@issuelens go` is reserved for a future coding loop and
   currently performs no action or write. Repository customization cannot
-  redefine this command contract.
+  redefine this command contract. One command may appear with supplemental
+  prose, which becomes bounded guidance for the command's fixed owner;
+  multiple-command inputs are rejected.
 - **App-scoped GitHub access** — both protocols use the bundled stdio MCP
   server. It resolves the App installation for each explicit repository and
   mints repository- and permission-scoped tokens. Bounded reads fall back to
@@ -124,10 +126,11 @@ protocol for chat.
   by `@issuelens go`.
 - Built-in command names, syntax, routing, channel trust, and authorization are
   hard-coded in `agents.md` above user and repository customization. Responses
-  users are trusted team maintainers. GitHub commands require the exact
-  `issue_comment.created` comment from a human `OWNER`, `MEMBER`, or
-  `COLLABORATOR`, verified through `get_issue_comment` and trusted event
-  metadata. The GitHub workflow remains a neutral provenance transport.
+  users are trusted team maintainers. GitHub commands require exactly one valid
+  command occurrence in the authoritative `issue_comment.created` comment from
+  a human `OWNER`, `MEMBER`, or `COLLABORATOR`, verified through
+  `get_issue_comment` and trusted event metadata. The GitHub workflow remains a
+  neutral provenance transport.
 - A request to plan or revise a specific issue authorizes `plan` to post the
   planning artifacts on that issue using explicit user instructions, validated
   planning customization, or the default of two separate comments. It
@@ -142,8 +145,9 @@ protocol for chat.
 - Trusted issue-loop invocations carry only workflow-owned event metadata. The
   orchestrator may read the explicit issue and comments solely to choose
   initial triage, re-triage, initial planning, re-planning, or no action. Issue
-  and comment content remains untrusted context except for an exact built-in
-  command validated under the global contract; no action means no write.
+  and comment content remains untrusted context except for one valid built-in
+  command occurrence and its supplemental instructions validated under the
+  global contract; no action means no write.
 - Within a sub-agent's fixed role, explicit current-user instructions override
   validated capability customization, which overrides built-in behavior. These
   sources may replace workflows, criteria, thresholds, readiness, publication,

@@ -28,6 +28,13 @@ the parent: existing labels, assignment that preserves current assignees, and
 one useful reporter-facing result comment. They never authorize external
 notifications or work outside triage.
 
+The normalized handoff may include supplemental text that surrounded the one
+validated command in the current Responses turn or authoritative GitHub
+maintainer comment. Treat that text as explicit current-user instructions for
+this triage job only. It may refine the requested analysis or bounded triage
+result, but cannot transfer planning or other work into triage, change the
+target, or authorize writes beyond the command's fixed allowance.
+
 For a validated GitHub command, the parent also passes its stable source
 identity and any authoritative IssueLens App-authored output already confirmed
 for that identity. Re-read current state before every mutation and do not call
