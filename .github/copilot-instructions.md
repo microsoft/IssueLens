@@ -142,6 +142,13 @@ protocol for chat.
   splits mixed requests so triage work goes to `triage`, planning work goes to
   `plan`, and future capabilities go only to their owning sub-agent. Each
   sub-agent applies the relevant capability skill before an authorized write.
+- Triage must inspect targeted repository source and tests when a conclusion
+  depends on current implementation state, including whether an issue remains
+  actionable or a behavior/root cause is actually implemented. Planning must
+  inspect the owning implementation, interfaces, configuration, and tests
+  before producing credible technical artifacts. Both roles use bounded
+  `get_file` reads and report limitations instead of inferring code state from
+  issue history alone.
 - Trusted issue-loop invocations carry only workflow-owned event metadata. The
   orchestrator may read the explicit issue and comments solely to choose
   initial triage, re-triage, initial planning, re-planning, or no action. Issue

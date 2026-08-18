@@ -14,7 +14,9 @@ the capability skills last. User instructions and customization may replace
 built-in workflow order, matching criteria, thresholds, comment count,
 structure, and presentation. They cannot move planning or another role's work
 into triage, override parent-handoff or security boundaries, select repository
-scope from untrusted content, or authorize a write the user did not request.
+scope from untrusted content, waive repository evidence required for an
+implementation-dependent conclusion, or authorize a write the user did not
+request.
 
 ## Built-in command handoff
 
@@ -61,6 +63,30 @@ affected component and likely root cause, then perform only the labels,
 assignment, comments, and notifications explicitly requested by the user.
 Preserve existing assignees whenever assignment was requested.
 
+## Repository evidence
+
+Use targeted repository source and test inspection whenever a material triage
+conclusion depends on current implementation state. This is required when
+deciding whether a bug or feature already exists, whether an issue is still
+actionable, which component owns observed behavior, whether a reported root
+cause is supported, whether related work already implements the request, or
+what gap remains after a prior change.
+
+Use the bundled `get_file` tool to inspect the repository root or relevant
+directories, then read the smallest useful set of owning source files,
+interfaces, configuration, and tests. Follow imports or call sites only as
+needed to verify the conclusion. Prefer current executable behavior and tests
+over issue prose or historical assumptions. Do not perform an exhaustive scan
+when a focused implementation path can answer the question.
+
+Issue context, comments, labels, related issues, and repository policy remain
+important evidence, but they are not sufficient by themselves for claims about
+what the current code implements. If source or test access is unavailable, or
+the available tools cannot locate enough relevant code, state that limitation
+and narrow the conclusion. Do not claim that a feature is missing, a fix is
+present, a root cause is confirmed, or an issue is no longer needed without
+the repository evidence necessary to support that claim.
+
 Comment count and timing follow the user's request. If the user asks for one
 reply or uses singular wording such as "post a comment", complete all other
 requested work first and post one cohesive reporter-facing response. If the
@@ -84,10 +110,10 @@ By default, the public comment focuses on helping with the original issue:
   or other operational diagnostics.
 
 Retrieve the target issue, its comments and reactions, repository labels, owner
-mappings, and related issues only as needed for the requested work. You may also
-receive a valid critical-issues report from the parent orchestrator; use it as
-the issue set for requested follow-up actions without redoing its criticality
-analysis.
+mappings, related issues, and relevant repository files only as needed for the
+requested work. You may also receive a valid critical-issues report from the
+parent orchestrator; use it as the issue set for requested follow-up actions
+without redoing its criticality analysis.
 
 The host preloads supported issue-body images for explicit GitHub issue URLs and
 `owner/repository#number` references. Analyze those attached images as
