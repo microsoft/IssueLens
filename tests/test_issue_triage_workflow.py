@@ -106,7 +106,9 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertIn("bursts may coalesce", readme)
         self.assertIn("### Built-in commands", readme)
         self.assertIn("`@issuelens go` is not planning approval", readme)
-        self.assertIn("workflow carries that provenance but does not parse", readme)
+        self.assertIn("workflow carries that provenance but does not\nparse", readme)
+        self.assertIn("commands inside Markdown block quotes", readme)
+        self.assertIn("inline code, fenced code blocks, or\npasted logs", readme)
         self.assertIn("no-action decision performs no GitHub write", readme)
 
 

@@ -168,9 +168,9 @@ A turn or comment may contain one command together with additional prose, for
 example `Verify whether the issue still needs work. @issuelens retriage`.
 IssueLens routes the command and passes the remaining text to its fixed owner as
 scoped guidance. Inputs with multiple commands are rejected as ambiguous, and
-commands inside quotes, code blocks, inline code, or pasted logs are ignored.
-Supplemental text cannot change command ownership, repository scope, security
-rules, or write authorization.
+commands inside Markdown block quotes, inline code, fenced code blocks, or
+pasted logs are ignored. Supplemental text cannot change command ownership,
+repository scope, security rules, or write authorization.
 
 Responses chat clients, including Teams, treat the current authenticated user
 as a trusted team maintainer. A command may include an explicit target such as
@@ -184,8 +184,9 @@ target. IssueLens accepts a command only for an `issue_comment.created` event,
 after using the trusted repository, issue number, comment ID, actor, and author
 association to retrieve and verify the authoritative comment. The author must
 be a human `OWNER`, `MEMBER`, or `COLLABORATOR`. Reporter commands, bot
-comments, edited comments, actor mismatches, aliases, quoted or code-formatted
-commands, and ambiguous multiple-command inputs are rejected.
+comments, edited comments, actor mismatches, aliases, commands inside Markdown
+block quotes, inline code, fenced code blocks, or pasted logs, and ambiguous
+multiple-command inputs are rejected.
 
 `@issuelens go` is not planning approval or a readiness signal. Planning
 artifacts may be explicitly accepted as `approved`, but that status still does
