@@ -192,10 +192,12 @@ jobs:
             exit 1
           fi
 
-          input="Process the trusted IssueLens issue-loop event for ${REPO}#${ISSUE} under the global built-in command and trusted issue-loop contracts. "
-          input+="Trusted event metadata: ${EVENT_METADATA}"
+          input="Process the trusted IssueLens issue-loop event for ${REPO}#${ISSUE} under the global built-in command and trusted issue-loop contracts."
 
-          payload=$(jq -cn --arg input "$input" '{input:$input}')
+          payload=$(jq -cn \
+            --arg input "$input" \
+            --argjson event "$EVENT_METADATA" \
+            '{input:$input,event:$event}')
 
           agent_token=$(az account get-access-token \
             --scope "$AGENT_SCOPE" \

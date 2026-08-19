@@ -24,6 +24,8 @@ services:
               value: ${GITHUB_APP_ID}
             - name: GITHUB_APP_PRIVATE_KEY_SECRET_URI
               value: ${GITHUB_APP_PRIVATE_KEY_SECRET_URI}
+            - name: ISSUELENS_AUTOMATION_USER_ID
+              value: ${ISSUELENS_AUTOMATION_USER_ID}
             - name: TOOLBOX_ENDPOINT
               value: ${TOOLBOX_ENDPOINT}
             - name: MAILING_URL

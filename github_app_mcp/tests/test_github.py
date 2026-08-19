@@ -30,6 +30,7 @@ class RecordingProvider:
             permissions=tuple(sorted(permissions.items())),
             token="repository-token",
             expires_at=float("inf"),
+            app_slug="issuelens",
         )
 
 
@@ -45,10 +46,22 @@ class FailingProvider:
 class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.requests = []
+        self.reactions = {}
         self.provider = RecordingProvider()
 
         def handler(request):
             self.requests.append(request)
+            if request.url.path.endswith("/reactions"):
+                reactions = self.reactions.setdefault(request.url.path, [])
+                if request.method == "GET":
+                    return httpx.Response(200, json=reactions)
+                reaction = {
+                    "id": len(reactions) + 1,
+                    "content": "eyes",
+                    "user": {"login": "issuelens[bot]", "type": "Bot"},
+                }
+                reactions.append(reaction)
+                return httpx.Response(201, json=reaction)
             if request.url.path == "/repos/microsoft/IssueLens/issues":
                 return httpx.Response(200, json=[
                     {"number": 1, "title": "Issue"},
@@ -505,6 +518,27 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.assertEqual(self.provider.calls, [])
+
+    async def test_eyes_reaction_skips_post_across_client_retries(self):
+        first_client = self.client(writes_enabled=True)
+        second_client = self.client(writes_enabled=True)
+
+        await first_client.add_eyes_reaction(
+            "microsoft/IssueLens", "issue", 1
+        )
+        await second_client.add_eyes_reaction(
+            "microsoft/IssueLens", "issue", 1
+        )
+
+        reaction_requests = [
+            request
+            for request in self.requests
+            if request.url.path.endswith("/issues/1/reactions")
+        ]
+        self.assertEqual(
+            [request.method for request in reaction_requests],
+            ["GET", "POST", "GET"],
+        )
 
     async def test_write_never_falls_back_to_anonymous(self):
         requests = []

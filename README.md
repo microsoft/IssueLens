@@ -14,6 +14,8 @@ three sub-agents, and bundled GitHub App stdio MCP server.
 1. Receives a JSON task. The payload requires `input` (the task, a free-form
    text prompt), with optional inline `attachments`, e.g.
    `{"input": "Triage open issues in owner/repo"}`.
+   The trusted Actions workflow additionally supplies a validated `event`
+   control envelope separately from free-form input.
 2. Creates a **fresh Copilot session per request** configured with:
    - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
    - the bundled **GitHub App stdio MCP server**, whose process and token cache
@@ -63,6 +65,7 @@ installation dynamically:
 |----------|----------|-------------|
 | `GITHUB_APP_ID` | Yes | Numeric GitHub App ID |
 | `GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Yes | Azure Key Vault secret URI containing the App PEM |
+| `ISSUELENS_AUTOMATION_USER_ID` | For Actions automation | Foundry's platform-injected `x-agent-user-id` for the workflow's Azure OIDC identity |
 
 Store the PEM in Key Vault; never place it in `.env`, an azd environment, or a
 deployment manifest. Grant the hosted agent's managed identity **Key Vault
@@ -76,7 +79,13 @@ az keyvault secret set --vault-name <vault> --name issuelens-github-app-key `
 azd env set GITHUB_APP_ID <app-id>
 azd env set GITHUB_APP_PRIVATE_KEY_SECRET_URI `
   "https://<vault>.vault.azure.net/secrets/issuelens-github-app-key"
+azd env set ISSUELENS_AUTOMATION_USER_ID <foundry-user-id>
 ```
+
+The host accepts an `event` envelope only when Foundry's authenticated,
+platform-injected user ID matches `ISSUELENS_AUTOMATION_USER_ID`. A caller
+cannot establish event provenance through request text or a client-supplied
+event envelope alone.
 
 Target repositories and all repositories receiving writes must be included in
 an installation of the App. Bounded reads prefer App authentication but fall
@@ -477,6 +486,7 @@ Invocations (`POST /invocations`):
 |-------|----------|-------------|
 | `input` | Yes | The task — a free-form text prompt describing what to triage, plan, label, or report |
 | `attachments` | No | Inline Copilot `blob` attachments with base64 `data`, `mimeType`, and optional `displayName` |
+| `event` | Workflow only | Trusted issue-loop control metadata; rejected if malformed or inconsistent with `input` |
 
 Chat (`POST /responses`) takes a standard OpenAI Responses body; both protocols
 use the same internal GitHub App MCP authentication.
@@ -517,11 +527,13 @@ records the accepted/skipped reason before Azure login, and passes only trusted
 event metadata to the agent. It never copies issue or comment body text into the
 workflow-generated control prompt.
 
-The reaction endpoint is idempotent for the App identity, and the host also
-suppresses repeated successful requests during its process lifetime. Retries
-therefore do not add duplicate reactions. A reaction failure is emitted as a
-warning and does not stop the main task; rejected events never request a
-reaction.
+The authorized workflow's per-target concurrency group serializes retries before
+they reach the host. Before creating a reaction, the bounded operation also
+checks all existing 👀 reactions for the App's installation identity, and the
+host suppresses repeated successful requests during its process lifetime.
+Retries handled by another instance or after restart therefore do not send a
+redundant create request. A reaction failure is emitted as a warning and does
+not stop the main task; rejected events never request a reaction.
 
 Runs are grouped by repository and issue. Different issues run independently;
 events for one issue are serialized. GitHub Actions keeps one active and one

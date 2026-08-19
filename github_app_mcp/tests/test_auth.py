@@ -32,7 +32,10 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
                 "/repos/microsoft/IssueLens/installation",
                 "/repos/microsoft/other/installation",
             }:
-                return httpx.Response(200, json={"id": 1234})
+                return httpx.Response(
+                    200,
+                    json={"id": 1234, "app_slug": "issuelens"},
+                )
             if request.url.path == "/app/installations/1234/access_tokens":
                 body = json.loads(request.content)
                 repository = body["repositories"][0]
@@ -77,6 +80,7 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(credential.repository, "microsoft/IssueLens")
         self.assertEqual(credential.permissions, (("issues", "read"),))
+        self.assertEqual(credential.app_slug, "issuelens")
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
     async def test_token_is_reused_within_one_provider_session(self, _):
@@ -171,7 +175,8 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
             if request.url.path.endswith("/installation"):
                 discoveries += 1
                 return httpx.Response(200, json={
-                    "id": 111 if discoveries == 1 else 222
+                    "id": 111 if discoveries == 1 else 222,
+                    "app_slug": "issuelens",
                 })
             if request.url.path == "/app/installations/111/access_tokens":
                 return httpx.Response(404)
@@ -201,7 +206,10 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_token_response_is_safely_rejected(self, _):
         def handler(request):
             if request.url.path.endswith("/installation"):
-                return httpx.Response(200, json={"id": 1234})
+                return httpx.Response(
+                    200,
+                    json={"id": 1234, "app_slug": "issuelens"},
+                )
             return httpx.Response(201, json={
                 "token": 123,
                 "expires_at": "already-expired",

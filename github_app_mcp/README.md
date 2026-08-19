@@ -56,8 +56,9 @@ Write tools are registered only when writes are enabled:
 | `add_eyes_reaction` | Issues: write or Pull requests: write, based on target |
 
 `add_eyes_reaction` accepts only issue, pull request, and issue-comment targets,
-and always sends the fixed `eyes` content. GitHub returns the existing reaction
-for a repeated request by the same App identity, so retries remain idempotent.
+and always sends the fixed `eyes` content. It first checks paginated `eyes`
+reactions for the App installation's bot identity and skips the create call when
+that reaction already exists.
 
 ## Configuration
 

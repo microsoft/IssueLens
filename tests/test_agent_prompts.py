@@ -242,7 +242,9 @@ class AgentPromptTests(unittest.TestCase):
         )
         self.assertNotIn("_responses_turn(prompt)", invocation_source)
         self.assertLess(
-            invocation_source.index("await _starting_reaction_warning(prompt)"),
+            invocation_source.index(
+                "await _starting_reaction_warning(event_metadata)"
+            ),
             invocation_source.index("await _ensure_client()"),
         )
         self.assertIn("'type': 'warning'", invocation_source)
@@ -251,6 +253,11 @@ class AgentPromptTests(unittest.TestCase):
             "except (ConfigurationError, GitHubAppError)",
             main_source,
         )
+        self.assertIn('data.pop("event", None)', main_source)
+        self.assertIn('if "_event_metadata" in data:', main_source)
+        self.assertIn("validated_event_metadata(event_metadata)", main_source)
+        self.assertIn("_AUTOMATION_USER_ID_ENV", main_source)
+        self.assertIn("secrets.compare_digest", main_source)
         self.assertIn("_responses_turn(prompt)", chat_source)
         self.assertNotIn("RequestTokenProvider", main_source)
         self.assertNotIn("github-access", main_source)

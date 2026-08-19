@@ -44,6 +44,7 @@ class InstallationCredential:
     permissions: tuple[tuple[str, PermissionLevel], ...]
     token: str
     expires_at: float
+    app_slug: str | None = None
 
 
 def validate_repository(repository: str) -> str:
@@ -124,7 +125,7 @@ class GitHubAppTokenProvider:
         )
         self._transport = transport
         self._clock = clock
-        self._repository_installations: dict[str, int] = {}
+        self._repository_installations: dict[str, tuple[int, str]] = {}
         self._credentials: dict[
             tuple[str, tuple[tuple[str, PermissionLevel], ...]],
             InstallationCredential,
@@ -187,22 +188,29 @@ class GitHubAppTokenProvider:
         }
         for attempt in range(2):
             async with self._state_lock:
-                installation_id = self._repository_installations.get(
+                installation = self._repository_installations.get(
                     normalized_repository
                 )
             try:
                 async with self._client() as client:
-                    if installation_id is None:
+                    if installation is None:
                         response = await client.get(
                             f"{_API_ROOT}/repos/{repository}/installation",
                             headers=app_headers,
                         )
                         response.raise_for_status()
-                        installation_id = int(response.json()["id"])
+                        installation_payload = response.json()
+                        installation_id = int(installation_payload["id"])
+                        app_slug = installation_payload["app_slug"]
+                        if not isinstance(app_slug, str) or not app_slug:
+                            raise ValueError
+                        installation = (installation_id, app_slug)
                         async with self._state_lock:
                             self._repository_installations[
                                 normalized_repository
-                            ] = installation_id
+                            ] = installation
+
+                    installation_id, app_slug = installation
 
                     response = await client.post(
                         f"{_API_ROOT}/app/installations/{installation_id}/access_tokens",
@@ -256,6 +264,7 @@ class GitHubAppTokenProvider:
                 permissions=normalized_permissions,
                 token=token,
                 expires_at=expires_at,
+                app_slug=app_slug,
             )
 
         raise GitHubAppError(

@@ -94,7 +94,12 @@ class IssueTriageWorkflowTests(unittest.TestCase):
     def test_invocation_is_neutral_and_supports_no_action(self):
         self.assertIn("trusted IssueLens issue-loop event", self.source)
         self.assertIn("global built-in command and trusted issue-loop contracts", self.source)
-        self.assertIn("Trusted event metadata: ${EVENT_METADATA}", self.source)
+        self.assertIn("--argjson event \"$EVENT_METADATA\"", self.source)
+        self.assertIn("'{input:$input,event:$event}'", self.source)
+        self.assertNotIn(
+            'input+="Trusted event metadata: ${EVENT_METADATA}"',
+            self.source,
+        )
         self.assertNotIn("@issuelens ", self.source)
         self.assertNotIn("initial triage, re-triage", self.source)
         self.assertNotIn("responsibility-first rules", self.source)
@@ -113,6 +118,7 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         )
         self.assertIn("does not currently trigger on issue title/body edits", readme)
         self.assertIn("reacts with 👀", readme)
+        self.assertIn("platform-injected user ID", readme)
         self.assertIn("bursts may coalesce", readme)
         self.assertIn("### Built-in commands", readme)
         self.assertIn("`@issuelens go` is not planning approval", readme)

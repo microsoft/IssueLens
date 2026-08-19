@@ -506,11 +506,43 @@ class GitHubClient:
         permission = (
             "issues" if subject_type == "issue" else "pull_requests"
         )
+        permissions: Permissions = {permission: "write"}
+        credential = await self._token_provider.get_token(
+            self._authorize(repository, write=True),
+            permissions,
+        )
+        if not credential.app_slug:
+            raise GitHubAppError(
+                "GitHub App installation identity is unavailable"
+            )
+
+        expected_login = f"{credential.app_slug}[bot]".casefold()
+        for page in range(1, 101):
+            reactions = await self._request(
+                "GET",
+                repository,
+                path,
+                permissions=permissions,
+                params={"content": "eyes", "per_page": 100, "page": page},
+                write=True,
+            )
+            if not isinstance(reactions, list):
+                raise GitHubAppError(
+                    "GitHub returned an invalid reactions response"
+                )
+            for reaction in reactions:
+                user = reaction.get("user") if isinstance(reaction, Mapping) else None
+                login = user.get("login") if isinstance(user, Mapping) else None
+                if isinstance(login, str) and login.casefold() == expected_login:
+                    return reaction
+            if len(reactions) < 100:
+                break
+
         return await self._request(
             "POST",
             repository,
             path,
-            permissions={permission: "write"},
+            permissions=permissions,
             body={"content": "eyes"},
             write=True,
         )

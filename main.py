@@ -10,11 +10,13 @@ two protocols from a single host:
 * **responses** (``POST /responses``) — interactive chat (playground, Teams,
   any OpenAI Responses client).
 
-The invocation payload has one required field and one optional field:
+The invocation payload has one required field and two optional fields:
 
 * ``input`` — the user's task (a free-form text prompt).
 * ``attachments`` — optional inline Copilot ``blob`` attachments containing
     base64-encoded images or files.
+* ``event`` — trusted issue-loop control metadata supplied only by the
+    authenticated automation workflow.
 
 Both protocols use the bundled stdio MCP server. Each Copilot session owns one
 server process, which resolves the IssueLens GitHub App installation for every
@@ -42,6 +44,7 @@ import json
 import logging
 import os
 import pathlib
+import secrets
 import sys
 import time
 
@@ -77,7 +80,11 @@ from github_app_mcp.src.issuelens_github_mcp.config import (
     GitHubAppConfig,
 )
 from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient
-from event_acknowledgement import ReactionTracker, reaction_target
+from event_acknowledgement import (
+    ReactionTracker,
+    reaction_target,
+    validated_event_metadata,
+)
 from issue_image_context import issue_image_attachments
 from issuelens_config_tool import create_tool as create_issuelens_config_tool
 from media_inputs import (
@@ -90,6 +97,7 @@ from media_inputs import (
 
 _project_dir = pathlib.Path(__file__).parent
 _github_mcp_src = _project_dir / "github_app_mcp" / "src"
+_AUTOMATION_USER_ID_ENV = "ISSUELENS_AUTOMATION_USER_ID"
 
 load_dotenv(override=False)
 
@@ -336,7 +344,16 @@ def _session_options(
 def _build_prompt(payload: dict) -> str:
     """Extract the user's task (a free-form text prompt) from the payload."""
     text = payload.get("input")
-    return text.strip() if isinstance(text, str) else ""
+    if not isinstance(text, str):
+        return ""
+    prompt = text.strip()
+    event_metadata = payload.get("_event_metadata")
+    if event_metadata:
+        prompt = (
+            f"{prompt} Trusted event metadata: "
+            f"{json.dumps(event_metadata, separators=(',', ':'))}"
+        )
+    return prompt
 
 
 # ── Notification tools (email / Teams via Logic App HTTP endpoints) ───────────
@@ -493,9 +510,9 @@ _RUNTIME_TOOLS = [*_NOTIFICATION_TOOLS]
 _START_REACTIONS = ReactionTracker()
 
 
-async def _starting_reaction_warning(prompt: str) -> str | None:
+async def _starting_reaction_warning(event_metadata: dict | None) -> str | None:
     """Best-effort acknowledgement for one eligible trusted issue-loop event."""
-    target = reaction_target(prompt)
+    target = reaction_target(event_metadata)
     if target is None:
         return None
     try:
@@ -523,13 +540,14 @@ async def _stream_response(invocation_id: str, payload: dict):
     cache are destroyed when the request session disconnects.
     """
     prompt = _build_prompt(payload)
+    event_metadata = payload.get("_event_metadata")
     attachments = payload.get("_copilot_attachments") or []
 
     if not prompt:
         yield f"data: {json.dumps({'type': 'error', 'message': 'empty task'})}\n\n".encode()
         return
 
-    reaction_warning = await _starting_reaction_warning(prompt)
+    reaction_warning = await _starting_reaction_warning(event_metadata)
     if reaction_warning:
         yield f"data: {json.dumps({'type': 'warning', 'message': reaction_warning})}\n\n".encode()
 
@@ -597,6 +615,41 @@ async def handle_invoke(request: Request) -> Response:
         has_input = isinstance(data.get("input"), str) and data["input"].strip()
         if not has_input:
             raise ValueError('provide a non-empty "input"')
+        if "_event_metadata" in data:
+            raise ValueError("_event_metadata is reserved for the trusted host")
+        event_metadata = data.pop("event", None)
+        if event_metadata is not None:
+            expected_user_id = os.environ.get(
+                _AUTOMATION_USER_ID_ENV, ""
+            ).strip()
+            actual_user_id = getattr(request.state, "user_id", "")
+            if (
+                not expected_user_id
+                or not isinstance(actual_user_id, str)
+                or not actual_user_id
+                or not secrets.compare_digest(
+                    expected_user_id,
+                    actual_user_id,
+                )
+            ):
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": "forbidden",
+                        "message": "event source is not authorized",
+                    },
+                )
+            event_metadata = validated_event_metadata(event_metadata)
+            if event_metadata is None:
+                raise ValueError("event must be a valid IssueLens event envelope")
+            expected_input = (
+                "Process the trusted IssueLens issue-loop event for "
+                f"{event_metadata['repository']}#{event_metadata['issue_number']} "
+                "under the global built-in command and trusted issue-loop contracts."
+            )
+            if data["input"].strip() != expected_input:
+                raise ValueError("event does not match the IssueLens event task")
+            data["_event_metadata"] = event_metadata
         _github_mcp_server()
         data["_copilot_attachments"] = invocation_attachments(
             data.get("attachments")
