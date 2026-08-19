@@ -434,6 +434,78 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
             all(call[1] == {"issues": "write"} for call in self.provider.calls)
         )
 
+    async def test_eyes_reaction_uses_fixed_body_routes_and_permissions(self):
+        client = self.client(writes_enabled=True)
+
+        await client.add_eyes_reaction(
+            "microsoft/IssueLens", "issue", 1
+        )
+        issue_request = self.requests[-1]
+        issue_permission = self.provider.calls[-1]
+        await client.add_eyes_reaction(
+            "microsoft/IssueLens", "pull_request", 2
+        )
+        pull_request = self.requests[-1]
+        pull_permission = self.provider.calls[-1]
+        await client.add_eyes_reaction(
+            "microsoft/IssueLens", "pull_request", 2, 99
+        )
+        comment_request = self.requests[-1]
+
+        self.assertEqual(
+            issue_request.url.path,
+            "/repos/microsoft/IssueLens/issues/1/reactions",
+        )
+        self.assertEqual(
+            pull_request.url.path,
+            "/repos/microsoft/IssueLens/issues/2/reactions",
+        )
+        self.assertEqual(
+            comment_request.url.path,
+            "/repos/microsoft/IssueLens/issues/comments/99/reactions",
+        )
+        for request in (issue_request, pull_request, comment_request):
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(
+                json.loads(request.content),
+                {"content": "eyes"},
+            )
+        self.assertEqual(
+            issue_permission,
+            ("microsoft/IssueLens", {"issues": "write"}),
+        )
+        self.assertEqual(
+            pull_permission,
+            ("microsoft/IssueLens", {"pull_requests": "write"}),
+        )
+        self.assertEqual(
+            self.provider.calls[-1],
+            ("microsoft/IssueLens", {"pull_requests": "write"}),
+        )
+
+    async def test_eyes_reaction_validates_target_before_token_minting(self):
+        client = self.client(writes_enabled=True)
+
+        for subject_type, subject_number, comment_id in (
+            ("discussion", 1, None),
+            ("issue", 0, None),
+            ("issue", 1, 0),
+        ):
+            with self.subTest(
+                subject_type=subject_type,
+                subject_number=subject_number,
+                comment_id=comment_id,
+            ):
+                with self.assertRaises(GitHubAppError):
+                    await client.add_eyes_reaction(
+                        "microsoft/IssueLens",
+                        subject_type,
+                        subject_number,
+                        comment_id,
+                    )
+
+        self.assertEqual(self.provider.calls, [])
+
     async def test_write_never_falls_back_to_anonymous(self):
         requests = []
         client = GitHubClient(

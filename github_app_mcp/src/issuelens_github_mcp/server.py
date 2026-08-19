@@ -175,6 +175,21 @@ def create_server(
                 body,
             )
 
+        @server.tool()
+        async def add_eyes_reaction(
+            repository: str,
+            subject_type: Literal["issue", "pull_request"],
+            subject_number: int,
+            comment_id: int | None = None,
+        ) -> Any:
+            """Add an eyes reaction to one issue, pull request, or comment."""
+            return await github.add_eyes_reaction(
+                repository,
+                subject_type,
+                subject_number,
+                comment_id,
+            )
+
     return server
 
 

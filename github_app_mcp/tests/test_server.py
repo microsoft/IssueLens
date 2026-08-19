@@ -30,7 +30,12 @@ READ_TOOLS = {
     "list_labels",
     "get_file",
 }
-WRITE_TOOLS = {"add_labels", "set_assignees", "add_issue_comment"}
+WRITE_TOOLS = {
+    "add_labels",
+    "set_assignees",
+    "add_issue_comment",
+    "add_eyes_reaction",
+}
 
 
 class FakeGitHubClient:
@@ -118,6 +123,30 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             {tool.name for tool in result.tools},
             READ_TOOLS | WRITE_TOOLS,
         )
+
+    async def test_eyes_reaction_tool_has_fixed_typed_target(self):
+        github = FakeGitHubClient(writes_enabled=True)
+        server = create_server(cast(GitHubClient, github))
+
+        async with Client(server) as client:
+            result = await client.call_tool(
+                "add_eyes_reaction",
+                {
+                    "repository": "microsoft/IssueLens",
+                    "subject_type": "pull_request",
+                    "subject_number": 21,
+                    "comment_id": 987,
+                },
+            )
+
+        self.assertFalse(result.is_error)
+        self.assertEqual(github.calls, [
+            (
+                "add_eyes_reaction",
+                ("microsoft/IssueLens", "pull_request", 21, 987),
+                {},
+            )
+        ])
 
 
 class EnvironmentTests(unittest.TestCase):

@@ -16,19 +16,22 @@ class IssueTriageWorkflowTests(unittest.TestCase):
 
     def test_supported_events_are_explicit(self):
         self.assertIn("types: [opened, reopened]", self.source)
+        self.assertIn("pull_request:\n    types: [opened, reopened]", self.source)
         self.assertIn("issue_comment:\n    types: [created, edited]", self.source)
         self.assertIn("workflow_dispatch:", self.source)
         self.assertNotIn("types: [opened, reopened, edited]", self.source)
 
-    def test_preflight_rejects_pr_and_bot_comments_before_login(self):
+    def test_preflight_rejects_bots_and_unsupported_events_before_login(self):
         preflight = self.source.index("- name: Validate issue event")
         azure_login = self.source.index("- name: Azure login")
         self.assertLess(preflight, azure_login)
-        self.assertIn(".issue.pull_request != null", self.source)
         self.assertIn('"$actor_type" != "User"', self.source)
         self.assertIn('"$comment_author_type" != "User"', self.source)
-        self.assertIn("reason=pull_request_comment", self.source)
+        self.assertIn("reason=bot_activity", self.source)
         self.assertIn("reason=bot_comment", self.source)
+        self.assertIn("reason=invalid_comment_id", self.source)
+        self.assertIn("reason=comment_actor_mismatch", self.source)
+        self.assertIn("reason=unsupported_pull_request_action", self.source)
         self.assertEqual(
             self.source.count("if: steps.preflight.outputs.eligible == 'true'"),
             2,
@@ -37,7 +40,8 @@ class IssueTriageWorkflowTests(unittest.TestCase):
     def test_concurrency_remains_per_issue(self):
         self.assertIn(
             "issuelens-triage-${{ github.repository }}-${{ "
-            "github.event.issue.number || inputs.issue_number || github.run_id }}",
+            "github.event.issue.number || github.event.pull_request.number || "
+            "inputs.issue_number || github.run_id }}",
             self.source,
         )
         self.assertIn("cancel-in-progress: false", self.source)
@@ -49,12 +53,14 @@ class IssueTriageWorkflowTests(unittest.TestCase):
             "event_action",
             "repository",
             "issue_number",
+            "subject_type",
             "actor_login",
             "actor_type",
             "issue_author_association",
             "comment_id",
             "comment_author_login",
             "comment_author_association",
+            "comment_author_type",
             "comment_added",
             "comment_edited",
             "manual_dispatch",
@@ -99,10 +105,14 @@ class IssueTriageWorkflowTests(unittest.TestCase):
 
     def test_documentation_describes_event_loop_boundaries(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("issue-comment\n  created/edited", readme)
-        self.assertIn("triage, re-triage, planning, re-planning, or\n  no action", readme)
+        self.assertIn("issue-comment created/edited", readme)
+        self.assertIn("pull request opened/reopened", readme)
+        self.assertIn(
+            "triage, re-triage, planning, re-planning, or no action",
+            readme,
+        )
         self.assertIn("does not currently trigger on issue title/body edits", readme)
-        self.assertIn("rejects PR-backed comments", readme)
+        self.assertIn("reacts with 👀", readme)
         self.assertIn("bursts may coalesce", readme)
         self.assertIn("### Built-in commands", readme)
         self.assertIn("`@issuelens go` is not planning approval", readme)

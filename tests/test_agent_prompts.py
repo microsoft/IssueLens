@@ -80,6 +80,11 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn("do not rely on a prior Copilot session", global_prompt)
         self.assertIn("at most one useful\nreporter-facing comment", global_prompt)
         self.assertIn("perform no GitHub write", global_prompt)
+        self.assertIn(
+            "trusted host owns the automatic `add_eyes_reaction`",
+            global_prompt,
+        )
+        self.assertIn("Never call that tool from a sub-agent", global_prompt)
         self.assertIn("Validate a possible built-in command", global_prompt)
         self.assertIn(
             "only exception is\na built-in command occurrence and supplemental instructions",
@@ -236,6 +241,16 @@ class AgentPromptTests(unittest.TestCase):
             invocation_source,
         )
         self.assertNotIn("_responses_turn(prompt)", invocation_source)
+        self.assertLess(
+            invocation_source.index("await _starting_reaction_warning(prompt)"),
+            invocation_source.index("await _ensure_client()"),
+        )
+        self.assertIn("'type': 'warning'", invocation_source)
+        self.assertIn("Processing will continue", main_source)
+        self.assertIn(
+            "except (ConfigurationError, GitHubAppError)",
+            main_source,
+        )
         self.assertIn("_responses_turn(prompt)", chat_source)
         self.assertNotIn("RequestTokenProvider", main_source)
         self.assertNotIn("github-access", main_source)

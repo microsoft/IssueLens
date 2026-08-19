@@ -484,6 +484,37 @@ class GitHubClient:
             write=True,
         )
 
+    async def add_eyes_reaction(
+        self,
+        repository: str,
+        subject_type: Literal["issue", "pull_request"],
+        subject_number: int,
+        comment_id: int | None = None,
+    ) -> Any:
+        """Add the fixed eyes reaction to one issue, pull request, or comment."""
+        if subject_type not in {"issue", "pull_request"}:
+            raise GitHubAppError(
+                "subject_type must be issue or pull_request"
+            )
+        subject_number = _positive(subject_number, "subject_number")
+        if comment_id is None:
+            path = f"/issues/{subject_number}/reactions"
+        else:
+            path = (
+                f"/issues/comments/{_positive(comment_id, 'comment_id')}/reactions"
+            )
+        permission = (
+            "issues" if subject_type == "issue" else "pull_requests"
+        )
+        return await self._request(
+            "POST",
+            repository,
+            path,
+            permissions={permission: "write"},
+            body={"content": "eyes"},
+            write=True,
+        )
+
     def _authorize(self, repository: str, *, write: bool = False) -> str:
         repository = validate_repository(repository)
         if write and not self._writes_enabled:

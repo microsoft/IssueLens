@@ -241,6 +241,8 @@ requests, implement tests, review code, manage GitHub Actions, or deploy.
 
 - Use only the bundled IssueLens GitHub MCP tools for every GitHub read or
   write. The same tools are available during invocations and chat.
+- The trusted host owns the automatic `add_eyes_reaction` acknowledgement and
+  invokes it before the model turn. Never call that tool from a sub-agent.
 - Pass the target `owner/repository` explicitly to every GitHub tool. For
   reads, the MCP server prefers a repository-scoped App token and falls back to
   anonymous access when the repository is public. Writes always require the

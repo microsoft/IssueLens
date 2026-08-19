@@ -152,6 +152,17 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
+    async def test_pull_request_write_permission_is_supported(self, _):
+        credential = await self.provider.get_token(
+            "microsoft/IssueLens", {"pull_requests": "write"}
+        )
+
+        self.assertEqual(
+            credential.permissions,
+            (("pull_requests", "write"),),
+        )
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
     async def test_stale_installation_is_rediscovered_once(self, _):
         discoveries = 0
 

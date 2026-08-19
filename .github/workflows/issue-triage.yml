@@ -22,6 +22,8 @@ name: IssueLens issue loop
 on:
   issues:
     types: [opened, reopened]
+  pull_request:
+    types: [opened, reopened]
   issue_comment:
     types: [created, edited]
   workflow_dispatch:
@@ -38,7 +40,7 @@ permissions:
 concurrency:
   # Keep one active run per issue without making unrelated issues compete for
   # the same default-branch concurrency group.
-  group: issuelens-triage-${{ github.repository }}-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
+  group: issuelens-triage-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number || inputs.issue_number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -54,14 +56,19 @@ jobs:
 
           event_name="$GITHUB_EVENT_NAME"
           event_action=$(jq -r '.action // "workflow_dispatch"' "$GITHUB_EVENT_PATH")
-          issue=$(jq -r '.issue.number // empty' "$GITHUB_EVENT_PATH")
+          issue=$(jq -r '.issue.number // .pull_request.number // empty' "$GITHUB_EVENT_PATH")
           actor_login=$(jq -r '.sender.login // empty' "$GITHUB_EVENT_PATH")
           actor_type=$(jq -r '.sender.type // empty' "$GITHUB_EVENT_PATH")
-          issue_author_association=$(jq -r '.issue.author_association // empty' "$GITHUB_EVENT_PATH")
+          issue_author_association=$(jq -r '.issue.author_association // .pull_request.author_association // empty' "$GITHUB_EVENT_PATH")
           comment_id=$(jq -r '.comment.id // empty' "$GITHUB_EVENT_PATH")
           comment_author_login=$(jq -r '.comment.user.login // empty' "$GITHUB_EVENT_PATH")
           comment_author_association=$(jq -r '.comment.author_association // empty' "$GITHUB_EVENT_PATH")
           comment_author_type=$(jq -r '.comment.user.type // empty' "$GITHUB_EVENT_PATH")
+          subject_type=issue
+          if [[ "$event_name" == "pull_request" ]] ||
+             jq -e '.issue.pull_request != null' "$GITHUB_EVENT_PATH" >/dev/null; then
+            subject_type=pull_request
+          fi
 
           if [[ "$event_name" == "workflow_dispatch" ]]; then
             issue="$DISPATCH_ISSUE"
@@ -75,11 +82,20 @@ jobs:
           if [[ ! "$issue" =~ ^[1-9][0-9]*$ ]]; then
             eligible=false
             reason=invalid_issue_number
+          elif [[ "$event_name" != "workflow_dispatch" && "$actor_type" != "User" ]]; then
+            eligible=false
+            reason=bot_activity
           elif [[ "$event_name" == "issue_comment" ]]; then
-            if jq -e '.issue.pull_request != null' "$GITHUB_EVENT_PATH" >/dev/null; then
+            if [[ ! "$comment_id" =~ ^[1-9][0-9]*$ ]]; then
               eligible=false
-              reason=pull_request_comment
-            elif [[ "$actor_type" != "User" || "$comment_author_type" != "User" ]]; then
+              reason=invalid_comment_id
+            elif [[ "$actor_login" != "$comment_author_login" ]]; then
+              eligible=false
+              reason=comment_actor_mismatch
+            elif [[ "$event_action" != "created" && "$event_action" != "edited" ]]; then
+              eligible=false
+              reason=unsupported_comment_action
+            elif [[ "$comment_author_type" != "User" ]]; then
               eligible=false
               reason=bot_comment
             fi
@@ -87,6 +103,11 @@ jobs:
             if [[ "$event_action" != "opened" && "$event_action" != "reopened" ]]; then
               eligible=false
               reason=unsupported_issue_action
+            fi
+          elif [[ "$event_name" == "pull_request" ]]; then
+            if [[ "$event_action" != "opened" && "$event_action" != "reopened" ]]; then
+              eligible=false
+              reason=unsupported_pull_request_action
             fi
           elif [[ "$event_name" != "workflow_dispatch" ]]; then
             eligible=false
@@ -112,12 +133,14 @@ jobs:
               --arg event_action "$event_action" \
               --arg repository "$GITHUB_REPOSITORY" \
               --argjson issue_number "$issue" \
+              --arg subject_type "$subject_type" \
               --arg actor_login "$actor_login" \
               --arg actor_type "$actor_type" \
               --arg issue_author_association "$issue_author_association" \
               --arg comment_id "$comment_id" \
               --arg comment_author_login "$comment_author_login" \
               --arg comment_author_association "$comment_author_association" \
+              --arg comment_author_type "$comment_author_type" \
               --argjson comment_added "$comment_added" \
               --argjson comment_edited "$comment_edited" \
               --argjson manual_dispatch "$manual_dispatch" \
@@ -126,12 +149,14 @@ jobs:
                 event_action: $event_action,
                 repository: $repository,
                 issue_number: $issue_number,
+                subject_type: $subject_type,
                 actor_login: $actor_login,
                 actor_type: $actor_type,
                 issue_author_association: (if $issue_author_association == "" then null else $issue_author_association end),
                 comment_id: (if $comment_id == "" then null else ($comment_id | tonumber) end),
                 comment_author_login: (if $comment_author_login == "" then null else $comment_author_login end),
                 comment_author_association: (if $comment_author_association == "" then null else $comment_author_association end),
+                comment_author_type: (if $comment_author_type == "" then null else $comment_author_type end),
                 comment_added: $comment_added,
                 comment_edited: $comment_edited,
                 manual_dispatch: $manual_dispatch

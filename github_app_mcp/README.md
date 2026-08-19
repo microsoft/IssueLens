@@ -53,6 +53,11 @@ Write tools are registered only when writes are enabled:
 | `add_labels` | Issues: write |
 | `set_assignees` | Issues: write |
 | `add_issue_comment` | Issues: write |
+| `add_eyes_reaction` | Issues: write or Pull requests: write, based on target |
+
+`add_eyes_reaction` accepts only issue, pull request, and issue-comment targets,
+and always sends the fixed `eyes` content. GitHub returns the existing reaction
+for a repeated request by the same App identity, so retries remain idempotent.
 
 ## Configuration
 
@@ -63,10 +68,11 @@ Write tools are registered only when writes are enabled:
 | `GITHUB_MCP_ENABLE_WRITES` | No | `false` by default; set `true` only for an authorized session |
 
 The process identity needs Azure Key Vault secret `get` permission. The GitHub
-App needs Metadata read, Contents read, and Issues read/write for the complete
-toolset. GitHub narrows each minted token below the App's maximum permissions.
-All private-key, installation, and token caches live only in the stdio process
-and are discarded when that session-owned process exits.
+App needs Metadata read, Contents read, Issues read/write, and Pull requests
+read/write for the complete toolset. Pull request write access is used only for
+pull request reactions. GitHub narrows each minted token below the App's maximum
+permissions. All private-key, installation, and token caches live only in the
+stdio process and are discarded when that session-owned process exits.
 
 ## Local verification
 

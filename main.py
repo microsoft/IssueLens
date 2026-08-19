@@ -77,6 +77,7 @@ from github_app_mcp.src.issuelens_github_mcp.config import (
     GitHubAppConfig,
 )
 from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient
+from event_acknowledgement import ReactionTracker, reaction_target
 from issue_image_context import issue_image_attachments
 from issuelens_config_tool import create_tool as create_issuelens_config_tool
 from media_inputs import (
@@ -252,11 +253,11 @@ def _github_mcp_server() -> dict:
     }
 
 
-def _new_host_github_client() -> GitHubClient:
-    """Create a request-local, read-only client for trusted host loaders."""
+def _new_host_github_client(*, writes_enabled: bool = False) -> GitHubClient:
+    """Create a request-local client for trusted host operations."""
     config = GitHubAppConfig.from_environment(os.environ)
     provider = GitHubAppTokenProvider(config)
-    return GitHubClient(provider, writes_enabled=False)
+    return GitHubClient(provider, writes_enabled=writes_enabled)
 
 
 async def _ensure_client() -> CopilotClient:
@@ -489,6 +490,30 @@ def _notification_tools() -> list[Tool]:
 # Built once at startup from configured notification endpoints.
 _NOTIFICATION_TOOLS = _notification_tools()
 _RUNTIME_TOOLS = [*_NOTIFICATION_TOOLS]
+_START_REACTIONS = ReactionTracker()
+
+
+async def _starting_reaction_warning(prompt: str) -> str | None:
+    """Best-effort acknowledgement for one eligible trusted issue-loop event."""
+    target = reaction_target(prompt)
+    if target is None:
+        return None
+    try:
+        client = _new_host_github_client(writes_enabled=True)
+        await _START_REACTIONS.add(client, target)
+    except (ConfigurationError, GitHubAppError) as error:
+        logger.warning("Could not add IssueLens start reaction: %s", error)
+        return (
+            f"IssueLens could not add the 👀 starting reaction: {error}. "
+            "Processing will continue."
+        )
+    except Exception:
+        logger.exception("Could not add IssueLens start reaction")
+        return (
+            "IssueLens could not add the 👀 starting reaction because of an "
+            "unexpected error. Processing will continue."
+        )
+    return None
 
 
 async def _stream_response(invocation_id: str, payload: dict):
@@ -497,8 +522,6 @@ async def _stream_response(invocation_id: str, payload: dict):
     A new session is created per request, so its stdio MCP process and token
     cache are destroyed when the request session disconnects.
     """
-    client = await _ensure_client()
-    mcp_servers = _build_mcp_servers()
     prompt = _build_prompt(payload)
     attachments = payload.get("_copilot_attachments") or []
 
@@ -506,6 +529,12 @@ async def _stream_response(invocation_id: str, payload: dict):
         yield f"data: {json.dumps({'type': 'error', 'message': 'empty task'})}\n\n".encode()
         return
 
+    reaction_warning = await _starting_reaction_warning(prompt)
+    if reaction_warning:
+        yield f"data: {json.dumps({'type': 'warning', 'message': reaction_warning})}\n\n".encode()
+
+    client = await _ensure_client()
+    mcp_servers = _build_mcp_servers()
     request_github_client = _new_host_github_client()
     request_config_tool = create_issuelens_config_tool(request_github_client)
     try:
