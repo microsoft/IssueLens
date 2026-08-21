@@ -107,7 +107,7 @@ jobs:
               manual_dispatch=true
             fi
 
-            metadata=$(jq -cn \
+            metadata=$(jq -cSn \
               --arg event_name "$event_name" \
               --arg event_action "$event_action" \
               --arg repository "$GITHUB_REPOSITORY" \
@@ -167,10 +167,23 @@ jobs:
             exit 1
           fi
 
-          input="Process the trusted IssueLens issue-loop event for ${REPO}#${ISSUE} under the global built-in command and trusted issue-loop contracts. "
-          input+="Trusted event metadata: ${EVENT_METADATA}"
+          event_digest=$(printf '%s' "$EVENT_METADATA" | sha256sum | cut -d' ' -f1)
+          event_audience="issuelens-issue-loop:${event_digest}"
+          encoded_audience=$(jq -rn \
+            --arg audience "$event_audience" \
+            '$audience | @uri')
+          event_token=$(curl --fail-with-body -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${encoded_audience}" \
+            | jq -er '.value')
+          event_envelope=$(printf '%s' "$EVENT_METADATA" \
+            | base64 -w0 \
+            | tr '+/' '-_' \
+            | tr -d '=')
 
-          payload=$(jq -cn --arg input "$input" '{input:$input}')
+          payload=$(jq -cn \
+            --arg input "Process the authenticated IssueLens issue-loop event." \
+            '{input:$input}')
 
           agent_token=$(az account get-access-token \
             --scope "$AGENT_SCOPE" \
@@ -180,4 +193,6 @@ jobs:
           curl --fail-with-body -sS -N -X POST "$AGENT_URL" \
             -H "Authorization: Bearer $agent_token" \
             -H "Content-Type: application/json" \
+            -H "X-IssueLens-Event: $event_envelope" \
+            -H "X-IssueLens-Event-Token: $event_token" \
             -d "$payload"

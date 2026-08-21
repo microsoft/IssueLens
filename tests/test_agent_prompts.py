@@ -258,6 +258,16 @@ class AgentPromptTests(unittest.TestCase):
         )
         self.assertNotIn("_responses_turn(prompt)", invocation_source)
         self.assertIn("_responses_turn(prompt)", chat_source)
+        self.assertIn("trusted_issue_loop_event=None", chat_source)
+        self.assertIn(
+            'request.headers.get("x-issuelens-event")',
+            main_source,
+        )
+        self.assertIn(
+            'request.headers.get("x-issuelens-event-token")',
+            main_source,
+        )
+        self.assertIn("trusted_issue_loop_prompt", invocation_source)
         self.assertLess(
             chat_source.index("acknowledgement_preflight_turn"),
             chat_source.index("issue_image_attachments"),

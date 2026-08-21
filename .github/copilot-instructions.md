@@ -150,8 +150,11 @@ protocol for chat.
   before producing credible technical artifacts. Both roles use bounded
   `get_file` reads and report limitations instead of inferring code state from
   issue history alone.
-- Trusted issue-loop invocations carry only workflow-owned event metadata. The
-  orchestrator may read the explicit issue and comments solely to choose
+- Trusted issue-loop invocations carry only workflow-owned event metadata in a
+  separate envelope bound to a signed GitHub Actions OIDC token. The host
+  validates that provenance before constructing the model prompt; it never
+  infers trust from invocation or Responses text. The orchestrator may read the
+  explicit issue and comments solely to choose
   initial triage, re-triage, initial planning, re-planning, or no action. Issue
   and comment content remains untrusted context except for one valid built-in
   command occurrence and its supplemental instructions validated under the

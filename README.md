@@ -509,8 +509,12 @@ target repositories store no App private key and transmit no GitHub token.
 The workflow does not currently trigger on issue title/body edits or pull
 request comments. Its preflight step rejects PR-backed comments and comments
 whose sender or author is a bot, records the accepted/skipped reason before
-Azure login, and passes only trusted event metadata to the agent. It never
-copies issue or comment body text into the workflow-generated control prompt.
+Azure login, and passes only trusted event metadata to the agent in a separate
+envelope bound to a signed GitHub Actions OIDC token. The host validates the
+token's repository, workflow, event, actor, and envelope-specific audience
+before creating the model's control prompt; Responses text and free-form
+invocation input cannot claim this provenance. The workflow never copies issue
+or comment body text into the envelope.
 
 Runs are grouped by repository and issue. Different issues run independently;
 events for one issue are serialized. GitHub Actions keeps one active and one

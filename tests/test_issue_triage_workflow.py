@@ -86,9 +86,8 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         )
 
     def test_invocation_is_neutral_and_supports_no_action(self):
-        self.assertIn("trusted IssueLens issue-loop event", self.source)
-        self.assertIn("global built-in command and trusted issue-loop contracts", self.source)
-        self.assertIn("Trusted event metadata: ${EVENT_METADATA}", self.source)
+        self.assertIn("authenticated IssueLens issue-loop event", self.source)
+        self.assertNotIn("Trusted event metadata: ${EVENT_METADATA}", self.source)
         self.assertNotIn("@issuelens ", self.source)
         self.assertNotIn("initial triage, re-triage", self.source)
         self.assertNotIn("responsibility-first rules", self.source)
@@ -96,6 +95,17 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertNotIn("validated planning policy", self.source)
         self.assertNotIn("privileged authorization", self.source)
         self.assertNotIn('input="Triage GitHub issue', self.source)
+
+    def test_event_envelope_is_bound_to_github_oidc_provenance(self):
+        self.assertIn('event_audience="issuelens-issue-loop:', self.source)
+        self.assertIn("ACTIONS_ID_TOKEN_REQUEST_URL", self.source)
+        self.assertIn("ACTIONS_ID_TOKEN_REQUEST_TOKEN", self.source)
+        self.assertIn('jq -er \'.value\'', self.source)
+        self.assertIn('"X-IssueLens-Event: $event_envelope"', self.source)
+        self.assertIn(
+            '"X-IssueLens-Event-Token: $event_token"',
+            self.source,
+        )
 
     def test_documentation_describes_event_loop_boundaries(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

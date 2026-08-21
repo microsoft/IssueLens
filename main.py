@@ -91,6 +91,8 @@ from work_acknowledgement import (
     acknowledgement_preflight,
     acknowledgement_preflight_turn,
     load_after_acknowledgement,
+    trusted_issue_loop_prompt,
+    validated_issue_loop_envelope,
 )
 
 _project_dir = pathlib.Path(__file__).parent
@@ -505,7 +507,12 @@ async def _stream_response(invocation_id: str, payload: dict):
     """
     client = await _ensure_client()
     mcp_servers = _build_mcp_servers()
-    prompt = _build_prompt(payload)
+    trusted_issue_loop_event = payload.get("_trusted_issue_loop_event")
+    prompt = (
+        trusted_issue_loop_prompt(trusted_issue_loop_event)
+        if trusted_issue_loop_event is not None
+        else _build_prompt(payload)
+    )
     attachments = payload.get("_copilot_attachments") or []
 
     if not prompt:
@@ -536,7 +543,7 @@ async def _stream_response(invocation_id: str, payload: dict):
     unsubscribe = session.on(on_event)
     try:
         run_preflight, target = acknowledgement_preflight(
-            prompt,
+            trusted_issue_loop_event=trusted_issue_loop_event,
             has_explicit_issue_reference=bool(issue_references(prompt)),
         )
 
@@ -613,6 +620,15 @@ async def handle_invoke(request: Request) -> Response:
         data["_copilot_attachments"] = invocation_attachments(
             data.get("attachments")
         )
+        trusted_issue_loop_event = await asyncio.to_thread(
+            validated_issue_loop_envelope,
+            request.headers.get("x-issuelens-event"),
+            request.headers.get("x-issuelens-event-token"),
+        )
+        if trusted_issue_loop_event is not None:
+            data["_trusted_issue_loop_event"] = trusted_issue_loop_event
+        else:
+            data.pop("_trusted_issue_loop_event", None)
     except (json.JSONDecodeError, ValueError) as exc:
         return JSONResponse(
             status_code=400,
@@ -839,7 +855,7 @@ async def handle_chat(
 
     try:
         run_preflight, target = acknowledgement_preflight(
-            prompt,
+            trusted_issue_loop_event=None,
             has_explicit_issue_reference=bool(issue_references(prompt)),
         )
 

@@ -2,20 +2,23 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
+import jwt
 
-_TRUSTED_ISSUE_LOOP_PREFIX = "Process the trusted IssueLens issue-loop event for "
-_TRUSTED_ISSUE_LOOP_PATTERN = re.compile(
-    r"^Process the trusted IssueLens issue-loop event for "
-    r"([A-Za-z0-9-]{1,39}/[A-Za-z0-9_.-]{1,100})#([1-9][0-9]*) "
-    r"under the global built-in command and trusted issue-loop contracts\. "
-    r"Trusted event metadata: "
+
+_GITHUB_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+_GITHUB_OIDC_KEYS = jwt.PyJWKClient(
+    f"{_GITHUB_OIDC_ISSUER}/.well-known/jwks"
 )
+_ISSUE_LOOP_AUDIENCE_PREFIX = "issuelens-issue-loop:"
+_MAX_ENVELOPE_LENGTH = 16_384
 _REPOSITORY_PATTERN = re.compile(
     r"^[A-Za-z0-9-]{1,39}/[A-Za-z0-9_.-]{1,100}$"
 )
@@ -31,20 +34,8 @@ class AcknowledgementTarget:
     target_id: int
 
 
-def is_trusted_issue_loop_prompt(prompt: str) -> bool:
-    """Whether a prompt claims the workflow-owned issue-loop envelope."""
-    return prompt.startswith(_TRUSTED_ISSUE_LOOP_PREFIX)
-
-
-def trusted_issue_loop_target(prompt: str) -> AcknowledgementTarget | None:
+def trusted_issue_loop_target(metadata: Any) -> AcknowledgementTarget | None:
     """Select the triggering activity from valid trusted issue-loop metadata."""
-    envelope = _TRUSTED_ISSUE_LOOP_PATTERN.match(prompt)
-    if envelope is None:
-        return None
-    try:
-        metadata = json.loads(prompt[envelope.end():])
-    except (json.JSONDecodeError, TypeError):
-        return None
     if not isinstance(metadata, dict):
         return None
 
@@ -54,8 +45,6 @@ def trusted_issue_loop_target(prompt: str) -> AcknowledgementTarget | None:
         not isinstance(repository, str)
         or not _REPOSITORY_PATTERN.fullmatch(repository)
         or not _positive_integer(issue_number)
-        or repository != envelope.group(1)
-        or issue_number != int(envelope.group(2))
         or metadata.get("actor_type") != "User"
     ):
         return None
@@ -97,14 +86,94 @@ def trusted_issue_loop_target(prompt: str) -> AcknowledgementTarget | None:
     return AcknowledgementTarget(repository, "issue_comment", comment_id)
 
 
+def issue_loop_audience(metadata: dict[str, Any]) -> str:
+    """Bind a GitHub OIDC token to one canonical event envelope."""
+    serialized = json.dumps(
+        metadata,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"{_ISSUE_LOOP_AUDIENCE_PREFIX}{hashlib.sha256(serialized).hexdigest()}"
+
+
+def validated_issue_loop_envelope(
+    encoded_envelope: str | None,
+    token: str | None,
+) -> dict[str, Any] | None:
+    """Validate workflow provenance before creating a trusted host envelope."""
+    if encoded_envelope is None and token is None:
+        return None
+    if (
+        not encoded_envelope
+        or not token
+        or len(encoded_envelope) > _MAX_ENVELOPE_LENGTH
+        or len(token) > _MAX_ENVELOPE_LENGTH
+    ):
+        raise ValueError("invalid issue-loop provenance")
+
+    try:
+        padding = "=" * (-len(encoded_envelope) % 4)
+        raw_envelope = base64.b64decode(
+            encoded_envelope + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        metadata = json.loads(raw_envelope.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid issue-loop provenance") from exc
+
+    target = trusted_issue_loop_target(metadata)
+    if target is None:
+        raise ValueError("invalid issue-loop provenance")
+
+    try:
+        signing_key = _GITHUB_OIDC_KEYS.get_signing_key_from_jwt(token)
+        claims = jwt.decode(
+            token,
+            signing_key.key,
+            algorithms=["RS256"],
+            audience=issue_loop_audience(metadata),
+            issuer=_GITHUB_OIDC_ISSUER,
+            options={"require": ["aud", "exp", "iat", "iss", "sub"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise ValueError("invalid issue-loop provenance") from exc
+
+    workflow_prefix = (
+        f"{target.repository}/.github/workflows/issue-triage.yml@"
+    )
+    if (
+        claims.get("repository") != target.repository
+        or claims.get("event_name") != metadata.get("event_name")
+        or claims.get("actor") != metadata.get("actor_login")
+        or not str(claims.get("workflow_ref", "")).startswith(workflow_prefix)
+    ):
+        raise ValueError("invalid issue-loop provenance")
+    return metadata
+
+
+def trusted_issue_loop_prompt(metadata: dict[str, Any]) -> str:
+    """Build the model prompt only from a host-validated event envelope."""
+    target = trusted_issue_loop_target(metadata)
+    if target is None:
+        raise ValueError("invalid issue-loop provenance")
+    return (
+        "Process the trusted IssueLens issue-loop event for "
+        f"{target.repository}#{metadata['issue_number']} under the global "
+        "built-in command and trusted issue-loop contracts. Trusted event "
+        f"metadata: {json.dumps(metadata, separators=(',', ':'), sort_keys=True)}"
+    )
+
+
 def acknowledgement_preflight(
-    prompt: str,
     *,
+    trusted_issue_loop_event: dict[str, Any] | None,
     has_explicit_issue_reference: bool,
 ) -> tuple[bool, AcknowledgementTarget | None]:
     """Decide whether the host must run the acknowledgement-only turn."""
-    target = trusted_issue_loop_target(prompt)
-    if is_trusted_issue_loop_prompt(prompt):
+    if trusted_issue_loop_event is not None:
+        target = trusted_issue_loop_target(trusted_issue_loop_event)
         return target is not None, target
     return has_explicit_issue_reference, None
 
