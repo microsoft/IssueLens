@@ -512,8 +512,7 @@ target repositories store no App private key and transmit no GitHub token.
 - **Event-driven:** issue opened/reopened and human-authored issue-comment created/edited
   events send a neutral issue-loop task. IssueLens reacts with 👀
   to the issue or triggering comment before longer analysis. It then re-reads
-  current context and chooses triage, re-triage, planning, re-planning, or no
-  action.
+  current context and chooses triage, re-triage, planning, re-planning, or no action.
 - **Manual:** `workflow_dispatch` with a required `issue_number` input sends the
   same neutral issue-loop task for an existing issue.
 
