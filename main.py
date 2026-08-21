@@ -44,7 +44,6 @@ import json
 import logging
 import os
 import pathlib
-import secrets
 import sys
 import time
 
@@ -97,7 +96,6 @@ from media_inputs import (
 
 _project_dir = pathlib.Path(__file__).parent
 _github_mcp_src = _project_dir / "github_app_mcp" / "src"
-_AUTOMATION_USER_ID_ENV = "ISSUELENS_AUTOMATION_USER_ID"
 
 load_dotenv(override=False)
 
@@ -619,26 +617,6 @@ async def handle_invoke(request: Request) -> Response:
             raise ValueError("_event_metadata is reserved for the trusted host")
         event_metadata = data.pop("event", None)
         if event_metadata is not None:
-            expected_user_id = os.environ.get(
-                _AUTOMATION_USER_ID_ENV, ""
-            ).strip()
-            actual_user_id = getattr(request.state, "user_id", "")
-            if (
-                not expected_user_id
-                or not isinstance(actual_user_id, str)
-                or not actual_user_id
-                or not secrets.compare_digest(
-                    expected_user_id,
-                    actual_user_id,
-                )
-            ):
-                return JSONResponse(
-                    status_code=403,
-                    content={
-                        "error": "forbidden",
-                        "message": "event source is not authorized",
-                    },
-                )
             event_metadata = validated_event_metadata(event_metadata)
             if event_metadata is None:
                 raise ValueError("event must be a valid IssueLens event envelope")

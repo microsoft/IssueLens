@@ -22,8 +22,6 @@ name: IssueLens issue loop
 on:
   issues:
     types: [opened, reopened]
-  pull_request:
-    types: [opened, reopened]
   issue_comment:
     types: [created, edited]
   workflow_dispatch:
@@ -40,7 +38,7 @@ permissions:
 concurrency:
   # Keep one active run per issue without making unrelated issues compete for
   # the same default-branch concurrency group.
-  group: issuelens-triage-${{ github.repository }}-${{ github.event.issue.number || github.event.pull_request.number || inputs.issue_number || github.run_id }}
+  group: issuelens-triage-${{ github.repository }}-${{ github.event.issue.number || inputs.issue_number || github.run_id }}
   cancel-in-progress: false
 
 jobs:
@@ -56,19 +54,16 @@ jobs:
 
           event_name="$GITHUB_EVENT_NAME"
           event_action=$(jq -r '.action // "workflow_dispatch"' "$GITHUB_EVENT_PATH")
-          issue=$(jq -r '.issue.number // .pull_request.number // empty' "$GITHUB_EVENT_PATH")
+          issue=$(jq -r '.issue.number // empty' "$GITHUB_EVENT_PATH")
           actor_login=$(jq -r '.sender.login // empty' "$GITHUB_EVENT_PATH")
           actor_type=$(jq -r '.sender.type // empty' "$GITHUB_EVENT_PATH")
-          issue_author_association=$(jq -r '.issue.author_association // .pull_request.author_association // empty' "$GITHUB_EVENT_PATH")
+          issue_author_association=$(jq -r '.issue.author_association // empty' "$GITHUB_EVENT_PATH")
           comment_id=$(jq -r '.comment.id // empty' "$GITHUB_EVENT_PATH")
           comment_author_login=$(jq -r '.comment.user.login // empty' "$GITHUB_EVENT_PATH")
           comment_author_association=$(jq -r '.comment.author_association // empty' "$GITHUB_EVENT_PATH")
           comment_author_type=$(jq -r '.comment.user.type // empty' "$GITHUB_EVENT_PATH")
+          is_pull_request=$(jq -r '.issue.pull_request != null' "$GITHUB_EVENT_PATH")
           subject_type=issue
-          if [[ "$event_name" == "pull_request" ]] ||
-             jq -e '.issue.pull_request != null' "$GITHUB_EVENT_PATH" >/dev/null; then
-            subject_type=pull_request
-          fi
 
           if [[ "$event_name" == "workflow_dispatch" ]]; then
             issue="$DISPATCH_ISSUE"
@@ -82,6 +77,9 @@ jobs:
           if [[ ! "$issue" =~ ^[1-9][0-9]*$ ]]; then
             eligible=false
             reason=invalid_issue_number
+          elif [[ "$is_pull_request" == "true" ]]; then
+            eligible=false
+            reason=pull_request_unsupported
           elif [[ "$event_name" != "workflow_dispatch" && "$actor_type" != "User" ]]; then
             eligible=false
             reason=bot_activity
@@ -103,11 +101,6 @@ jobs:
             if [[ "$event_action" != "opened" && "$event_action" != "reopened" ]]; then
               eligible=false
               reason=unsupported_issue_action
-            fi
-          elif [[ "$event_name" == "pull_request" ]]; then
-            if [[ "$event_action" != "opened" && "$event_action" != "reopened" ]]; then
-              eligible=false
-              reason=unsupported_pull_request_action
             fi
           elif [[ "$event_name" != "workflow_dispatch" ]]; then
             eligible=false
