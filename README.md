@@ -444,14 +444,14 @@ and arbitrary container-file access. Requests may contain up to 10 attachments,
 20 MB each and 50 MB combined. The selected model must support the supplied
 image or file MIME type.
 
-Issue images are also loaded automatically during issue-link triage. Before the
-agent turn, the trusted host loader resolves explicit GitHub issue URLs and
-`owner/repository#number` references, reads each issue body, and adds validated
-image bytes as Copilot blob attachments. Clients do not need to add those images
-to the invocation payload. It accepts up to 5 PNG, JPEG, GIF, or WebP images,
-5 MB each and 15 MB combined. Arbitrary image hosts and unsafe redirects are
-rejected, and GitHub credentials are never forwarded to signed storage
-redirects.
+Issue images are also loaded automatically during issue-link triage. After the
+acknowledgement-only preflight and before the main agent turn, the trusted host
+loader resolves explicit GitHub issue URLs and `owner/repository#number`
+references, reads each issue body, and adds validated image bytes as Copilot
+blob attachments. Clients do not need to add those images to the invocation
+payload. It accepts up to 5 PNG, JPEG, GIF, or WebP images, 5 MB each and 15 MB
+combined. Arbitrary image hosts and unsafe redirects are rejected, and GitHub
+credentials are never forwarded to signed storage redirects.
 
 ### Chat from a terminal
 

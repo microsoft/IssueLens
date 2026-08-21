@@ -77,7 +77,7 @@ from github_app_mcp.src.issuelens_github_mcp.config import (
     GitHubAppConfig,
 )
 from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient
-from issue_image_context import issue_image_attachments
+from issue_image_context import issue_image_attachments, issue_references
 from issuelens_config_tool import create_tool as create_issuelens_config_tool
 from media_inputs import (
     MAX_ATTACHMENTS,
@@ -85,6 +85,12 @@ from media_inputs import (
     invocation_attachments,
     redacted_input_items,
     response_input,
+)
+from work_acknowledgement import (
+    acknowledgement_continuation_turn,
+    acknowledgement_preflight,
+    acknowledgement_preflight_turn,
+    load_after_acknowledgement,
 )
 
 _project_dir = pathlib.Path(__file__).parent
@@ -508,16 +514,6 @@ async def _stream_response(invocation_id: str, payload: dict):
 
     request_github_client = _new_host_github_client()
     request_config_tool = create_issuelens_config_tool(request_github_client)
-    try:
-        issue_attachments = await issue_image_attachments(
-            prompt,
-            request_github_client,
-            maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
-        )
-    except GitHubAppError:
-        logger.info("Invocation issue-body images could not be loaded")
-        issue_attachments = []
-    attachments = [*attachments, *issue_attachments]
     session = await client.create_session(
         **_session_options(
             mcp_servers,
@@ -539,7 +535,52 @@ async def _stream_response(invocation_id: str, payload: dict):
 
     unsubscribe = session.on(on_event)
     try:
-        await session.send(prompt, attachments=attachments or None)
+        run_preflight, target = acknowledgement_preflight(
+            prompt,
+            has_explicit_issue_reference=bool(issue_references(prompt)),
+        )
+
+        async def preflight():
+            await session.send(
+                acknowledgement_preflight_turn(prompt, target)
+            )
+            while True:
+                item = await queue.get()
+                if item is None:
+                    return
+                if isinstance(item, Exception):
+                    raise item
+
+        async def load_issue_attachments():
+            try:
+                return await issue_image_attachments(
+                    prompt,
+                    request_github_client,
+                    maximum_images=max(
+                        0,
+                        MAX_ATTACHMENTS - len(attachments),
+                    ),
+                )
+            except GitHubAppError:
+                logger.info("Invocation issue-body images could not be loaded")
+                return []
+
+        issue_attachments, preflight_error = await load_after_acknowledgement(
+            preflight if run_preflight else None,
+            load_issue_attachments,
+        )
+        if preflight_error is not None:
+            logger.info(
+                "Invocation acknowledgement preflight failed; continuing: %s",
+                preflight_error,
+            )
+        attachments = [*attachments, *issue_attachments]
+        turn = (
+            acknowledgement_continuation_turn(prompt)
+            if run_preflight
+            else prompt
+        )
+        await session.send(turn, attachments=attachments or None)
         while True:
             item = await queue.get()
             if item is None:
@@ -765,16 +806,6 @@ async def handle_chat(
         return
 
     request_config_tool = create_issuelens_config_tool(request_github_client)
-    try:
-        issue_attachments = await issue_image_attachments(
-            prompt,
-            request_github_client,
-            maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
-        )
-    except GitHubAppError:
-        logger.info("Chat issue-body images could not be loaded")
-        issue_attachments = []
-    attachments = [*attachments, *issue_attachments]
 
     conversation = (
         context.conversation_id
@@ -805,37 +836,90 @@ async def handle_chat(
             queue.put_nowait(RuntimeError(getattr(data, "message", "error")))
 
     unsubscribe = session.on(on_event)
-    message = stream.add_output_item_message()
-    yield message.emit_added()
-    text = message.add_text_content()
-    yield text.emit_added()
+
     try:
-        await session.send(
-            _responses_turn(prompt),
-            attachments=attachments or None,
+        run_preflight, target = acknowledgement_preflight(
+            prompt,
+            has_explicit_issue_reference=bool(issue_references(prompt)),
         )
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            if isinstance(item, Exception):
-                raise item
-            if item:
-                yield text.emit_delta(item)
-    except Exception:
-        _chat_session_ids.pop(conversation, None)
-        logger.info("Chat session failed; discarded resumable session", exc_info=True)
-        yield text.emit_delta(
-            "GitHub tool session failed. Start a new turn to retry."
+
+        async def preflight():
+            await session.send(
+                acknowledgement_preflight_turn(
+                    _responses_turn(prompt),
+                    target,
+                )
+            )
+            while True:
+                item = await queue.get()
+                if item is None:
+                    return
+                if isinstance(item, Exception):
+                    raise item
+
+        async def load_issue_attachments():
+            try:
+                return await issue_image_attachments(
+                    prompt,
+                    request_github_client,
+                    maximum_images=max(
+                        0,
+                        MAX_ATTACHMENTS - len(attachments),
+                    ),
+                )
+            except GitHubAppError:
+                logger.info("Chat issue-body images could not be loaded")
+                return []
+
+        issue_attachments, preflight_error = await load_after_acknowledgement(
+            preflight if run_preflight else None,
+            load_issue_attachments,
         )
+        if preflight_error is not None:
+            logger.info(
+                "Chat acknowledgement preflight failed; continuing: %s",
+                preflight_error,
+            )
+        attachments = [*attachments, *issue_attachments]
+
+        message = stream.add_output_item_message()
+        yield message.emit_added()
+        text = message.add_text_content()
+        yield text.emit_added()
+        try:
+            await session.send(
+                (
+                    acknowledgement_continuation_turn(_responses_turn(prompt))
+                    if run_preflight
+                    else _responses_turn(prompt)
+                ),
+                attachments=attachments or None,
+            )
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    raise item
+                if item:
+                    yield text.emit_delta(item)
+        except Exception:
+            _chat_session_ids.pop(conversation, None)
+            logger.info(
+                "Chat session failed; discarded resumable session",
+                exc_info=True,
+            )
+            yield text.emit_delta(
+                "GitHub tool session failed. Start a new turn to retry."
+            )
+
+        yield text.emit_text_done()
+        yield text.emit_done()
+        yield message.emit_done()
+        yield stream.emit_completed()
     finally:
         unsubscribe()
         await _close_session(session)
-
-    yield text.emit_text_done()
-    yield text.emit_done()
-    yield message.emit_done()
-    yield stream.emit_completed()
 
 
 if __name__ == "__main__":

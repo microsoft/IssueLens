@@ -249,11 +249,19 @@ class AgentPromptTests(unittest.TestCase):
         )[1].split("@app.invoke_handler", 1)[0]
         chat_source = main_source.split("@app.response_handler", 1)[1]
         self.assertIn(
-            "await session.send(prompt, attachments=attachments or None)",
+            "await session.send(turn, attachments=attachments or None)",
             invocation_source,
+        )
+        self.assertLess(
+            invocation_source.index("acknowledgement_preflight_turn"),
+            invocation_source.index("issue_image_attachments"),
         )
         self.assertNotIn("_responses_turn(prompt)", invocation_source)
         self.assertIn("_responses_turn(prompt)", chat_source)
+        self.assertLess(
+            chat_source.index("acknowledgement_preflight_turn"),
+            chat_source.index("issue_image_attachments"),
+        )
         self.assertNotIn("RequestTokenProvider", main_source)
         self.assertNotIn("github-access", main_source)
         self.assertNotIn("issuelens-related-read", main_source)

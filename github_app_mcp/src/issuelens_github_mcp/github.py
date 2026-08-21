@@ -53,7 +53,7 @@ ReactionTarget = Literal[
 ]
 _REACTION_TARGETS: dict[ReactionTarget, tuple[str, str]] = {
     "issue": ("/issues/{target_id}/reactions", "issues"),
-    "pull_request": ("/issues/{target_id}/reactions", "pull_requests"),
+    "pull_request": ("/issues/{target_id}/reactions", "issues"),
     "issue_comment": ("/issues/comments/{target_id}/reactions", "issues"),
     "pull_request_comment": (
         "/pulls/comments/{target_id}/reactions",

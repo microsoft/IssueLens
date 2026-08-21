@@ -53,7 +53,7 @@ Write tools are registered only when writes are enabled:
 | `add_labels` | Issues: write |
 | `set_assignees` | Issues: write |
 | `add_issue_comment` | Issues: write |
-| `add_eyes_reaction` | Issues: write for issue targets; Pull requests: write for pull-request targets |
+| `add_eyes_reaction` | Issues: write for issue, pull-request body, and issue-comment targets; Pull requests: write for pull-request review comments |
 
 `add_eyes_reaction` accepts only `issue`, `pull_request`, `issue_comment`, and
 `pull_request_comment` targets and always posts `{"content":"eyes"}` to the
