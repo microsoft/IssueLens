@@ -509,8 +509,8 @@ repository**. It authenticates only to the Foundry endpoint through Azure OIDC
 and sends the task. The hosted agent owns its Key Vault-backed App identity, so
 target repositories store no App private key and transmit no GitHub token.
 
-- **Event-driven:** issue opened/reopened events and human-authored issue-comment
-  created/edited events send a neutral issue-loop task. IssueLens reacts with 👀
+- **Event-driven:** issue opened/reopened and human-authored issue-comment created/edited
+  events send a neutral issue-loop task. IssueLens reacts with 👀
   to the issue or triggering comment before longer analysis. It then re-reads
   current context and chooses triage, re-triage, planning, re-planning, or no
   action.
