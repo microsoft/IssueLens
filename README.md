@@ -35,8 +35,8 @@ three sub-agents, and bundled GitHub App stdio MCP server.
   constrained `issuelens-config` tool.
 4. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
 5. Performs only the bundled issue-triage operations: repository/file reads,
-   issue and comment reads/searches, label reads/additions, assignee updates,
-   and explicitly requested issue comments.
+   issue and comment reads/searches, fixed-eyes activity acknowledgements, label
+   reads/additions, assignee updates, and explicitly requested issue comments.
 6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
 
 ## Environment Variables
@@ -83,8 +83,8 @@ available. Private repository reads still require an installation. Each Copilot
 session owns one stdio MCP process. That process caches tokens only in memory by
 repository and permission set, refreshes them five minutes before expiry, and
 discards them when the process exits. Configure the App with **Metadata: Read**,
-**Issues: Read and write**, and **Contents: Read**. Tokens and the private key
-never enter model context.
+**Issues: Read and write**, **Pull requests: Read and write**, and **Contents:
+Read**. Tokens and the private key never enter model context.
 
 ## Target Repository Configuration
 

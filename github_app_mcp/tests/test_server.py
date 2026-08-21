@@ -30,7 +30,12 @@ READ_TOOLS = {
     "list_labels",
     "get_file",
 }
-WRITE_TOOLS = {"add_labels", "set_assignees", "add_issue_comment"}
+WRITE_TOOLS = {
+    "add_labels",
+    "set_assignees",
+    "add_issue_comment",
+    "add_eyes_reaction",
+}
 
 
 class FakeGitHubClient:
@@ -118,6 +123,52 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             {tool.name for tool in result.tools},
             READ_TOOLS | WRITE_TOOLS,
         )
+
+    async def test_reaction_tool_has_bounded_schema_and_round_trips(self):
+        github = FakeGitHubClient(writes_enabled=True)
+        server = create_server(cast(GitHubClient, github))
+
+        async with Client(server) as client:
+            tools = await client.list_tools()
+            tool = next(
+                item for item in tools.tools
+                if item.name == "add_eyes_reaction"
+            )
+            result = await client.call_tool(
+                "add_eyes_reaction",
+                {
+                    "repository": "microsoft/IssueLens",
+                    "target_kind": "pull_request_comment",
+                    "target_id": 99,
+                },
+            )
+
+        self.assertEqual(
+            set(tool.input_schema["required"]),
+            {"repository", "target_kind", "target_id"},
+        )
+        self.assertEqual(
+            set(tool.input_schema["properties"]["target_kind"]["enum"]),
+            {
+                "issue",
+                "pull_request",
+                "issue_comment",
+                "pull_request_comment",
+            },
+        )
+        self.assertNotIn("content", tool.input_schema["properties"])
+        self.assertFalse(result.is_error)
+        self.assertEqual(github.calls, [
+            (
+                "add_eyes_reaction",
+                (
+                    "microsoft/IssueLens",
+                    "pull_request_comment",
+                    99,
+                ),
+                {},
+            )
+        ])
 
 
 class EnvironmentTests(unittest.TestCase):

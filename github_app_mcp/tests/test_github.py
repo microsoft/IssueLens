@@ -135,6 +135,16 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.provider.calls, [])
 
+    async def test_reaction_write_gate_is_checked_before_token_minting(self):
+        with self.assertRaisesRegex(GitHubAppError, "write tools are disabled"):
+            await self.client().add_eyes_reaction(
+                "microsoft/IssueLens",
+                "issue",
+                1,
+            )
+
+        self.assertEqual(self.provider.calls, [])
+
     async def test_list_issues_filters_pull_requests_and_uses_read_permission(self):
         issues = await self.client().list_issues(
             "microsoft/IssueLens", per_page=50, page=2
@@ -433,6 +443,86 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             all(call[1] == {"issues": "write"} for call in self.provider.calls)
         )
+
+    async def test_eyes_reaction_uses_fixed_routes_payload_and_permissions(self):
+        requests = []
+        statuses = iter((200, 201, 200, 201))
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(next(statuses), json={"id": len(requests)})
+
+        client = GitHubClient(
+            self.provider,
+            writes_enabled=True,
+            transport=httpx.MockTransport(handler),
+        )
+        cases = (
+            (
+                "issue",
+                1,
+                "/repos/microsoft/IssueLens/issues/1/reactions",
+                {"issues": "write"},
+            ),
+            (
+                "pull_request",
+                2,
+                "/repos/microsoft/IssueLens/issues/2/reactions",
+                {"pull_requests": "write"},
+            ),
+            (
+                "issue_comment",
+                3,
+                "/repos/microsoft/IssueLens/issues/comments/3/reactions",
+                {"issues": "write"},
+            ),
+            (
+                "pull_request_comment",
+                4,
+                "/repos/microsoft/IssueLens/pulls/comments/4/reactions",
+                {"pull_requests": "write"},
+            ),
+        )
+
+        results = []
+        for target_kind, target_id, path, permission in cases:
+            results.append(await client.add_eyes_reaction(
+                "microsoft/IssueLens",
+                target_kind,
+                target_id,
+            ))
+            request = requests[-1]
+            self.assertEqual(request.method, "POST")
+            self.assertEqual(request.url.path, path)
+            self.assertEqual(
+                json.loads(request.content),
+                {"content": "eyes"},
+            )
+            self.assertEqual(
+                self.provider.calls[-1],
+                ("microsoft/IssueLens", permission),
+            )
+
+        self.assertEqual([result["id"] for result in results], [1, 2, 3, 4])
+        self.assertEqual(len(requests), 4)
+
+    async def test_eyes_reaction_rejects_invalid_target_before_token_minting(self):
+        client = self.client(writes_enabled=True)
+
+        with self.assertRaisesRegex(GitHubAppError, "target_kind"):
+            await client.add_eyes_reaction(
+                "microsoft/IssueLens",
+                "discussion",
+                1,
+            )
+        with self.assertRaisesRegex(GitHubAppError, "positive integer"):
+            await client.add_eyes_reaction(
+                "microsoft/IssueLens",
+                "issue",
+                0,
+            )
+
+        self.assertEqual(self.provider.calls, [])
 
     async def test_write_never_falls_back_to_anonymous(self):
         requests = []

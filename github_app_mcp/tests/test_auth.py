@@ -79,6 +79,26 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(credential.permissions, (("issues", "read"),))
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
+    async def test_pull_request_write_token_is_repository_restricted(self, _):
+        credential = await self.provider.get_token(
+            "microsoft/IssueLens", {"pull_requests": "write"}
+        )
+
+        token_call = self.calls[-1]
+        self.assertEqual(
+            json.loads(token_call.content),
+            {
+                "repositories": ["IssueLens"],
+                "permissions": {"pull_requests": "write"},
+            },
+        )
+        self.assertEqual(credential.repository, "microsoft/IssueLens")
+        self.assertEqual(
+            credential.permissions,
+            (("pull_requests", "write"),),
+        )
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
     async def test_token_is_reused_within_one_provider_session(self, _):
         first = await self.provider.get_token(
             "microsoft/IssueLens", {"issues": "read"}

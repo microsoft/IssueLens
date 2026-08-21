@@ -10,7 +10,7 @@ from mcp.server import MCPServer
 
 from .auth import GitHubAppError, GitHubAppTokenProvider
 from .config import ConfigurationError, GitHubAppConfig
-from .github import GitHubClient
+from .github import GitHubClient, ReactionTarget
 
 
 _ENABLE_WRITES_ENV = "GITHUB_MCP_ENABLE_WRITES"
@@ -173,6 +173,19 @@ def create_server(
                 repository,
                 issue_number,
                 body,
+            )
+
+        @server.tool()
+        async def add_eyes_reaction(
+            repository: str,
+            target_kind: ReactionTarget,
+            target_id: int,
+        ) -> Any:
+            """Add the fixed eyes reaction to one supported activity."""
+            return await github.add_eyes_reaction(
+                repository,
+                target_kind,
+                target_id,
             )
 
     return server
