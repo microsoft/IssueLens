@@ -490,7 +490,7 @@ class GitHubClient:
         subject_type: Literal["issue", "pull_request"],
         subject_number: int,
         comment_id: int | None = None,
-    ) -> Any:
+    ) -> int:
         """Add the fixed eyes reaction to one issue, pull request, or comment."""
         if subject_type not in {"issue", "pull_request"}:
             raise GitHubAppError(
@@ -534,16 +534,50 @@ class GitHubClient:
                 user = reaction.get("user") if isinstance(reaction, Mapping) else None
                 login = user.get("login") if isinstance(user, Mapping) else None
                 if isinstance(login, str) and login.casefold() == expected_login:
-                    return reaction
+                    return _reaction_id(reaction)
             if len(reactions) < 100:
                 break
 
-        return await self._request(
+        reaction = await self._request(
             "POST",
             repository,
             path,
             permissions=permissions,
             body={"content": "eyes"},
+            write=True,
+        )
+        return _reaction_id(reaction)
+
+    async def remove_eyes_reaction(
+        self,
+        repository: str,
+        subject_type: Literal["issue", "pull_request"],
+        subject_number: int,
+        reaction_id: int,
+        comment_id: int | None = None,
+    ) -> None:
+        """Remove the exact eyes reaction returned by add_eyes_reaction."""
+        if subject_type not in {"issue", "pull_request"}:
+            raise GitHubAppError(
+                "subject_type must be issue or pull_request"
+            )
+        subject_number = _positive(subject_number, "subject_number")
+        reaction_id = _positive(reaction_id, "reaction_id")
+        if comment_id is None:
+            path = f"/issues/{subject_number}/reactions/{reaction_id}"
+        else:
+            path = (
+                f"/issues/comments/{_positive(comment_id, 'comment_id')}"
+                f"/reactions/{reaction_id}"
+            )
+        permission = (
+            "issues" if subject_type == "issue" else "pull_requests"
+        )
+        await self._request(
+            "DELETE",
+            repository,
+            path,
+            permissions={permission: "write"},
             write=True,
         )
 
@@ -604,7 +638,7 @@ class GitHubClient:
                             raise GitHubAppError(
                                 "GitHub response is too large; narrow the request"
                             )
-                payload = json.loads(content)
+                payload = json.loads(content) if content else None
         except httpx.HTTPStatusError as error:
             if anonymous_fallback:
                 if (
@@ -641,6 +675,12 @@ def _positive(value: int, field: str) -> int:
     if type(value) is not int or value < 1:
         raise GitHubAppError(f"{field} must be a positive integer")
     return value
+
+
+def _reaction_id(value: Any) -> int:
+    if not isinstance(value, Mapping):
+        raise GitHubAppError("GitHub returned an invalid reaction response")
+    return _positive(value.get("id"), "reaction id")
 
 
 def _timestamp(value: str) -> str:

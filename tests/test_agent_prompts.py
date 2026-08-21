@@ -243,9 +243,13 @@ class AgentPromptTests(unittest.TestCase):
         self.assertNotIn("_responses_turn(prompt)", invocation_source)
         self.assertLess(
             invocation_source.index(
-                "await _starting_reaction_warning(event_metadata)"
+                "await _starting_reaction(event_metadata)"
             ),
             invocation_source.index("await _ensure_client()"),
+        )
+        self.assertIn(
+            "await asyncio.shield(_finishing_reaction(reaction))",
+            invocation_source,
         )
         self.assertIn("'type': 'warning'", invocation_source)
         self.assertIn("Processing will continue", main_source)

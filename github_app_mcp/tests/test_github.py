@@ -51,6 +51,8 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
 
         def handler(request):
             self.requests.append(request)
+            if request.method == "DELETE" and "/reactions/" in request.url.path:
+                return httpx.Response(204)
             if request.url.path.endswith("/reactions"):
                 reactions = self.reactions.setdefault(request.url.path, [])
                 if request.method == "GET":
@@ -539,6 +541,46 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
             [request.method for request in reaction_requests],
             ["GET", "POST", "GET"],
         )
+
+    async def test_eyes_reaction_removal_uses_exact_id_and_target_permission(self):
+        client = self.client(writes_enabled=True)
+
+        reaction_id = await client.add_eyes_reaction(
+            "microsoft/IssueLens", "pull_request", 2, 99
+        )
+        await client.remove_eyes_reaction(
+            "microsoft/IssueLens", "pull_request", 2, reaction_id, 99
+        )
+
+        request = self.requests[-1]
+        self.assertEqual(request.method, "DELETE")
+        self.assertEqual(
+            request.url.path,
+            "/repos/microsoft/IssueLens/issues/comments/99/reactions/1",
+        )
+        self.assertEqual(
+            self.provider.calls[-1],
+            ("microsoft/IssueLens", {"pull_requests": "write"}),
+        )
+
+    async def test_eyes_reaction_removal_validates_ids_before_token_minting(self):
+        client = self.client(writes_enabled=True)
+
+        for reaction_id, comment_id in ((0, None), (1, 0)):
+            with self.subTest(
+                reaction_id=reaction_id,
+                comment_id=comment_id,
+            ):
+                with self.assertRaises(GitHubAppError):
+                    await client.remove_eyes_reaction(
+                        "microsoft/IssueLens",
+                        "issue",
+                        1,
+                        reaction_id,
+                        comment_id,
+                    )
+
+        self.assertEqual(self.provider.calls, [])
 
     async def test_write_never_falls_back_to_anonymous(self):
         requests = []

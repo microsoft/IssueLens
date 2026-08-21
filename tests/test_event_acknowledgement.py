@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from event_acknowledgement import ReactionTracker, reaction_target
@@ -36,15 +37,46 @@ def trusted_event(**overrides):
 
 
 class RecordingClient:
-    def __init__(self, error=None):
+    def __init__(self, error=None, remove_error=None):
         self.calls = []
+        self.remove_calls = []
         self.error = error
+        self.remove_error = remove_error
 
     async def add_eyes_reaction(self, *args):
         self.calls.append(args)
         if self.error:
             raise self.error
-        return {"content": "eyes"}
+        return 42
+
+    async def remove_eyes_reaction(self, *args):
+        self.remove_calls.append(args)
+        if self.remove_error:
+            raise self.remove_error
+
+
+class BlockingClient(RecordingClient):
+    def __init__(self, *, block_add=False, block_remove=False):
+        super().__init__()
+        self.add_started = asyncio.Event()
+        self.remove_started = asyncio.Event()
+        self.allow_add = asyncio.Event()
+        self.allow_remove = asyncio.Event()
+        if not block_add:
+            self.allow_add.set()
+        if not block_remove:
+            self.allow_remove.set()
+
+    async def add_eyes_reaction(self, *args):
+        self.calls.append(args)
+        self.add_started.set()
+        await self.allow_add.wait()
+        return 42
+
+    async def remove_eyes_reaction(self, *args):
+        self.remove_calls.append(args)
+        self.remove_started.set()
+        await self.allow_remove.wait()
 
 
 class ReactionTargetTests(unittest.TestCase):
@@ -125,17 +157,35 @@ class ReactionTargetTests(unittest.TestCase):
 
 
 class ReactionTrackerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_retries_do_not_repeat_successful_reaction_requests(self):
+    async def test_active_requests_share_reaction_until_all_finish(self):
         client = RecordingClient()
         tracker = ReactionTracker()
         target = reaction_target(trusted_event())
 
         self.assertTrue(await tracker.add(client, target))
         self.assertFalse(await tracker.add(client, target))
+        self.assertFalse(await tracker.remove(client, target))
+        self.assertTrue(await tracker.remove(client, target))
 
         self.assertEqual(client.calls, [
             ("microsoft/IssueLens", "issue", 21, None),
         ])
+        self.assertEqual(client.remove_calls, [
+            ("microsoft/IssueLens", "issue", 21, 42, None),
+        ])
+
+    async def test_completed_reaction_can_be_added_again(self):
+        client = RecordingClient()
+        tracker = ReactionTracker()
+        target = reaction_target(trusted_event())
+
+        self.assertTrue(await tracker.add(client, target))
+        self.assertTrue(await tracker.remove(client, target))
+        self.assertTrue(await tracker.add(client, target))
+        self.assertTrue(await tracker.remove(client, target))
+
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(len(client.remove_calls), 2)
 
     async def test_failed_reaction_can_be_retried(self):
         tracker = ReactionTracker()
@@ -147,8 +197,71 @@ class ReactionTrackerTests(unittest.IsolatedAsyncioTestCase):
 
         succeeding = RecordingClient()
         self.assertTrue(await tracker.add(succeeding, target))
+        self.assertTrue(await tracker.remove(succeeding, target))
         self.assertEqual(len(failing.calls), 1)
         self.assertEqual(len(succeeding.calls), 1)
+
+    async def test_failed_removal_does_not_prevent_a_later_reaction(self):
+        tracker = ReactionTracker()
+        target = reaction_target(trusted_event())
+        failing = RecordingClient(remove_error=RuntimeError("remove unavailable"))
+
+        self.assertTrue(await tracker.add(failing, target))
+        with self.assertRaisesRegex(RuntimeError, "remove unavailable"):
+            await tracker.remove(failing, target)
+
+        succeeding = RecordingClient()
+        self.assertTrue(await tracker.add(succeeding, target))
+        self.assertTrue(await tracker.remove(succeeding, target))
+
+    async def test_cancelled_waiter_does_not_cancel_shared_add(self):
+        client = BlockingClient(block_add=True)
+        tracker = ReactionTracker()
+        target = reaction_target(trusted_event())
+
+        first = asyncio.create_task(tracker.add(client, target))
+        await client.add_started.wait()
+        second = asyncio.create_task(tracker.add(client, target))
+        await asyncio.sleep(0)
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+
+        client.allow_add.set()
+        self.assertFalse(await second)
+        self.assertTrue(await tracker.remove(client, target))
+
+    async def test_cancelled_add_is_removed_if_github_completes_it(self):
+        client = BlockingClient(block_add=True)
+        tracker = ReactionTracker()
+        target = reaction_target(trusted_event())
+
+        request = asyncio.create_task(tracker.add(client, target))
+        await client.add_started.wait()
+        request.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await request
+
+        client.allow_add.set()
+        await asyncio.wait_for(client.remove_started.wait(), timeout=1)
+        self.assertEqual(len(client.remove_calls), 1)
+
+    async def test_cancelled_newcomer_does_not_cancel_active_removal(self):
+        client = BlockingClient(block_remove=True)
+        tracker = ReactionTracker()
+        target = reaction_target(trusted_event())
+
+        self.assertTrue(await tracker.add(client, target))
+        removal = asyncio.create_task(tracker.remove(client, target))
+        await client.remove_started.wait()
+        newcomer = asyncio.create_task(tracker.add(client, target))
+        await asyncio.sleep(0)
+        newcomer.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await newcomer
+
+        client.allow_remove.set()
+        self.assertTrue(await removal)
 
 
 if __name__ == "__main__":

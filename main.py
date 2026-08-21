@@ -80,6 +80,7 @@ from github_app_mcp.src.issuelens_github_mcp.config import (
 )
 from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient
 from event_acknowledgement import (
+    ReactionTarget,
     ReactionTracker,
     reaction_target,
     validated_event_metadata,
@@ -508,27 +509,42 @@ _RUNTIME_TOOLS = [*_NOTIFICATION_TOOLS]
 _START_REACTIONS = ReactionTracker()
 
 
-async def _starting_reaction_warning(event_metadata: dict | None) -> str | None:
+async def _starting_reaction(
+    event_metadata: dict | None,
+) -> tuple[ReactionTarget | None, str | None]:
     """Best-effort acknowledgement for one eligible trusted issue-loop event."""
     target = reaction_target(event_metadata)
     if target is None:
-        return None
+        return None, None
     try:
         client = _new_host_github_client(writes_enabled=True)
         await _START_REACTIONS.add(client, target)
     except (ConfigurationError, GitHubAppError) as error:
         logger.warning("Could not add IssueLens start reaction: %s", error)
-        return (
+        return None, (
             f"IssueLens could not add the 👀 starting reaction: {error}. "
             "Processing will continue."
         )
     except Exception:
         logger.exception("Could not add IssueLens start reaction")
-        return (
+        return None, (
             "IssueLens could not add the 👀 starting reaction because of an "
             "unexpected error. Processing will continue."
         )
-    return None
+    return target, None
+
+
+async def _finishing_reaction(target: ReactionTarget | None) -> None:
+    """Best-effort removal of one completed issue-loop acknowledgement."""
+    if target is None:
+        return
+    try:
+        client = _new_host_github_client(writes_enabled=True)
+        await _START_REACTIONS.remove(client, target)
+    except (ConfigurationError, GitHubAppError) as error:
+        logger.warning("Could not remove IssueLens start reaction: %s", error)
+    except Exception:
+        logger.exception("Could not remove IssueLens start reaction")
 
 
 async def _stream_response(invocation_id: str, payload: dict):
@@ -545,62 +561,65 @@ async def _stream_response(invocation_id: str, payload: dict):
         yield f"data: {json.dumps({'type': 'error', 'message': 'empty task'})}\n\n".encode()
         return
 
-    reaction_warning = await _starting_reaction_warning(event_metadata)
+    reaction, reaction_warning = await _starting_reaction(event_metadata)
     if reaction_warning:
         yield f"data: {json.dumps({'type': 'warning', 'message': reaction_warning})}\n\n".encode()
 
-    client = await _ensure_client()
-    mcp_servers = _build_mcp_servers()
-    request_github_client = _new_host_github_client()
-    request_config_tool = create_issuelens_config_tool(request_github_client)
     try:
-        issue_attachments = await issue_image_attachments(
-            prompt,
-            request_github_client,
-            maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
-        )
-    except GitHubAppError:
-        logger.info("Invocation issue-body images could not be loaded")
-        issue_attachments = []
-    attachments = [*attachments, *issue_attachments]
-    session = await client.create_session(
-        **_session_options(
-            mcp_servers,
-            [*_NOTIFICATION_TOOLS, request_config_tool],
-        )
-    )
-    session_id = getattr(session, "session_id", None)
-
-    queue: asyncio.Queue = asyncio.Queue()
-
-    def on_event(event):
-        if event.type == SessionEventType.SESSION_IDLE:
-            queue.put_nowait(None)
-        elif event.type == SessionEventType.SESSION_ERROR:
-            queue.put_nowait(RuntimeError(
-                getattr(event.data, "message", "error")))
-        else:
-            queue.put_nowait(event)
-
-    unsubscribe = session.on(on_event)
-    try:
-        await session.send(prompt, attachments=attachments or None)
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            if isinstance(item, Exception):
-                yield f"data: {json.dumps({'type': 'error', 'message': str(item)})}\n\n".encode()
-                break
-            yield f"data: {json.dumps(item.to_dict())}\n\n".encode()
-
-        yield f"event: done\ndata: {json.dumps({'invocation_id': invocation_id, 'session_id': session_id})}\n\n".encode()
-    finally:
-        unsubscribe()
+        client = await _ensure_client()
+        mcp_servers = _build_mcp_servers()
+        request_github_client = _new_host_github_client()
+        request_config_tool = create_issuelens_config_tool(request_github_client)
         try:
-            await session.disconnect()
-        except Exception:  # pragma: no cover - best-effort cleanup
-            logger.debug("session.disconnect() failed", exc_info=True)
+            issue_attachments = await issue_image_attachments(
+                prompt,
+                request_github_client,
+                maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
+            )
+        except GitHubAppError:
+            logger.info("Invocation issue-body images could not be loaded")
+            issue_attachments = []
+        attachments = [*attachments, *issue_attachments]
+        session = await client.create_session(
+            **_session_options(
+                mcp_servers,
+                [*_NOTIFICATION_TOOLS, request_config_tool],
+            )
+        )
+        session_id = getattr(session, "session_id", None)
+
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_event(event):
+            if event.type == SessionEventType.SESSION_IDLE:
+                queue.put_nowait(None)
+            elif event.type == SessionEventType.SESSION_ERROR:
+                queue.put_nowait(RuntimeError(
+                    getattr(event.data, "message", "error")))
+            else:
+                queue.put_nowait(event)
+
+        unsubscribe = session.on(on_event)
+        try:
+            await session.send(prompt, attachments=attachments or None)
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                if isinstance(item, Exception):
+                    yield f"data: {json.dumps({'type': 'error', 'message': str(item)})}\n\n".encode()
+                    break
+                yield f"data: {json.dumps(item.to_dict())}\n\n".encode()
+
+            yield f"event: done\ndata: {json.dumps({'invocation_id': invocation_id, 'session_id': session_id})}\n\n".encode()
+        finally:
+            unsubscribe()
+            try:
+                await session.disconnect()
+            except Exception:  # pragma: no cover - best-effort cleanup
+                logger.debug("session.disconnect() failed", exc_info=True)
+    finally:
+        await asyncio.shield(_finishing_reaction(reaction))
 
 
 @app.invoke_handler

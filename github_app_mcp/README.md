@@ -58,7 +58,8 @@ Write tools are registered only when writes are enabled:
 `add_eyes_reaction` accepts only issue, pull request, and issue-comment targets,
 and always sends the fixed `eyes` content. It first checks paginated `eyes`
 reactions for the App installation's bot identity and skips the create call when
-that reaction already exists.
+that reaction already exists. The trusted invocation host retains the returned
+reaction ID and removes that exact acknowledgement after processing finishes.
 
 ## Configuration
 

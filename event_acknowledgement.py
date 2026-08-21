@@ -26,7 +26,6 @@ _ASSOCIATIONS = {
 }
 _SUPPORTED_ACTIONS = {"opened", "reopened"}
 _SUPPORTED_COMMENT_ACTIONS = {"created", "edited"}
-_MAX_COMPLETED_REACTIONS = 2_000
 _EVENT_FIELDS = {
     "event_name",
     "event_action",
@@ -61,7 +60,23 @@ class ReactionClient(Protocol):
         subject_type: Literal["issue", "pull_request"],
         subject_number: int,
         comment_id: int | None = None,
-    ) -> Any: ...
+    ) -> int: ...
+
+    async def remove_eyes_reaction(
+        self,
+        repository: str,
+        subject_type: Literal["issue", "pull_request"],
+        subject_number: int,
+        reaction_id: int,
+        comment_id: int | None = None,
+    ) -> None: ...
+
+
+@dataclass
+class _TrackedReaction:
+    add_task: asyncio.Task[int]
+    users: int
+    remove_task: asyncio.Task[None] | None = None
 
 
 def validated_event_metadata(value: Any) -> dict[str, Any] | None:
@@ -154,41 +169,110 @@ def reaction_target(metadata: Any) -> ReactionTarget | None:
 
 
 class ReactionTracker:
-    """Suppress repeated successful requests while allowing failed retries."""
+    """Share one start reaction and remove it after its final user finishes."""
 
     def __init__(self) -> None:
-        self._completed: dict[ReactionTarget, None] = {}
-        self._in_flight: dict[ReactionTarget, asyncio.Task[Any]] = {}
+        self._reactions: dict[ReactionTarget, _TrackedReaction] = {}
         self._lock = asyncio.Lock()
 
     async def add(self, client: ReactionClient, target: ReactionTarget) -> bool:
-        """Add the fixed reaction, returning false when already completed."""
-        async with self._lock:
-            if target in self._completed:
-                return False
-            task = self._in_flight.get(target)
-            created = task is None
-            if task is None:
-                task = asyncio.create_task(client.add_eyes_reaction(
-                    target.repository,
-                    target.subject_type,
-                    target.subject_number,
-                    target.comment_id,
-                ))
-                self._in_flight[target] = task
+        """Acquire the reaction, returning false when sharing an active request."""
+        while True:
+            async with self._lock:
+                tracked = self._reactions.get(target)
+                if tracked is None:
+                    task = asyncio.create_task(client.add_eyes_reaction(
+                        target.repository,
+                        target.subject_type,
+                        target.subject_number,
+                        target.comment_id,
+                    ))
+                    tracked = _TrackedReaction(task, users=1)
+                    self._reactions[target] = tracked
+                    created = True
+                    break
+                if tracked.remove_task is None:
+                    tracked.users += 1
+                    task = tracked.add_task
+                    created = False
+                    break
+                remove_task = tracked.remove_task
+
+            try:
+                await asyncio.shield(remove_task)
+            except Exception:
+                pass
 
         try:
-            await task
+            await asyncio.shield(task)
         except BaseException:
-            if created:
-                async with self._lock:
-                    self._in_flight.pop(target, None)
-            raise
-
-        if created:
             async with self._lock:
-                self._in_flight.pop(target, None)
-                self._completed[target] = None
-                if len(self._completed) > _MAX_COMPLETED_REACTIONS:
-                    self._completed.pop(next(iter(self._completed)))
+                tracked = self._reactions.get(target)
+                if tracked is not None and tracked.add_task is task:
+                    tracked.users -= 1
+                    if tracked.users == 0:
+                        if task.done():
+                            self._reactions.pop(target)
+                        else:
+                            tracked.remove_task = asyncio.create_task(
+                                self._remove_after_add(client, target, tracked)
+                            )
+            raise
         return created
+
+    async def remove(
+        self,
+        client: ReactionClient,
+        target: ReactionTarget,
+    ) -> bool:
+        """Release the reaction and remove it after its final user finishes."""
+        async with self._lock:
+            tracked = self._reactions.get(target)
+            if tracked is None or tracked.remove_task is not None:
+                return False
+            tracked.users -= 1
+            if tracked.users > 0:
+                return False
+            reaction_id = tracked.add_task.result()
+            tracked.remove_task = asyncio.create_task(
+                self._remove_tracked(client, target, tracked, reaction_id)
+            )
+            remove_task = tracked.remove_task
+
+        await asyncio.shield(remove_task)
+        return True
+
+    async def _remove_after_add(
+        self,
+        client: ReactionClient,
+        target: ReactionTarget,
+        tracked: _TrackedReaction,
+    ) -> None:
+        try:
+            reaction_id = await tracked.add_task
+        except BaseException:
+            async with self._lock:
+                if self._reactions.get(target) is tracked:
+                    self._reactions.pop(target)
+            return
+        await self._remove_tracked(client, target, tracked, reaction_id)
+
+    async def _remove_tracked(
+        self,
+        client: ReactionClient,
+        target: ReactionTarget,
+        tracked: _TrackedReaction,
+        reaction_id: int,
+    ) -> None:
+        try:
+            await client.remove_eyes_reaction(
+                target.repository,
+                target.subject_type,
+                target.subject_number,
+                reaction_id,
+                target.comment_id,
+            )
+        finally:
+            async with self._lock:
+                if self._reactions.get(target) is tracked:
+                    self._reactions.pop(target)
