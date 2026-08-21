@@ -45,6 +45,21 @@ _GITHUB_REDIRECT_HOST_PATTERN = re.compile(
 _SEARCH_QUALIFIER = re.compile(
     r"(?i)(?:^|[^A-Za-z0-9_])[-+]?[A-Za-z][A-Za-z0-9_-]*:"
 )
+ReactionTarget = Literal[
+    "issue",
+    "pull_request",
+    "issue_comment",
+    "pull_request_comment",
+]
+_REACTION_TARGETS: dict[ReactionTarget, tuple[str, str]] = {
+    "issue": ("/issues/{target_id}/reactions", "issues"),
+    "pull_request": ("/issues/{target_id}/reactions", "issues"),
+    "issue_comment": ("/issues/comments/{target_id}/reactions", "issues"),
+    "pull_request_comment": (
+        "/pulls/comments/{target_id}/reactions",
+        "pull_requests",
+    ),
+}
 
 
 class GitHubClient:
@@ -481,6 +496,30 @@ class GitHubClient:
             f"/issues/{_positive(issue_number, 'issue_number')}/comments",
             permissions={"issues": "write"},
             body={"body": body},
+            write=True,
+        )
+
+    async def add_eyes_reaction(
+        self,
+        repository: str,
+        target_kind: ReactionTarget,
+        target_id: int,
+    ) -> Any:
+        """Add the fixed eyes reaction to one supported activity."""
+        try:
+            path, permission = _REACTION_TARGETS[target_kind]
+        except KeyError as error:
+            raise GitHubAppError(
+                "target_kind must be issue, pull_request, issue_comment, "
+                "or pull_request_comment"
+            ) from error
+        target_id = _positive(target_id, "target_id")
+        return await self._request(
+            "POST",
+            repository,
+            path.format(target_id=target_id),
+            permissions={permission: "write"},
+            body={"content": "eyes"},
             write=True,
         )
 

@@ -7,6 +7,23 @@ ROOT = pathlib.Path(__file__).parents[1]
 
 
 class AgentPromptTests(unittest.TestCase):
+    def test_work_acknowledgement_contract(self):
+        global_prompt = (ROOT / "agents.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Work acknowledgement", global_prompt)
+        self.assertIn("activity that caused IssueLens to start working", global_prompt)
+        self.assertIn("exact triggering comment", global_prompt)
+        self.assertIn("target issue or pull-request body", global_prompt)
+        self.assertIn("`add_eyes_reaction`", global_prompt)
+        self.assertIn("before longer analysis or follow-up actions", global_prompt)
+        self.assertIn("unrelated historical activity", global_prompt)
+        self.assertIn("rejected or unsupported work", global_prompt)
+        self.assertIn("native reaction idempotency", global_prompt)
+        self.assertIn("do not pre-read reactions", global_prompt)
+        self.assertIn("continue the main task", global_prompt)
+        self.assertIn("report the\nfailure honestly", global_prompt)
+        self.assertIn("Do not remove the\nacknowledgement", global_prompt)
+
     def test_prompt_files_and_wiring(self):
         global_prompt = (ROOT / "agents.md").read_text(encoding="utf-8")
         triage_prompt = (ROOT / "agents" / "triage.md").read_text(
@@ -232,11 +249,29 @@ class AgentPromptTests(unittest.TestCase):
         )[1].split("@app.invoke_handler", 1)[0]
         chat_source = main_source.split("@app.response_handler", 1)[1]
         self.assertIn(
-            "await session.send(prompt, attachments=attachments or None)",
+            "await session.send(turn, attachments=attachments or None)",
             invocation_source,
+        )
+        self.assertLess(
+            invocation_source.index("acknowledgement_preflight_turn"),
+            invocation_source.index("issue_image_attachments"),
         )
         self.assertNotIn("_responses_turn(prompt)", invocation_source)
         self.assertIn("_responses_turn(prompt)", chat_source)
+        self.assertIn("trusted_issue_loop_event=None", chat_source)
+        self.assertIn(
+            'request.headers.get("x-issuelens-event")',
+            main_source,
+        )
+        self.assertIn(
+            'request.headers.get("x-issuelens-event-token")',
+            main_source,
+        )
+        self.assertIn("trusted_issue_loop_prompt", invocation_source)
+        self.assertLess(
+            chat_source.index("acknowledgement_preflight_turn"),
+            chat_source.index("issue_image_attachments"),
+        )
         self.assertNotIn("RequestTokenProvider", main_source)
         self.assertNotIn("github-access", main_source)
         self.assertNotIn("issuelens-related-read", main_source)

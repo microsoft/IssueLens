@@ -35,8 +35,8 @@ three sub-agents, and bundled GitHub App stdio MCP server.
   constrained `issuelens-config` tool.
 4. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
 5. Performs only the bundled issue-triage operations: repository/file reads,
-   issue and comment reads/searches, label reads/additions, assignee updates,
-   and explicitly requested issue comments.
+   issue and comment reads/searches, fixed-eyes activity acknowledgements, label
+   reads/additions, assignee updates, and explicitly requested issue comments.
 6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
 
 ## Environment Variables
@@ -83,8 +83,8 @@ available. Private repository reads still require an installation. Each Copilot
 session owns one stdio MCP process. That process caches tokens only in memory by
 repository and permission set, refreshes them five minutes before expiry, and
 discards them when the process exits. Configure the App with **Metadata: Read**,
-**Issues: Read and write**, and **Contents: Read**. Tokens and the private key
-never enter model context.
+**Issues: Read and write**, **Pull requests: Read and write**, and **Contents:
+Read**. Tokens and the private key never enter model context.
 
 ## Target Repository Configuration
 
@@ -444,14 +444,14 @@ and arbitrary container-file access. Requests may contain up to 10 attachments,
 20 MB each and 50 MB combined. The selected model must support the supplied
 image or file MIME type.
 
-Issue images are also loaded automatically during issue-link triage. Before the
-agent turn, the trusted host loader resolves explicit GitHub issue URLs and
-`owner/repository#number` references, reads each issue body, and adds validated
-image bytes as Copilot blob attachments. Clients do not need to add those images
-to the invocation payload. It accepts up to 5 PNG, JPEG, GIF, or WebP images,
-5 MB each and 15 MB combined. Arbitrary image hosts and unsafe redirects are
-rejected, and GitHub credentials are never forwarded to signed storage
-redirects.
+Issue images are also loaded automatically during issue-link triage. After the
+acknowledgement-only preflight and before the main agent turn, the trusted host
+loader resolves explicit GitHub issue URLs and `owner/repository#number`
+references, reads each issue body, and adds validated image bytes as Copilot
+blob attachments. Clients do not need to add those images to the invocation
+payload. It accepts up to 5 PNG, JPEG, GIF, or WebP images, 5 MB each and 15 MB
+combined. Arbitrary image hosts and unsafe redirects are rejected, and GitHub
+credentials are never forwarded to signed storage redirects.
 
 ### Chat from a terminal
 
@@ -509,8 +509,12 @@ target repositories store no App private key and transmit no GitHub token.
 The workflow does not currently trigger on issue title/body edits or pull
 request comments. Its preflight step rejects PR-backed comments and comments
 whose sender or author is a bot, records the accepted/skipped reason before
-Azure login, and passes only trusted event metadata to the agent. It never
-copies issue or comment body text into the workflow-generated control prompt.
+Azure login, and passes only trusted event metadata to the agent in a separate
+envelope bound to a signed GitHub Actions OIDC token. The host validates the
+token's repository, workflow, event, actor, and envelope-specific audience
+before creating the model's control prompt; Responses text and free-form
+invocation input cannot claim this provenance. The workflow never copies issue
+or comment body text into the envelope.
 
 Runs are grouped by repository and issue. Different issues run independently;
 events for one issue are serialized. GitHub Actions keeps one active and one

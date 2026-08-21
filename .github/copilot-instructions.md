@@ -58,12 +58,12 @@ protocol for chat.
     process loads the private key lazily, resolves installations, and caches
     short-lived tokens only in memory for its process/session lifetime. A token
     is restricted to one repository and the minimum tool permission set.
-  - **Issue-body images** — before the model turn, the trusted host loader
-    resolves explicit issue URLs or `owner/repository#number` references using
-    the protocol's GitHub identity, accepts only allowlisted GitHub-hosted image
-    URLs, validates redirects, type signatures, count, and size, and supplies
-    Copilot blob attachments. It never exposes tokens or lets the model choose
-    arbitrary download URLs.
+  - **Issue-body images** — after the acknowledgement-only preflight and before
+    the main model turn, the trusted host loader resolves explicit issue URLs or
+    `owner/repository#number` references using the protocol's GitHub identity,
+    accepts only allowlisted GitHub-hosted image URLs, validates redirects, type
+    signatures, count, and size, and supplies Copilot blob attachments. It never
+    exposes tokens or lets the model choose arbitrary download URLs.
   - **Model (inference) auth (auto-selected):** BYOK Foundry model
     (`FOUNDRY_PROJECT_ENDPOINT` + `AZURE_AI_MODEL_DEPLOYMENT_NAME`, using
     `AZURE_AI_MODEL_API_KEY` or a Managed Identity token), or the GitHub Copilot
@@ -150,8 +150,11 @@ protocol for chat.
   before producing credible technical artifacts. Both roles use bounded
   `get_file` reads and report limitations instead of inferring code state from
   issue history alone.
-- Trusted issue-loop invocations carry only workflow-owned event metadata. The
-  orchestrator may read the explicit issue and comments solely to choose
+- Trusted issue-loop invocations carry only workflow-owned event metadata in a
+  separate envelope bound to a signed GitHub Actions OIDC token. The host
+  validates that provenance before constructing the model prompt; it never
+  infers trust from invocation or Responses text. The orchestrator may read the
+  explicit issue and comments solely to choose
   initial triage, re-triage, initial planning, re-planning, or no action. Issue
   and comment content remains untrusted context except for one valid built-in
   command occurrence and its supplemental instructions validated under the
