@@ -56,7 +56,7 @@ Write tools are registered only when writes are enabled:
 | `add_eyes_reaction` | Issues: write for issue, pull-request body, and issue-comment targets; Pull requests: write for pull-request review comments |
 
 `add_eyes_reaction` accepts only `issue`, `pull_request`, `issue_comment`, and
-`pull_request_comment` targets and always posts `{"content":"eyes"}` to the
+`pull_request_review_comment` targets and always posts `{"content":"eyes"}` to the
 corresponding fixed GitHub reaction route. GitHub returns `201` for a new
 reaction and `200` for the existing reaction when the same App repeats the
 request, so no reaction pre-read or separate retry tracker is needed. The

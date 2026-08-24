@@ -49,13 +49,13 @@ ReactionTarget = Literal[
     "issue",
     "pull_request",
     "issue_comment",
-    "pull_request_comment",
+    "pull_request_review_comment",
 ]
 _REACTION_TARGETS: dict[ReactionTarget, tuple[str, str]] = {
     "issue": ("/issues/{target_id}/reactions", "issues"),
     "pull_request": ("/issues/{target_id}/reactions", "issues"),
     "issue_comment": ("/issues/comments/{target_id}/reactions", "issues"),
-    "pull_request_comment": (
+    "pull_request_review_comment": (
         "/pulls/comments/{target_id}/reactions",
         "pull_requests",
     ),
@@ -511,7 +511,7 @@ class GitHubClient:
         except KeyError as error:
             raise GitHubAppError(
                 "target_kind must be issue, pull_request, issue_comment, "
-                "or pull_request_comment"
+                "or pull_request_review_comment"
             ) from error
         target_id = _positive(target_id, "target_id")
         return await self._request(

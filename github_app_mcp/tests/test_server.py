@@ -138,7 +138,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 "add_eyes_reaction",
                 {
                     "repository": "microsoft/IssueLens",
-                    "target_kind": "pull_request_comment",
+                    "target_kind": "pull_request_review_comment",
                     "target_id": 99,
                 },
             )
@@ -153,7 +153,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 "issue",
                 "pull_request",
                 "issue_comment",
-                "pull_request_comment",
+                "pull_request_review_comment",
             },
         )
         self.assertNotIn("content", tool.input_schema["properties"])
@@ -163,7 +163,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 "add_eyes_reaction",
                 (
                     "microsoft/IssueLens",
-                    "pull_request_comment",
+                    "pull_request_review_comment",
                     99,
                 ),
                 {},

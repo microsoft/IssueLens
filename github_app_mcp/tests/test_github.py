@@ -477,7 +477,7 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
                 {"issues": "write"},
             ),
             (
-                "pull_request_comment",
+                "pull_request_review_comment",
                 4,
                 "/repos/microsoft/IssueLens/pulls/comments/4/reactions",
                 {"pull_requests": "write"},
