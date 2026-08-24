@@ -506,6 +506,39 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([result["id"] for result in results], [1, 2, 3, 4])
         self.assertEqual(len(requests), 4)
 
+    async def test_eyes_reaction_retry_uses_identical_request(self):
+        requests = []
+        statuses = iter((201, 200))
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(next(statuses), json={"id": len(requests)})
+
+        client = GitHubClient(
+            self.provider,
+            writes_enabled=True,
+            transport=httpx.MockTransport(handler),
+        )
+
+        first = await client.add_eyes_reaction(
+            "microsoft/IssueLens",
+            "issue_comment",
+            3,
+        )
+        second = await client.add_eyes_reaction(
+            "microsoft/IssueLens",
+            "issue_comment",
+            3,
+        )
+
+        self.assertEqual(first["id"], 1)
+        self.assertEqual(second["id"], 2)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0].method, requests[1].method)
+        self.assertEqual(requests[0].url, requests[1].url)
+        self.assertEqual(requests[0].content, requests[1].content)
+        self.assertEqual(json.loads(requests[1].content), {"content": "eyes"})
+
     async def test_eyes_reaction_rejects_invalid_target_before_token_minting(self):
         client = self.client(writes_enabled=True)
 
