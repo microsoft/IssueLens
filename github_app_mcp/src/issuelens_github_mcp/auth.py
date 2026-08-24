@@ -29,6 +29,7 @@ _ALLOWED_PERMISSIONS: dict[str, frozenset[PermissionLevel]] = {
     "contents": frozenset({"read"}),
     "issues": frozenset({"read", "write"}),
     "metadata": frozenset({"read"}),
+    "pull_requests": frozenset({"write"}),
 }
 
 

@@ -7,6 +7,23 @@ ROOT = pathlib.Path(__file__).parents[1]
 
 
 class AgentPromptTests(unittest.TestCase):
+    def test_work_acknowledgement_contract(self):
+        global_prompt = (ROOT / "agents.md").read_text(encoding="utf-8")
+
+        self.assertIn("## Work acknowledgement", global_prompt)
+        self.assertIn("activity that caused IssueLens to start working", global_prompt)
+        self.assertIn("exact triggering comment", global_prompt)
+        self.assertIn("target issue or pull-request body", global_prompt)
+        self.assertIn("`add_eyes_reaction`", global_prompt)
+        self.assertIn("before longer analysis or follow-up actions", global_prompt)
+        self.assertIn("unrelated historical activity", global_prompt)
+        self.assertIn("rejected or unsupported work", global_prompt)
+        self.assertIn("native reaction idempotency", global_prompt)
+        self.assertIn("do not pre-read reactions", global_prompt)
+        self.assertIn("continue the main task", global_prompt)
+        self.assertIn("report the\nfailure honestly", global_prompt)
+        self.assertIn("Do not remove the\nacknowledgement", global_prompt)
+
     def test_prompt_files_and_wiring(self):
         global_prompt = (ROOT / "agents.md").read_text(encoding="utf-8")
         triage_prompt = (ROOT / "agents" / "triage.md").read_text(
