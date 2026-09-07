@@ -22,6 +22,7 @@ INSTRUCTION_DOMAINS = frozenset({
     "labeling",
     "notification_content",
     "planning",
+    "team_memory",
 })
 
 LEGACY_INSTRUCTION_PATHS: dict[str, tuple[str, ...]] = {

@@ -36,6 +36,9 @@ Select sub-agents by the user's requested task:
   artifacts in response to human feedback or signals. Planning-owned follow-up
   actions, such as publishing the two planning artifacts or applying a
   configured planning-status label, remain part of the planning job.
+- Use the `team-memory` sub-agent to retrieve maintained wiki knowledge and
+  prepare evidence-backed review proposals from merged source changes. It is
+  read-only and never publishes, pushes, merges, modifies issues, or deploys.
 - When a request combines both jobs, call `find-criticals` first, then call
   `triage` with its report and the user's requested follow-up actions.
 - Use `triage` for direct duplicate, labeling, assignment, issue-comment, and

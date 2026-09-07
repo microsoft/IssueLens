@@ -179,6 +179,18 @@ _PLAN_AGENT: CustomAgentConfig = {
     "infer": True,
 }
 
+_TEAM_MEMORY_AGENT: CustomAgentConfig = {
+    "name": "team-memory",
+    "display_name": "Team Memory",
+    "description": (
+        "Retrieves maintained wiki knowledge and prepares evidence-backed "
+        "review proposals without publishing."
+    ),
+    "prompt": _load_prompt(_agents_dir / "team-memory.md"),
+    "skills": ["issuelens-config", "team-memory"],
+    "infer": True,
+}
+
 
 # ── BYOK helpers ─────────────────────────────────────────────────────────────
 
@@ -327,6 +339,7 @@ def _session_options(
             _TRIAGE_AGENT,
             _FIND_CRITICALS_AGENT,
             _PLAN_AGENT,
+            _TEAM_MEMORY_AGENT,
         ],
         "agent": "issuelens",
     }

@@ -33,6 +33,9 @@
         },
         "planning": {
           "$ref": "#/$defs/instructionFile"
+        },
+        "team_memory": {
+          "$ref": "#/$defs/instructionFile"
         }
       }
     }

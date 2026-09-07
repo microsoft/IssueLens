@@ -134,9 +134,49 @@ def create_server(
         )
 
     @server.tool()
-    async def get_file(repository: str, path: str) -> Any:
+    async def get_file(repository: str, path: str, ref: str | None = None) -> Any:
         """Read one bounded UTF-8 file or directory listing from a repository."""
-        return await github.get_file(repository, path)
+        return await github.get_file(repository, path, ref=ref)
+
+    @server.tool()
+    async def get_pull_request(repository: str, pull_number: int) -> Any:
+        return await github.get_pull_request(repository, pull_number)
+
+    @server.tool()
+    async def list_pull_request_files(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_pull_request_files(repository, pull_number, per_page=per_page, page=page)
+
+    @server.tool()
+    async def list_pull_request_commits(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_pull_request_commits(repository, pull_number, per_page=per_page, page=page)
+
+    @server.tool()
+    async def list_pull_request_reviews(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_pull_request_reviews(repository, pull_number, per_page=per_page, page=page)
+
+    @server.tool()
+    async def list_pull_request_review_comments(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_pull_request_review_comments(repository, pull_number, per_page=per_page, page=page)
+
+    @server.tool()
+    async def get_commit(repository: str, sha: str) -> Any:
+        return await github.get_commit(repository, sha)
+
+    @server.tool()
+    async def compare_commits(repository: str, base: str, head: str) -> Any:
+        return await github.compare_commits(repository, base, head)
+
+    @server.tool()
+    async def list_repository_tree(repository: str, ref: str, recursive: bool = True) -> Any:
+        return await github.list_repository_tree(repository, ref, recursive=recursive)
+
+    @server.tool()
+    async def search_repository_content(repository: str, query: str, ref: str | None = None, per_page: int = 30, page: int = 1) -> Any:
+        return await github.search_repository_content(repository, query, ref=ref, per_page=per_page, page=page)
+
+    @server.tool()
+    async def list_merged_pull_requests(repository: str, base: str, since: str | None = None, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_merged_pull_requests(repository, base=base, since=since, per_page=per_page, page=page)
 
     if github.writes_enabled:
 

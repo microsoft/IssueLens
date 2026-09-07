@@ -26,10 +26,10 @@ _REPOSITORY_PATTERN = re.compile(
 PermissionLevel = Literal["read", "write"]
 Permissions = Mapping[str, PermissionLevel]
 _ALLOWED_PERMISSIONS: dict[str, frozenset[PermissionLevel]] = {
-    "contents": frozenset({"read"}),
+    "contents": frozenset({"read", "write"}),
     "issues": frozenset({"read", "write"}),
     "metadata": frozenset({"read"}),
-    "pull_requests": frozenset({"write"}),
+    "pull_requests": frozenset({"read", "write"}),
 }
 
 

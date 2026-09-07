@@ -9,6 +9,21 @@ A GitHub issue-triage and planning agent built on the [GitHub Copilot SDK](https
 Both protocols run in the same process and share the same orchestrator, skills,
 three sub-agents, and bundled GitHub App stdio MCP server.
 
+### Team memory (opt-in)
+
+The `team-memory` agent retrieves the maintained traditional repository wiki
+and prepares durable, review-first proposals from immutable pull-request
+evidence. It never publishes, merges, changes source issues, or deploys.
+Configure `team_memory` in `.github/issuelens.yml` and set
+`ISSUELENS_TEAM_MEMORY_STORE` to a durable shared database (not `:memory:`)
+before enabling a post-merge workflow. Git must be available to the hosted
+runtime for wiki access; Docker and direct Python deployments fail closed with
+a readable error when it is absent. Publication requires an independently
+validated trusted-host approval matching proposal ID, content hash, source
+revision, and wiki base. Human wiki assets and intervening edits are preserved.
+MVP generated changes are limited to bounded Markdown pages; binaries and
+unsupported evidence require review.
+
 ### Automation — `POST /invocations`
 
 1. Receives a JSON task. The payload requires `input` (the task, a free-form

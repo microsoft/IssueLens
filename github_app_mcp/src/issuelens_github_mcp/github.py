@@ -266,14 +266,16 @@ class GitHubClient:
             params=_pagination(per_page, page),
         )
 
-    async def get_file(self, repository: str, path: str) -> Any:
+    async def get_file(self, repository: str, path: str, ref: str | None = None) -> Any:
         """Read one repository-relative UTF-8 text file or directory listing."""
         path = _repository_path(path)
+        params = {"ref": _ref(ref)} if ref is not None else None
         payload = await self._request(
             "GET",
             repository,
             f"/contents/{quote(path, safe='/')}",
             permissions={"contents": "read"},
+            params=params,
         )
         if isinstance(payload, Mapping) and payload.get("type") == "file":
             content = payload.get("content")
@@ -301,6 +303,104 @@ class GitHubClient:
             payload.pop("content", None)
             payload["decoded_content"] = decoded_content
         return payload
+
+    async def get_pull_request(self, repository: str, pull_number: int) -> Any:
+        return await self._request(
+            "GET", repository, f"/pulls/{_positive(pull_number, 'pull_number')}",
+            permissions={"pull_requests": "read"},
+        )
+
+    async def list_pull_request_files(
+        self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
+    ) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/files",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page),
+        )
+
+    async def list_pull_request_commits(
+        self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
+    ) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/commits",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page),
+        )
+
+    async def list_pull_request_reviews(
+        self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
+    ) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/reviews",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page),
+        )
+
+    async def list_pull_request_review_comments(
+        self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
+    ) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/comments",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page),
+        )
+
+    async def get_commit(self, repository: str, sha: str) -> Any:
+        return await self._request(
+            "GET", repository, f"/commits/{_sha(sha)}",
+            permissions={"contents": "read"},
+        )
+
+    async def compare_commits(self, repository: str, base: str, head: str) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/compare/{_ref(base)}...{_ref(head)}",
+            permissions={"contents": "read"},
+        )
+
+    async def list_repository_tree(self, repository: str, ref: str, *, recursive: bool = True) -> Any:
+        commit = await self._request(
+            "GET", repository, f"/git/trees/{_ref(ref)}",
+            permissions={"contents": "read"},
+            params={"recursive": "1"} if recursive else None,
+        )
+        return commit
+
+    async def search_repository_content(
+        self, repository: str, query: str, *, ref: str | None = None,
+        per_page: int = 30, page: int = 1,
+    ) -> Any:
+        repository = self._authorize(repository)
+        query = query.strip()
+        if not query or len(query) > _MAX_QUERY_CHARS or _SEARCH_QUALIFIER.search(query):
+            raise GitHubAppError("query must be plain text and within the bounded limit")
+        params = {"q": f"{query} repo:{repository}", **_pagination(per_page, page)}
+        if ref is not None:
+            params["q"] += f" ref:{_ref(ref)}"
+        return await self._request(
+            "GET", repository, absolute_url=f"{_API_ROOT}/search/code",
+            permissions={"contents": "read"}, params=params,
+        )
+
+    async def list_merged_pull_requests(
+        self, repository: str, *, base: str, since: str | None = None,
+        per_page: int = 30, page: int = 1,
+    ) -> Any:
+        params = {
+            "q": f"repo:{self._authorize(repository)} is:pr is:merged base:{_ref(base)}",
+            **_pagination(per_page, page),
+        }
+        if since is not None:
+            params["q"] += f" merged:>={_timestamp(since)[:10]}"
+        return await self._request(
+            "GET", repository, absolute_url=f"{_API_ROOT}/search/issues",
+            permissions={"pull_requests": "read"}, params=params,
+        )
 
     async def get_issue_images(
         self,
@@ -626,6 +726,20 @@ def _timestamp(value: str) -> str:
         raise GitHubAppError("since must be an ISO 8601 timestamp") from error
     if parsed.tzinfo is None:
         raise GitHubAppError("since must include a timezone")
+    return value
+
+
+def _ref(value: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 200:
+        raise GitHubAppError("ref must be a bounded non-empty string")
+    if any(part in value for part in ("\x00", "..", "\\", "?", "#", " ")):
+        raise GitHubAppError("ref contains unsupported characters")
+    return value
+
+
+def _sha(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
+        raise GitHubAppError("commit SHA must be 7 to 64 hexadecimal characters")
     return value
 
 

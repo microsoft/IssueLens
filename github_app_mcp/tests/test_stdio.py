@@ -17,6 +17,16 @@ READ_TOOLS = {
     "search_issues",
     "list_labels",
     "get_file",
+    "get_pull_request",
+    "list_pull_request_files",
+    "list_pull_request_commits",
+    "list_pull_request_reviews",
+    "list_pull_request_review_comments",
+    "get_commit",
+    "compare_commits",
+    "list_repository_tree",
+    "search_repository_content",
+    "list_merged_pull_requests",
 }
 
 
