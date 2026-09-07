@@ -9,6 +9,8 @@ concurrency:
   group: issue-lens-team-memory-${{ github.repository }}
   cancel-in-progress: false
 
+permissions: {}
+
 jobs:
   reconcile:
     if: >-
