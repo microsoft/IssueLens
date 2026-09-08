@@ -27,6 +27,12 @@ READ_TOOLS = {
     "list_repository_tree",
     "search_repository_content",
     "list_merged_pull_requests",
+    "get_wiki_snapshot",
+    "list_wiki_pages",
+    "get_wiki_page",
+    "search_wiki",
+    "list_wiki_history",
+    "get_wiki_diff",
 }
 
 

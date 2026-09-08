@@ -41,13 +41,13 @@ Customization cannot grant writes, select arbitrary remotes or other projects,
 or supply credentials. Wiki publication belongs to the maintenance job through
 an independently authorized host capability, never to the reader skill.
 
-**Current implementation status:** this branch contains instructions, PR/source
-read tools, and standalone wiki/proposal helpers. Wiki tools and proposal storage
-are not yet connected to Copilot sessions, and the authorized publisher is not
-implemented. Setting `ISSUELENS_TEAM_MEMORY_STORE` does not enable automated
-wiki updates. Until runtime integration is complete, report these limitations
-and do not claim a wiki read or write succeeded. Ordinary chat/issue-loop
-sessions must not receive publication authority when that integration is added.
+**Current implementation status:** bounded App-authenticated wiki snapshot/page,
+search, history, and diff reads are available through the shared read-only MCP
+surface. The host-only publisher consumes an exactly approved durable proposal,
+checks the expected wiki base, performs a non-force fast-forward push, and
+records a receipt. Proposal creation and approval remain host-controlled;
+`ISSUELENS_TEAM_MEMORY_STORE` is required and does not by itself enable
+publication. Ordinary chat/issue-loop sessions never receive publisher tools.
 
 ### Automation — `POST /invocations`
 

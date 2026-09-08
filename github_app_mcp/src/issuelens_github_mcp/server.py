@@ -178,6 +178,30 @@ def create_server(
     async def list_merged_pull_requests(repository: str, base: str, since: str | None = None, per_page: int = 30, page: int = 1) -> Any:
         return await github.list_merged_pull_requests(repository, base=base, since=since, per_page=per_page, page=page)
 
+    @server.tool()
+    async def get_wiki_snapshot(repository: str) -> Any:
+        return await github.get_wiki_snapshot(repository)
+
+    @server.tool()
+    async def list_wiki_pages(repository: str, ref: str = "HEAD") -> Any:
+        return await github.list_wiki_pages(repository, ref)
+
+    @server.tool()
+    async def get_wiki_page(repository: str, path: str, ref: str = "HEAD") -> Any:
+        return await github.get_wiki_page(repository, path, ref)
+
+    @server.tool()
+    async def search_wiki(repository: str, query: str, ref: str = "HEAD") -> Any:
+        return await github.search_wiki(repository, query, ref)
+
+    @server.tool()
+    async def list_wiki_history(repository: str, path: str | None = None, limit: int = 30) -> Any:
+        return await github.list_wiki_history(repository, path, limit)
+
+    @server.tool()
+    async def get_wiki_diff(repository: str, base: str, head: str = "HEAD") -> Any:
+        return await github.get_wiki_diff(repository, base, head)
+
     if github.writes_enabled:
 
         @server.tool()

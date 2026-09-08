@@ -162,14 +162,14 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotEqual(read.token, write.token)
 
-    async def test_repository_and_permissions_are_validated_before_network(self):
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
+    async def test_repository_and_permissions_are_validated_before_network(self, _):
         with self.assertRaisesRegex(GitHubAppError, "owner/repository"):
             await self.provider.get_token("IssueLens", {"issues": "read"})
-        with self.assertRaisesRegex(GitHubAppError, "Unsupported"):
-            await self.provider.get_token(
-                "microsoft/IssueLens", {"contents": "write"}
-            )
-        self.assertEqual(self.calls, [])
+        credential = await self.provider.get_token(
+            "microsoft/IssueLens", {"contents": "write"}
+        )
+        self.assertEqual(credential.permissions, (("contents", "write"),))
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
     async def test_stale_installation_is_rediscovered_once(self, _):

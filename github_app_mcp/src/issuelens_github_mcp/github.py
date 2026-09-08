@@ -15,6 +15,7 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 
 from .auth import GitHubAppError, GitHubAppTokenProvider, Permissions, validate_repository
+from wiki import WikiError, WikiRepository
 
 
 _API_ROOT = "https://api.github.com"
@@ -401,6 +402,37 @@ class GitHubClient:
             "GET", repository, absolute_url=f"{_API_ROOT}/search/issues",
             permissions={"pull_requests": "read"}, params=params,
         )
+
+    async def get_wiki_snapshot(self, repository: str) -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.snapshot())
+
+    async def list_wiki_pages(self, repository: str, ref: str = "HEAD") -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.pages(ref))
+
+    async def get_wiki_page(self, repository: str, path: str, ref: str = "HEAD") -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.page(path, ref))
+
+    async def search_wiki(self, repository: str, query: str, ref: str = "HEAD") -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.search(query, ref))
+
+    async def list_wiki_history(
+        self, repository: str, path: str | None = None, limit: int = 30
+    ) -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.history(path, limit))
+
+    async def get_wiki_diff(self, repository: str, base: str, head: str = "HEAD") -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.diff(base, head))
+
+    async def _wiki_read(self, repository: str, operation: Any) -> Any:
+        repository = self._authorize(repository)
+        credential = await self._token_provider.get_token(
+            repository, {"contents": "read"}
+        )
+        try:
+            with WikiRepository(repository, token=credential.token) as wiki:
+                return operation(wiki)
+        except WikiError as error:
+            raise GitHubAppError(str(error)) from error
 
     async def get_issue_images(
         self,
