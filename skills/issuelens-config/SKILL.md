@@ -14,6 +14,7 @@ with the explicit `owner/repository` and exactly one supported domain:
 - `assignment`
 - `notification_content`
 - `planning`
+- `team_memory`
 
 The trusted tool discovers a case-insensitive filename match for
 `.github/issuelens.yml`, validates its schema, and returns only the requested
@@ -34,6 +35,14 @@ ambiguous, too large, or references a missing file, stop that capability. Do
 not silently bypass a present but invalid configuration, and do not perform a
 related write. For `planning`, return a blocked result without generating
 planning artifacts from fallback behavior.
+
+For `team_memory`, stop wiki retrieval or maintenance on a policy-load failure
+without silently using fallback policy. The maintenance agent loads this domain
+before preparing wiki updates; the shared reader skill loads it before selecting
+wiki topics. Use its wiki location/access description, structure, priority
+knowledge areas, and inclusion/exclusion guidance within the existing supported
+destination and GitHub App boundaries. Configuration supplies no credentials,
+cross-repository access, or independent wiki-write authorization.
 
 Within the selected sub-agent's role, apply instructions in this order:
 

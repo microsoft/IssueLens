@@ -124,9 +124,11 @@ _ISSUELENS_AGENT: CustomAgentConfig = {
     "display_name": "IssueLens",
     "description": (
         "Triages GitHub issues, performs requested follow-up actions, and "
-        "creates action plans followed by design specifications."
+        "creates action plans followed by design specifications; routes "
+        "project wiki maintenance to the team-memory agent."
     ),
     "prompt": _load_prompt(_project_dir / "agents.md"),
+    "skills": ["issuelens-config", "team-memory"],
 }
 
 
@@ -140,6 +142,7 @@ _TRIAGE_AGENT: CustomAgentConfig = {
     "prompt": _load_prompt(_agents_dir / "triage.md"),
     "skills": [
         "issuelens-config",
+        "team-memory",
         "find-duplicates",
         "label-issue",
         "assign-issue",
@@ -157,7 +160,7 @@ _FIND_CRITICALS_AGENT: CustomAgentConfig = {
         "and regression issues."
     ),
     "prompt": _load_prompt(_agents_dir / "find-criticals.md"),
-    "skills": ["issuelens-config"],
+    "skills": ["issuelens-config", "team-memory"],
     "infer": True,
 }
 
@@ -172,6 +175,7 @@ _PLAN_AGENT: CustomAgentConfig = {
     "prompt": _load_prompt(_agents_dir / "plan.md"),
     "skills": [
         "issuelens-config",
+        "team-memory",
         "label-issue",
         "assign-issue",
         "notify",
@@ -183,8 +187,8 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
     "name": "team-memory",
     "display_name": "Team Memory",
     "description": (
-        "Retrieves maintained wiki knowledge and prepares evidence-backed "
-        "review proposals without publishing."
+        "Maintains project wiki knowledge using validated team_memory "
+        "customization, evidence-backed proposals, and host-controlled publication."
     ),
     "prompt": _load_prompt(_agents_dir / "team-memory.md"),
     "skills": ["issuelens-config", "team-memory"],

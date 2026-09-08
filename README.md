@@ -7,22 +7,47 @@ A GitHub issue-triage and planning agent built on the [GitHub Copilot SDK](https
 ## How It Works
 
 Both protocols run in the same process and share the same orchestrator, skills,
-three sub-agents, and bundled GitHub App stdio MCP server.
+four sub-agents, and bundled GitHub App stdio MCP server.
 
 ### Team memory (opt-in)
 
-The `team-memory` agent retrieves the maintained traditional repository wiki
-and prepares durable, review-first proposals from immutable pull-request
-evidence. It never publishes, merges, changes source issues, or deploys.
-Configure `team_memory` in `.github/issuelens.yml` and set
-`ISSUELENS_TEAM_MEMORY_STORE` to a durable shared database (not `:memory:`)
-before enabling a post-merge workflow. Git must be available to the hosted
-runtime for wiki access; Docker and direct Python deployments fail closed with
-a readable error when it is absent. Publication requires an independently
-validated trusted-host approval matching proposal ID, content hash, source
-revision, and wiki base. Human wiki assets and intervening edits are preserved.
-MVP generated changes are limited to bounded Markdown pages; binaries and
-unsupported evidence require review.
+The `team-memory` agent owns wiki maintenance: reading existing knowledge,
+reconciling merged changes, and preparing focused updates for host-controlled
+publication. The shared `team-memory` skill is read-only and is preloaded on
+every registered agent, including the orchestrator. Agents use it directly
+to inform their own work, not by delegating retrieval to the maintenance agent.
+
+Both paths first call `issuelens-config` with the explicit repository and
+`domain="team_memory"`, then apply its returned `content`. Configure the policy
+in `.github/issuelens.yml`:
+
+```yaml
+version: 1
+instructions:
+  team_memory:
+    path: .github/issuelens/team-memory.md
+```
+
+The Markdown policy describes wiki location/access, structure and navigation,
+priority knowledge areas, content inclusion/exclusion rules, and retrieval
+guidance. See [the policy example](examples/team-memory.md) and
+[IssueLens's own customization](.github/issuelens/team-memory.md). An absent
+config or omitted domain uses built-in behavior; invalid config stops memory
+access rather than silently applying defaults. Other agent work may continue
+with authorized source evidence while reporting that memory was unavailable.
+
+The supported destination is the explicit repository's own `.wiki.git`.
+Customization cannot grant writes, select arbitrary remotes or other projects,
+or supply credentials. Wiki publication belongs to the maintenance job through
+an independently authorized host capability, never to the reader skill.
+
+**Current implementation status:** this branch contains instructions, PR/source
+read tools, and standalone wiki/proposal helpers. Wiki tools and proposal storage
+are not yet connected to Copilot sessions, and the authorized publisher is not
+implemented. Setting `ISSUELENS_TEAM_MEMORY_STORE` does not enable automated
+wiki updates. Until runtime integration is complete, report these limitations
+and do not claim a wiki read or write succeeded. Ordinary chat/issue-loop
+sessions must not receive publication authority when that integration is added.
 
 ### Automation — `POST /invocations`
 
@@ -610,7 +635,7 @@ For the full deployment guide, see [Azure AI Foundry hosted agents](https://aka.
 
 ## Sub-agent and skills
 
-The Foundry hosted agent registers the `issuelens` orchestrator and its three sub-agents, `triage`, `find-criticals`, and `plan`, as Copilot SDK `CustomAgentConfig` objects in `main.py`. All prompts are loaded explicitly at startup so their behavior is consistent locally and in the hosted package:
+The Foundry hosted agent registers the `issuelens` orchestrator and its four sub-agents, `triage`, `find-criticals`, `plan`, and `team-memory`, as Copilot SDK `CustomAgentConfig` objects in `main.py`. All prompts are loaded explicitly at startup so their behavior is consistent locally and in the hosted package:
 
 ```
 agents.md                   ← global IssueLens identity and current scope
@@ -629,7 +654,7 @@ skills/
 github_app_mcp/             ← bundled GitHub App stdio MCP server
 ```
 
-All three sub-agents are available to IssueLens through runtime inference. `triage`
+All four sub-agents are available to IssueLens through runtime inference. `triage`
 analyzes target issues and owns requested duplicate, label, assignment, and
 notification work. `find-criticals` scans a repository and time scope for hot,
 blocking, and regression issues and returns the structured report. `plan`
