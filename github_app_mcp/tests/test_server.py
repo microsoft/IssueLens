@@ -55,9 +55,10 @@ WRITE_TOOLS = {
 
 
 class FakeGitHubClient:
-    def __init__(self, *, writes_enabled=False):
+    def __init__(self, *, writes_enabled=False, wiki_writes_enabled=False):
         self.calls = []
         self.writes_enabled = writes_enabled
+        self.wiki_writes_enabled = wiki_writes_enabled
 
     def __getattr__(self, operation):
         async def call(*args, **kwargs):
@@ -140,6 +141,76 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             READ_TOOLS | WRITE_TOOLS,
         )
 
+    async def test_wiki_writer_has_only_direct_mutation_and_bounded_schema(self):
+        github = FakeGitHubClient(wiki_writes_enabled=True)
+        server = create_server(cast(GitHubClient, github))
+        parameters = {
+            "repository": "microsoft/IssueLens",
+            "pages": {"Home.md": "Updated memory"},
+            "expected_base": "a" * 40,
+            "message": "Update memory",
+        }
+
+        async with Client(server) as client:
+            tools = await client.list_tools()
+            result = await client.call_tool("write_wiki_pages", parameters)
+
+        self.assertEqual(
+            {tool.name for tool in tools.tools}, READ_TOOLS | {"write_wiki_pages"}
+        )
+        tool = next(tool for tool in tools.tools if tool.name == "write_wiki_pages")
+        self.assertEqual(set(tool.input_schema["properties"]), set(parameters))
+        self.assertEqual(set(tool.input_schema["required"]), set(parameters))
+        self.assertEqual(tool.input_schema["properties"]["pages"]["additionalProperties"], {"type": "string"})
+        self.assertFalse(result.is_error)
+        self.assertEqual(github.calls, [(
+            "write_wiki_pages", tuple(parameters.values()), {},
+        )])
+
+    async def test_history_supports_snapshot_ref_and_retains_defaults(self):
+        github = FakeGitHubClient()
+        server = create_server(cast(GitHubClient, github))
+        async with Client(server) as client:
+            tools = await client.list_tools()
+            default = await client.call_tool("list_wiki_history", {"repository": "microsoft/IssueLens"})
+            pinned = await client.call_tool("list_wiki_history", {
+                "repository": "microsoft/IssueLens", "path": "Home.md", "limit": 5, "ref": "a" * 40,
+            })
+        self.assertFalse(default.is_error)
+        self.assertFalse(pinned.is_error)
+        tool = next(tool for tool in tools.tools if tool.name == "list_wiki_history")
+        self.assertEqual(tool.input_schema["properties"]["ref"]["default"], "HEAD")
+        self.assertEqual(github.calls, [
+            ("list_wiki_history", ("microsoft/IssueLens", None, 30, "HEAD"), {}),
+            ("list_wiki_history", ("microsoft/IssueLens", "Home.md", 5, "a" * 40), {}),
+        ])
+
+    async def test_get_file_forwarding_remains_unchanged(self):
+        github = FakeGitHubClient()
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            result = await client.call_tool("get_file", {
+                "repository": "microsoft/IssueLens", "path": "README.md", "ref": "main",
+            })
+        self.assertFalse(result.is_error)
+        self.assertEqual(github.calls, [
+            ("get_file", ("microsoft/IssueLens", "README.md"), {"ref": "main"}),
+        ])
+
+    async def test_wiki_write_tool_rejects_missing_or_wrong_typed_arguments(self):
+        github = FakeGitHubClient(wiki_writes_enabled=True)
+        valid = {
+            "repository": "microsoft/IssueLens", "pages": {"Home.md": "text"},
+            "expected_base": "a" * 40, "message": "Update",
+        }
+        invalid = [{key: value for key, value in valid.items() if key != "expected_base"}]
+        invalid.extend({**valid, "pages": value} for value in ([], {"Home.md": None}, "text"))
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            for arguments in invalid:
+                with self.subTest(arguments=arguments):
+                    result = await client.call_tool("write_wiki_pages", arguments)
+                    self.assertTrue(result.is_error)
+        self.assertEqual(github.calls, [])
+
     async def test_reaction_tool_has_bounded_schema_and_round_trips(self):
         github = FakeGitHubClient(writes_enabled=True)
         server = create_server(cast(GitHubClient, github))
@@ -187,7 +258,41 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         ])
 
 
+class EnvironmentDiscoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wiki_allowlist_and_triage_flag_are_independent_and_lazy(self):
+        for settings, expected in (
+            ({}, READ_TOOLS),
+            ({"GITHUB_MCP_WIKI_WRITE_REPOSITORIES": " "}, READ_TOOLS),
+            ({"GITHUB_MCP_ENABLE_WRITES": "true"}, READ_TOOLS | WRITE_TOOLS),
+            ({"GITHUB_MCP_WIKI_WRITE_REPOSITORIES": " microsoft/IssueLens , owner/Other "}, READ_TOOLS | {"write_wiki_pages"}),
+            ({"GITHUB_MCP_ENABLE_WRITES": "true", "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": "microsoft/IssueLens"}, READ_TOOLS | WRITE_TOOLS | {"write_wiki_pages"}),
+        ):
+            with self.subTest(settings=settings):
+                server = build_server_from_environment({
+                    "GITHUB_APP_ID": "1816975",
+                    "GITHUB_APP_PRIVATE_KEY_SECRET_URI": "https://issuelens.vault.azure.net/secrets/not-read-at-startup",
+                    **settings,
+                })
+                async with Client(server) as client:
+                    tools = await client.list_tools()
+                self.assertEqual({tool.name for tool in tools.tools}, expected)
+
+
 class EnvironmentTests(unittest.TestCase):
+    def test_wiki_allowlist_rejects_blanks_malformed_names_and_duplicates(self):
+        for value in (
+            ",", "microsoft/IssueLens,", ",microsoft/IssueLens",
+            "microsoft/IssueLens, ,owner/other", "invalid", "owner/*", "owner/..",
+            "https://github.com/microsoft/IssueLens", "owner/repo,OWNER/REPO",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ConfigurationError, "GITHUB_MCP_WIKI_WRITE_REPOSITORIES"):
+                    build_server_from_environment({
+                        "GITHUB_APP_ID": "1816975",
+                        "GITHUB_APP_PRIVATE_KEY_SECRET_URI": "https://issuelens.vault.azure.net/secrets/not-read-at-startup",
+                        "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": value,
+                    })
+
     def test_write_flag_must_be_boolean(self):
         with self.assertRaisesRegex(ConfigurationError, "true or false"):
             build_server_from_environment({

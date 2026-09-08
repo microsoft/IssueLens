@@ -37,12 +37,22 @@ related write. For `planning`, return a blocked result without generating
 planning artifacts from fallback behavior.
 
 For `team_memory`, stop wiki retrieval or maintenance on a policy-load failure
-without silently using fallback policy. The maintenance agent loads this domain
-before preparing wiki updates; the shared reader skill loads it before selecting
-wiki topics. Use its wiki location/access description, structure, priority
-knowledge areas, and inclusion/exclusion guidance within the existing supported
-destination and GitHub App boundaries. Configuration supplies no credentials,
-cross-repository access, or independent wiki-write authorization.
+without silently using fallback policy. Both the maintenance agent and shared
+reader skill call `issuelens-config` with the explicit `repository` and
+`domain="team_memory"` before preparing wiki updates or selecting wiki topics.
+Use the returned `content` for wiki location/access, structure, priority knowledge
+areas, and inclusion/exclusion guidance within the explicit repository's own
+`.wiki.git` and bundled GitHub App boundaries. Configuration supplies no
+credentials, arbitrary remotes, cross-repository access, or
+independent wiki-write authorization. A policy-load failure must stop memory maintenance;
+the reader may let its owning job continue with other authorized evidence.
+
+Only the maintenance job may call `write_wiki_pages`, and only for an explicit
+current-user wiki-update request or an accepted trusted postmerge job authorizing
+the target. The host's `ISSUELENS_WIKI_WRITE_REPOSITORIES` allowlist enables a
+capability; policy cannot populate it or grant permission. The reader skill
+remains read-only. Sensitive, conflicting, destructive, or unsupported changes
+require ordinary human interaction, not persisted proposals or approvals.
 
 Within the selected sub-agent's role, apply instructions in this order:
 

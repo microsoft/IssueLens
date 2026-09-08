@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import json
 import pathlib
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import quote, urljoin, urlparse
@@ -15,12 +16,13 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 
 from .auth import GitHubAppError, GitHubAppTokenProvider, Permissions, validate_repository
-from wiki import WikiError, WikiRepository
+from .wiki import WikiError, WikiRepository
 
 
 _API_ROOT = "https://api.github.com"
 _API_VERSION = "2026-03-10"
 _MAX_RESULT_BYTES = 100_000
+_MAX_WIKI_RESULT_BYTES = 6 * 64 * 1024 + 4096
 _MAX_HTTP_RESPONSE_BYTES = 128 * 1024
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_QUERY_CHARS = 512
@@ -71,8 +73,24 @@ class GitHubClient:
         token_provider: GitHubAppTokenProvider,
         *,
         writes_enabled: bool = False,
+        wiki_write_repositories: Sequence[str] = (),
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        if isinstance(wiki_write_repositories, (str, bytes)) or not isinstance(
+            wiki_write_repositories, Sequence
+        ):
+            raise GitHubAppError("wiki_write_repositories must be a repository list")
+        repositories: set[str] = set()
+        for repository in wiki_write_repositories:
+            if not isinstance(repository, str):
+                raise GitHubAppError("wiki_write_repositories must contain repositories")
+            normalized = validate_repository(repository).casefold()
+            if normalized.split("/", 1)[1] in {".", ".."}:
+                raise GitHubAppError("Repository must use the owner/repository format")
+            if normalized in repositories:
+                raise GitHubAppError("wiki_write_repositories contains duplicate repositories")
+            repositories.add(normalized)
+        self._wiki_write_repositories = frozenset(repositories)
         self._token_provider = token_provider
         self._writes_enabled = writes_enabled
         self._transport = transport
@@ -81,6 +99,11 @@ class GitHubClient:
     def writes_enabled(self) -> bool:
         """Whether this trusted client instance permits GitHub writes."""
         return self._writes_enabled
+
+    @property
+    def wiki_writes_enabled(self) -> bool:
+        """Whether this process has any explicitly authorized wiki repositories."""
+        return bool(self._wiki_write_repositories)
 
     async def get_repository(self, repository: str) -> Any:
         """Read repository metadata."""
@@ -416,23 +439,69 @@ class GitHubClient:
         return await self._wiki_read(repository, lambda wiki: wiki.search(query, ref))
 
     async def list_wiki_history(
-        self, repository: str, path: str | None = None, limit: int = 30
+        self, repository: str, path: str | None = None, limit: int = 30,
+        ref: str = "HEAD",
     ) -> Any:
-        return await self._wiki_read(repository, lambda wiki: wiki.history(path, limit))
+        return await self._wiki_read(repository, lambda wiki: wiki.history(path, limit, ref))
 
     async def get_wiki_diff(self, repository: str, base: str, head: str = "HEAD") -> Any:
         return await self._wiki_read(repository, lambda wiki: wiki.diff(base, head))
 
-    async def _wiki_read(self, repository: str, operation: Any) -> Any:
-        repository = self._authorize(repository)
-        credential = await self._token_provider.get_token(
-            repository, {"contents": "read"}
-        )
+    async def write_wiki_pages(
+        self, repository: str, pages: dict[str, str], expected_base: str, message: str
+    ) -> Any:
+        """Publish an exact-repository wiki batch as the verified App Bot."""
+        repository = validate_repository(repository)
+        if repository.casefold() not in self._wiki_write_repositories:
+            raise GitHubAppError("Wiki writes are not enabled for this repository")
         try:
-            with WikiRepository(repository, token=credential.token) as wiki:
-                return operation(wiki)
-        except WikiError as error:
-            raise GitHubAppError(str(error)) from error
+            credential = await self._token_provider.get_token(
+                repository, {"contents": "write"}
+            )
+            author_name, author_email = await self._token_provider.get_bot_identity()
+        except Exception:
+            raise GitHubAppError("Wiki write authentication failed") from None
+        return await asyncio.to_thread(
+            self._wiki_operation, repository, credential.token,
+            lambda wiki: wiki.write(
+                pages, expected_base, message,
+                author_name=author_name, author_email=author_email,
+            ),
+        )
+
+    async def _wiki_read(
+        self, repository: str, operation: Callable[[WikiRepository], Any]
+    ) -> Any:
+        repository = self._authorize(repository)
+        try:
+            credential = await self._token_provider.get_token(
+                repository, {"contents": "read"}
+            )
+        except Exception:
+            raise GitHubAppError("Wiki read authentication failed") from None
+        return await asyncio.to_thread(
+            self._wiki_operation, repository, credential.token, operation
+        )
+
+    @staticmethod
+    def _wiki_operation(
+        repository: str, token: str, operation: Callable[[WikiRepository], Any]
+    ) -> Any:
+        try:
+            with WikiRepository(repository, token=token) as wiki:
+                payload = operation(wiki)
+            encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode("utf-8")
+        except WikiError:
+            raise GitHubAppError(
+                "Wiki operation failed; re-read a snapshot and check paths, refs, and limits"
+            ) from None
+        except Exception:
+            raise GitHubAppError("Wiki operation failed") from None
+        if len(encoded) > _MAX_WIKI_RESULT_BYTES:
+            raise GitHubAppError("GitHub response is too large; narrow the request")
+        if json.dumps(token, ensure_ascii=True)[1:-1].encode("utf-8") in encoded:
+            raise GitHubAppError("Wiki operation returned an unsafe result")
+        return payload
 
     async def get_issue_images(
         self,

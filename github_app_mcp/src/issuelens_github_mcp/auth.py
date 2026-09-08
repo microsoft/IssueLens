@@ -22,6 +22,7 @@ _REFRESH_MARGIN_SECONDS = 300
 _REPOSITORY_PATTERN = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}$"
 )
+_APP_SLUG_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 
 PermissionLevel = Literal["read", "write"]
 Permissions = Mapping[str, PermissionLevel]
@@ -131,9 +132,67 @@ class GitHubAppTokenProvider:
         ] = {}
         self._repository_locks: dict[str, asyncio.Lock] = {}
         self._state_lock = asyncio.Lock()
+        self._bot_identity: tuple[str, str] | None = None
+        self._bot_identity_lock = asyncio.Lock()
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=self._transport, timeout=30)
+
+    async def get_bot_identity(self) -> tuple[str, str]:
+        """Resolve and cache the configured App's verified Bot commit identity."""
+        async with self._bot_identity_lock:
+            if self._bot_identity is not None:
+                return self._bot_identity
+            try:
+                app_jwt = await self._app_jwt(self._clock())
+                headers = {
+                    "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": _API_VERSION,
+                }
+                async with self._client() as client:
+                    response = await client.get(
+                        f"{_API_ROOT}/app",
+                        headers={**headers, "Authorization": f"Bearer {app_jwt}"},
+                    )
+                    response.raise_for_status()
+                    app = response.json()
+                    if (
+                        not isinstance(app, Mapping)
+                        or type(app.get("id")) is not int
+                        or app["id"] != int(self._config.app_id)
+                    ):
+                        raise ValueError
+                    slug = app.get("slug")
+                    if (
+                        not isinstance(slug, str)
+                        or len(slug) > 100
+                        or not _APP_SLUG_PATTERN.fullmatch(slug)
+                    ):
+                        raise ValueError
+                    login = f"{slug}[bot]"
+                    response = await client.get(
+                        f"{_API_ROOT}/users/{login}", headers=headers
+                    )
+                    response.raise_for_status()
+                    user = response.json()
+                    if (
+                        not isinstance(user, Mapping)
+                        or user.get("login") != login
+                        or user.get("type") != "Bot"
+                        or type(user.get("id")) is not int
+                        or user["id"] <= 0
+                    ):
+                        raise ValueError
+                    identity = (
+                        login,
+                        f"{user['id']}+{login}@users.noreply.github.com",
+                    )
+            except Exception:
+                raise GitHubAppError(
+                    "Could not verify the GitHub App bot identity"
+                ) from None
+            self._bot_identity = identity
+            return identity
 
     async def get_token(
         self,

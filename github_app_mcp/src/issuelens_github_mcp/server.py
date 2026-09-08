@@ -14,6 +14,7 @@ from .github import GitHubClient, ReactionTarget
 
 
 _ENABLE_WRITES_ENV = "GITHUB_MCP_ENABLE_WRITES"
+_WIKI_WRITE_REPOSITORIES_ENV = "GITHUB_MCP_WIKI_WRITE_REPOSITORIES"
 
 
 def create_server(
@@ -195,12 +196,33 @@ def create_server(
         return await github.search_wiki(repository, query, ref)
 
     @server.tool()
-    async def list_wiki_history(repository: str, path: str | None = None, limit: int = 30) -> Any:
-        return await github.list_wiki_history(repository, path, limit)
+    async def list_wiki_history(
+        repository: str, path: str | None = None, limit: int = 30, ref: str = "HEAD"
+    ) -> Any:
+        return await github.list_wiki_history(repository, path, limit, ref)
 
     @server.tool()
     async def get_wiki_diff(repository: str, base: str, head: str = "HEAD") -> Any:
         return await github.get_wiki_diff(repository, base, head)
+
+    if github.wiki_writes_enabled:
+
+        @server.tool()
+        async def write_wiki_pages(
+            repository: str,
+            pages: dict[str, str],
+            expected_base: str,
+            message: str,
+        ) -> Any:
+            """Write a bounded page batch to one exactly allowlisted repository wiki.
+
+            Read a new wiki snapshot first and pass its full SHA as expected_base.
+            Paths must be relative Markdown pages: 1-20 pages, at most 64 KiB per
+            page and 256 KiB per batch. The single-line message is at most 512
+            bytes. The backend validates all paths, refs, and limits and rejects
+            conflicting snapshots. Commits use the verified App Bot identity.
+            """
+            return await github.write_wiki_pages(repository, pages, expected_base, message)
 
     if github.writes_enabled:
 
@@ -265,11 +287,26 @@ def build_server_from_environment(
         environment.get(_ENABLE_WRITES_ENV, "false"),
         _ENABLE_WRITES_ENV,
     )
-    provider = GitHubAppTokenProvider(app_config)
-    github = GitHubClient(
-        provider,
-        writes_enabled=writes_enabled,
+    wiki_repositories = environment.get(_WIKI_WRITE_REPOSITORIES_ENV, "").strip()
+    wiki_write_repositories = (
+        [repository.strip() for repository in wiki_repositories.split(",")]
+        if wiki_repositories else []
     )
+    if any(not repository for repository in wiki_write_repositories):
+        raise ConfigurationError(
+            f"{_WIKI_WRITE_REPOSITORIES_ENV} cannot contain blank entries"
+        )
+    provider = GitHubAppTokenProvider(app_config)
+    try:
+        github = GitHubClient(
+            provider,
+            writes_enabled=writes_enabled,
+            wiki_write_repositories=wiki_write_repositories,
+        )
+    except GitHubAppError:
+        raise ConfigurationError(
+            f"{_WIKI_WRITE_REPOSITORIES_ENV} must contain unique owner/repository names"
+        ) from None
     return create_server(github)
 
 

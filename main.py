@@ -188,7 +188,7 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
     "display_name": "Team Memory",
     "description": (
         "Maintains project wiki knowledge using validated team_memory "
-        "customization, evidence-backed proposals, and host-controlled publication."
+        "customization and bounded MCP wiki read/write tools."
     ),
     "prompt": _load_prompt(_agents_dir / "team-memory.md"),
     "skills": ["issuelens-config", "team-memory"],
@@ -261,6 +261,7 @@ def _github_mcp_server() -> dict:
                 config.private_key_secret_uri
             ),
             "GITHUB_MCP_ENABLE_WRITES": "true",
+            "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": "",
             "PYTHONPATH": python_path,
         },
         "working_directory": str(_project_dir),
@@ -319,6 +320,26 @@ def _build_mcp_servers() -> dict:
     return {"github": _github_mcp_server()}
 
 
+def _configured_team_memory_agent(mcp_servers: dict) -> CustomAgentConfig:
+    """Attach the allowlisted wiki writer only to the maintenance agent."""
+    agent = dict(_TEAM_MEMORY_AGENT)
+    repositories = os.environ.get("ISSUELENS_WIKI_WRITE_REPOSITORIES", "").strip()
+    if repositories and "github" in mcp_servers:
+        server = mcp_servers["github"]
+        agent["mcp_servers"] = {
+            "wiki-writer": {
+                **server,
+                "env": {
+                    **server.get("env", {}),
+                    "GITHUB_MCP_ENABLE_WRITES": "false",
+                    "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": repositories,
+                },
+                "tools": ["write_wiki_pages"],
+            },
+        }
+    return agent
+
+
 def _session_options(
     mcp_servers: dict,
     runtime_tools: list[Tool] | None = None,
@@ -343,7 +364,7 @@ def _session_options(
             _TRIAGE_AGENT,
             _FIND_CRITICALS_AGENT,
             _PLAN_AGENT,
-            _TEAM_MEMORY_AGENT,
+            _configured_team_memory_agent(mcp_servers),
         ],
         "agent": "issuelens",
     }

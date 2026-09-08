@@ -1,7 +1,9 @@
 import ast
 import json
+import os
 import pathlib
 import unittest
+from unittest.mock import patch
 
 import yaml
 from copilot.tools import ToolInvocation
@@ -141,7 +143,92 @@ class TeamMemoryInstructionTests(unittest.TestCase):
         self.assertIn("planning, and team-memory capabilities", prompt)
         self.assertIn("do not dispatch routine\nretrieval", prompt)
         self.assertIn("Retrieval cannot propose or publish wiki", prompt)
-        self.assertIn("host publication capability is unavailable", prompt)
+        self.assertIn("write_wiki_pages", prompt)
+        self.assertIn("not stored approval state", prompt)
+
+    def test_database_and_root_git_helpers_are_removed(self):
+        self.assertFalse((ROOT / "team_memory.py").exists())
+        self.assertFalse((ROOT / "wiki.py").exists())
+        self.assertTrue(
+            (ROOT / "github_app_mcp" / "src" / "issuelens_github_mcp" / "wiki.py").is_file()
+        )
+
+
+class TeamMemoryAccessTests(unittest.TestCase):
+    def setUp(self):
+        module = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+        selected = [
+            node for node in module.body
+            if isinstance(node, ast.FunctionDef) and node.name in {
+                "_configured_team_memory_agent", "_session_options",
+            }
+        ]
+        self.agent = {"name": "team-memory", "skills": ["issuelens-config", "team-memory"]}
+        self.namespace = {
+            "os": os,
+            "CustomAgentConfig": dict,
+            "Tool": object,
+            "_TEAM_MEMORY_AGENT": self.agent,
+            "_ISSUELENS_AGENT": {"name": "issuelens"},
+            "_TRIAGE_AGENT": {"name": "triage"},
+            "_FIND_CRITICALS_AGENT": {"name": "find-criticals"},
+            "_PLAN_AGENT": {"name": "plan"},
+            "_RUNTIME_TOOLS": [],
+            "_working_dir": "test-workdir",
+            "_skills_dir": "test-skills",
+            "_byok_provider": lambda: (None, "test-model"),
+            "PermissionHandler": type("PermissionHandler", (), {"approve_all": None}),
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "main.py", "exec"), self.namespace)
+        self.servers = {"github": {
+            "type": "stdio", "command": "python", "args": ["-m", "issuelens_github_mcp.server"],
+            "tools": ["*"],
+            "env": {"GITHUB_MCP_ENABLE_WRITES": "true", "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": ""},
+        }}
+
+    def test_writer_is_agent_local_without_mutating_shared_server(self):
+        with patch.dict(os.environ, {"ISSUELENS_WIKI_WRITE_REPOSITORIES": "microsoft/IssueLens"}):
+            options = self.namespace["_session_options"](self.servers)
+        for agent in options["custom_agents"]:
+            if agent["name"] == "team-memory":
+                writer = agent["mcp_servers"]["wiki-writer"]
+                self.assertEqual(writer["tools"], ["write_wiki_pages"])
+                self.assertEqual(writer["env"]["GITHUB_MCP_ENABLE_WRITES"], "false")
+                self.assertEqual(writer["env"]["GITHUB_MCP_WIKI_WRITE_REPOSITORIES"], "microsoft/IssueLens")
+            else:
+                self.assertNotIn("mcp_servers", agent)
+        self.assertIs(options["mcp_servers"], self.servers)
+        self.assertEqual(self.servers["github"]["env"]["GITHUB_MCP_WIKI_WRITE_REPOSITORIES"], "")
+        self.assertNotIn("mcp_servers", self.agent)
+
+    def test_writer_is_not_available_without_explicit_opt_in(self):
+        with patch.dict(os.environ, {"ISSUELENS_WIKI_WRITE_REPOSITORIES": ""}):
+            options = self.namespace["_session_options"](self.servers)
+        self.assertTrue(all("mcp_servers" not in agent for agent in options["custom_agents"]))
+
+    def test_shared_server_explicitly_clears_inherited_wiki_scope(self):
+        module = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+        function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_github_mcp_server")
+        env = next(
+            value for node in ast.walk(function) if isinstance(node, ast.Dict)
+            for key, value in zip(node.keys, node.values)
+            if isinstance(key, ast.Constant) and key.value == "GITHUB_MCP_WIKI_WRITE_REPOSITORIES"
+        )
+        self.assertEqual(ast.literal_eval(env), "")
+
+    def test_hosted_manifests_forward_only_the_host_opt_in(self):
+        agent = yaml.safe_load((ROOT / "agent.yaml").read_text(encoding="utf-8"))
+        azure = yaml.safe_load((ROOT / "azure.yaml").read_text(encoding="utf-8"))
+        for entries in (
+            agent["environment_variables"],
+            azure["services"]["IssueLens"]["environmentVariables"],
+        ):
+            variables = {entry["name"]: entry["value"] for entry in entries}
+            self.assertEqual(
+                variables["ISSUELENS_WIKI_WRITE_REPOSITORIES"],
+                "${ISSUELENS_WIKI_WRITE_REPOSITORIES}",
+            )
+            self.assertNotIn("GITHUB_MCP_WIKI_WRITE_REPOSITORIES", variables)
 
 
 if __name__ == "__main__":
