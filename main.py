@@ -261,7 +261,6 @@ def _github_mcp_server() -> dict:
                 config.private_key_secret_uri
             ),
             "GITHUB_MCP_ENABLE_WRITES": "true",
-            "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": "",
             "PYTHONPATH": python_path,
         },
         "working_directory": str(_project_dir),
@@ -321,18 +320,17 @@ def _build_mcp_servers() -> dict:
 
 
 def _configured_team_memory_agent(mcp_servers: dict) -> CustomAgentConfig:
-    """Attach the allowlisted wiki writer only to the maintenance agent."""
+    """Attach the App-authenticated wiki writer only to the maintenance agent."""
     agent = dict(_TEAM_MEMORY_AGENT)
-    repositories = os.environ.get("ISSUELENS_WIKI_WRITE_REPOSITORIES", "").strip()
-    if repositories and "github" in mcp_servers:
+    if "github" in mcp_servers:
         server = mcp_servers["github"]
         agent["mcp_servers"] = {
             "wiki-writer": {
                 **server,
+                "args": [*server.get("args", []), "--wiki-writer"],
                 "env": {
                     **server.get("env", {}),
                     "GITHUB_MCP_ENABLE_WRITES": "false",
-                    "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": repositories,
                 },
                 "tools": ["write_wiki_pages"],
             },

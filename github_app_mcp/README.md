@@ -1,8 +1,10 @@
 # IssueLens GitHub MCP server
 
 This subproject is the stdio MCP server for the GitHub operations that IssueLens
-currently needs. The host starts session-owned shared servers and, when opted
-in, a separate `team-memory` agent-local server exposing only `write_wiki_pages`.
+currently needs. The host starts session-owned shared servers and a separate
+team-memory agent-local server exposing only `write_wiki_pages` through the
+parent-supplied internal `--wiki-writer` mode.
+This mode is automatic; users need no environment flag.
 
 ## Security model
 
@@ -10,7 +12,7 @@ in, a separate `team-memory` agent-local server exposing only `write_wiki_pages`
   through `DefaultAzureCredential`. Private-key contents are never accepted as
   command-line arguments or environment variables.
 - Every tool requires an explicit `owner/repository` argument.
-- Reads prefer a repository-scoped GitHub App token and fall back to anonymous
+- REST reads prefer a repository-scoped GitHub App token and fall back to anonymous
   access only for public repositories. Private reads and every write require an
   App installation.
 - Installation tokens are minted for one repository using GitHub's
@@ -18,13 +20,12 @@ in, a separate `team-memory` agent-local server exposing only `write_wiki_pages`
   The cache key includes the repository and permission set.
 - Issue write tools are absent from MCP discovery unless the trusted host sets
   `GITHUB_MCP_ENABLE_WRITES=true`. The GitHub client enforces the same gate.
-- Wiki writes have a separate explicit repository allowlist,
-  `GITHUB_MCP_WIKI_WRITE_REPOSITORIES`, empty by default. Shared reader/triage
-  servers receive an explicitly empty allowlist. This capability opt-in and
+- Only the team-memory agent-local server exposes wiki writes. Shared
+  reader/triage servers do not expose `write_wiki_pages`. Tool availability and
   repository policy do not authorize a maintenance job to write.
 - The server exposes fixed GitHub REST routes. It has no generic HTTP, REST, or
   GraphQL tool. Wiki operations use the bundled `.wiki` Git backend for only
-  the explicit repository's own `.wiki.git`, with no caller-selected remote.
+  the validated wiki destination's `.wiki.git`, with no caller-selected remote.
 - Search qualifiers cannot change repository, organization, or user scope.
   Repository paths, pagination, file sizes, comments, names, and tool results
   are bounded.
@@ -36,7 +37,7 @@ through bounded anonymous reads without an installation.
 
 ## Tools
 
-Read tools are always registered. The permission shown is used when an App
+The shared server registers these REST read tools. The permission shown is used when an App
 installation is available; public repositories can fall back to anonymous
 access:
 
@@ -52,9 +53,32 @@ access:
 | `list_labels` | Issues: read |
 | `get_file` | Contents: read |
 
-Wiki reads use the same repository-scoped App boundary:
+Wiki tools always take `repository` as the **source project**, even when its
+memory is stored in another repository's wiki. The shared package policy parser
+validates the source's structured `instructions.team_memory` with a required
+policy `path` and optional `wiki_repository`. The latter is a GitHub parent
+repository identifier, not a wiki UI name or Git URL. The config tool returns
+resolved `wiki_repository` alongside policy `content`; Markdown guides only
+organization and topics, never target, arbitrary Git URL, token, or shell settings.
 
-| Tool | Purpose | Preferred App permission |
+Every wiki read/write tool independently re-reads and validates that same mapping
+and resolves credentials and transport to the destination. An omitted field,
+config, or domain defaults to the source project's own wiki. A misconfigured or
+inaccessible target fails without silent fallback. The App must be installed at
+the destination with the required read/write permission, not just at the source;
+tokens are scoped to that actual destination and operation. Wiki reads require
+that App access rather than the anonymous fallback used by public REST reads.
+Installation access is not source-user authorization.
+
+Validated `team_memory.wiki_repository` selects only the wiki capability's
+destination; it does not broaden source reads, other writes, or notifications.
+Do not publish private-source knowledge to a public wiki or read a private wiki
+for public-source context. Other mappings may share a privacy category without
+having identical ACLs or authorizing disclosure to another audience.
+
+Wiki reads use destination-scoped App access:
+
+| Tool | Purpose | Required App permission |
 |---|---|---|
 | `get_wiki_snapshot` | Resolve the initialized wiki's default branch and full SHA | Contents: read |
 | `list_wiki_pages` | List bounded Markdown pages at a snapshot | Contents: read |
@@ -87,14 +111,15 @@ acknowledgement remains after processing finishes.
 
 ### Direct wiki maintenance
 
-`write_wiki_pages` requires an explicit target in
-`GITHUB_MCP_WIKI_WRITE_REPOSITORIES` and a repository-scoped App token with
-**Contents: write**. It writes only an existing initialized wiki; Git must be
-installed. The tool accepts this bounded shape:
+`write_wiki_pages` is available only to the team-memory agent and requires an App
+token scoped to the mapped destination with **Contents: write**. It writes only
+an existing initialized wiki; Git must be installed. For source
+`microsoft/project` configured with `wiki_repository: microsoft/team-knowledge`,
+the tool still accepts the source project, not the destination:
 
 ```python
 write_wiki_pages(
-  repository="owner/repository",
+  repository="microsoft/project",
   pages={"Architecture.md": full_utf8_content},
   expected_base=wiki_sha,
   message=short_summary,
@@ -104,7 +129,8 @@ write_wiki_pages(
 `wiki_sha` is the full SHA returned by the snapshot read. Supply complete UTF-8
 contents for changed `.md` pages, not patches: at most 20 pages, 64 KiB per page,
 and 256 KiB total. Create/update only; deletion and rename are deferred. The
-short commit message includes the PR/source SHA where relevant. No generic URL,
+pages cite evidence and include the full source commit SHA, not an abbreviation,
+where relevant; the short commit message also includes that full SHA. No generic URL,
 force, token, credential, or approval arguments are accepted.
 
 The backend in [src/issuelens_github_mcp/wiki.py](src/issuelens_github_mcp/wiki.py)
@@ -113,7 +139,9 @@ a non-force update against `expected_base`. No separate host publisher,
 database, or proposal/approval persistence is involved. If no knowledge changes,
 do not write. On a stale-base conflict, re-read and regenerate against the new
 snapshot; never blindly retry. If a response was lost, compare desired contents
-with current pages first. Report the new SHA and status only when confirmed by
+with current pages first. If a mapping change conflicts with the read SHA, stop
+and re-establish destination, authorization, and evidence; never automatically
+overwrite or reuse edits against another wiki. Report the new SHA and status only when confirmed by
 the tool result, not merely because a write was attempted.
 
 Only an explicit current-user wiki-update request or an accepted trusted
@@ -132,20 +160,20 @@ functional automatic-update integration.
 | `GITHUB_APP_ID` | Yes | Numeric GitHub App ID |
 | `GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Yes | Azure Key Vault secret URI containing the App PEM |
 | `GITHUB_MCP_ENABLE_WRITES` | No | `false` by default; enables issue write tools only for an authorized session |
-| `GITHUB_MCP_WIKI_WRITE_REPOSITORIES` | No | Empty by default; comma-separated explicit `owner/repository` wiki-write allowlist for standalone MCP or the maintenance agent-local server |
 
-In the IssueLens host, configure `ISSUELENS_WIKI_WRITE_REPOSITORIES` instead.
-The host maps it to `GITHUB_MCP_WIKI_WRITE_REPOSITORIES` only for the `team-memory`
-agent-local MCP server with `tools: ["write_wiki_pages"]`. The shared server gets
-an explicitly empty wiki-write allowlist even when issue writes are enabled.
-Standalone MCP supports the MCP variable directly; configure it only for a
-trusted maintenance context. Neither allowlist is permission from repository
-policy or a substitute for explicit job authorization.
+Wiki destination configuration belongs only in the source project's structured
+`instructions.team_memory.wiki_repository`; there is no per-repository App
+environment configuration. The parent supplies `--wiki-writer` automatically
+only for the team-memory agent-local MCP server with
+`tools: ["write_wiki_pages"]`. Users need no environment flag. The existing
+`GITHUB_MCP_ENABLE_WRITES` gate remains for triage issue writes and does not
+enable wiki writes or require a new user setting. Explicit job authorization
+and destination App installation access are both still required.
 
 The process identity needs Azure Key Vault secret `get` permission. The GitHub
 App needs Metadata read, Contents read, Issues read/write, and Pull requests
-read/write for the issue toolset; opt-in wiki maintenance additionally needs
-Contents write. GitHub narrows each minted token below the App's maximum
+read/write for the issue toolset; wiki maintenance additionally needs Contents
+write at the destination. GitHub narrows each minted token below the App's maximum
 permissions. All private-key, installation, and token caches live
 only in the stdio process and are discarded when that session-owned process
 exits.
@@ -198,7 +226,6 @@ Equivalent Copilot SDK stdio configuration shape:
             "https://vault-name.vault.azure.net/secrets/github-app-key"
         ),
         "GITHUB_MCP_ENABLE_WRITES": "false",
-        "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": "",
     },
     "tools": ["*"],
 }

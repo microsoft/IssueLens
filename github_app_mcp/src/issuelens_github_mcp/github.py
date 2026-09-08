@@ -16,6 +16,7 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 
 from .auth import GitHubAppError, GitHubAppTokenProvider, Permissions, validate_repository
+from .policy import resolve_wiki_repository
 from .wiki import WikiError, WikiRepository
 
 
@@ -73,24 +74,12 @@ class GitHubClient:
         token_provider: GitHubAppTokenProvider,
         *,
         writes_enabled: bool = False,
-        wiki_write_repositories: Sequence[str] = (),
+        wiki_writes_enabled: bool = False,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        if isinstance(wiki_write_repositories, (str, bytes)) or not isinstance(
-            wiki_write_repositories, Sequence
-        ):
-            raise GitHubAppError("wiki_write_repositories must be a repository list")
-        repositories: set[str] = set()
-        for repository in wiki_write_repositories:
-            if not isinstance(repository, str):
-                raise GitHubAppError("wiki_write_repositories must contain repositories")
-            normalized = validate_repository(repository).casefold()
-            if normalized.split("/", 1)[1] in {".", ".."}:
-                raise GitHubAppError("Repository must use the owner/repository format")
-            if normalized in repositories:
-                raise GitHubAppError("wiki_write_repositories contains duplicate repositories")
-            repositories.add(normalized)
-        self._wiki_write_repositories = frozenset(repositories)
+        if not isinstance(wiki_writes_enabled, bool):
+            raise GitHubAppError("wiki_writes_enabled must be a boolean")
+        self._wiki_writes_enabled = wiki_writes_enabled
         self._token_provider = token_provider
         self._writes_enabled = writes_enabled
         self._transport = transport
@@ -102,8 +91,8 @@ class GitHubClient:
 
     @property
     def wiki_writes_enabled(self) -> bool:
-        """Whether this process has any explicitly authorized wiki repositories."""
-        return bool(self._wiki_write_repositories)
+        """Whether this trusted client instance exposes the wiki writer capability."""
+        return self._wiki_writes_enabled
 
     async def get_repository(self, repository: str) -> Any:
         """Read repository metadata."""
@@ -450,46 +439,80 @@ class GitHubClient:
     async def write_wiki_pages(
         self, repository: str, pages: dict[str, str], expected_base: str, message: str
     ) -> Any:
-        """Publish an exact-repository wiki batch as the verified App Bot."""
+        """Publish source-project memory to its configured wiki as the App Bot."""
         repository = validate_repository(repository)
-        if repository.casefold() not in self._wiki_write_repositories:
-            raise GitHubAppError("Wiki writes are not enabled for this repository")
+        if not self.wiki_writes_enabled:
+            raise GitHubAppError("Wiki writes are not enabled")
+        wiki_repository = await self._resolve_wiki_repository(repository, write=True)
         try:
             credential = await self._token_provider.get_token(
-                repository, {"contents": "write"}
+                wiki_repository, {"contents": "write"}
             )
             author_name, author_email = await self._token_provider.get_bot_identity()
         except Exception:
             raise GitHubAppError("Wiki write authentication failed") from None
         return await asyncio.to_thread(
-            self._wiki_operation, repository, credential.token,
+            self._wiki_operation, repository, wiki_repository, credential.token,
             lambda wiki: wiki.write(
                 pages, expected_base, message,
                 author_name=author_name, author_email=author_email,
             ),
         )
 
+    async def _resolve_wiki_repository(self, repository: str, *, write: bool) -> str:
+        try:
+            wiki_repository = await resolve_wiki_repository(self, repository)
+        except Exception:
+            raise GitHubAppError("Team memory customization could not be loaded") from None
+        if repository.casefold() == wiki_repository.casefold():
+            return wiki_repository
+        try:
+            source_metadata = await self.get_repository(repository)
+            wiki_metadata = await self.get_repository(wiki_repository)
+            visibilities = []
+            for metadata in (source_metadata, wiki_metadata):
+                visibility = metadata.get("visibility") if isinstance(metadata, Mapping) else None
+                if not isinstance(visibility, str) or visibility not in {"public", "private", "internal"}:
+                    raise ValueError("Invalid repository visibility")
+                visibilities.append(visibility)
+        except Exception:
+            raise GitHubAppError("Team memory repository visibility could not be verified") from None
+        source_visibility, wiki_visibility = visibilities
+        if write and source_visibility != "public" and wiki_visibility == "public":
+            raise GitHubAppError("Team memory cannot write non-public project context to a public wiki")
+        if not write and source_visibility == "public" and wiki_visibility != "public":
+            raise GitHubAppError("Team memory cannot read a non-public wiki in a public project context")
+        return wiki_repository
+
     async def _wiki_read(
         self, repository: str, operation: Callable[[WikiRepository], Any]
     ) -> Any:
         repository = self._authorize(repository)
+        wiki_repository = await self._resolve_wiki_repository(repository, write=False)
         try:
             credential = await self._token_provider.get_token(
-                repository, {"contents": "read"}
+                wiki_repository, {"contents": "read"}
             )
         except Exception:
             raise GitHubAppError("Wiki read authentication failed") from None
         return await asyncio.to_thread(
-            self._wiki_operation, repository, credential.token, operation
+            self._wiki_operation, repository, wiki_repository, credential.token, operation
         )
 
     @staticmethod
     def _wiki_operation(
-        repository: str, token: str, operation: Callable[[WikiRepository], Any]
+        source_repository: str, repository: str, token: str,
+        operation: Callable[[WikiRepository], Any],
     ) -> Any:
         try:
             with WikiRepository(repository, token=token) as wiki:
                 payload = operation(wiki)
+            if isinstance(payload, dict):
+                payload = {
+                    **payload,
+                    "source_repository": source_repository,
+                    "wiki_repository": repository,
+                }
             encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode("utf-8")
         except WikiError:
             raise GitHubAppError(

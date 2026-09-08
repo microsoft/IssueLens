@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -14,7 +15,6 @@ from .github import GitHubClient, ReactionTarget
 
 
 _ENABLE_WRITES_ENV = "GITHUB_MCP_ENABLE_WRITES"
-_WIKI_WRITE_REPOSITORIES_ENV = "GITHUB_MCP_WIKI_WRITE_REPOSITORIES"
 
 
 def create_server(
@@ -31,7 +31,10 @@ def create_server(
         instructions=(
             "Every tool requires an explicit owner/repository value. The "
             "server prefers repository-scoped GitHub App access and may fall "
-            "back to anonymous access for bounded reads of public repositories."
+            "back to anonymous access for bounded reads of public repositories. "
+            "For wiki tools, repository is always the source project. Its "
+            "validated team-memory customization selects the wiki repository, "
+            "which requires App access; wiki operations never use anonymous access."
         ),
         version="0.1.0",
     )
@@ -181,28 +184,34 @@ def create_server(
 
     @server.tool()
     async def get_wiki_snapshot(repository: str) -> Any:
+        """Read the source project's configured wiki snapshot using App access."""
         return await github.get_wiki_snapshot(repository)
 
     @server.tool()
     async def list_wiki_pages(repository: str, ref: str = "HEAD") -> Any:
+        """List pages in the source project's configured wiki using App access."""
         return await github.list_wiki_pages(repository, ref)
 
     @server.tool()
     async def get_wiki_page(repository: str, path: str, ref: str = "HEAD") -> Any:
+        """Read a page in the source project's configured wiki using App access."""
         return await github.get_wiki_page(repository, path, ref)
 
     @server.tool()
     async def search_wiki(repository: str, query: str, ref: str = "HEAD") -> Any:
+        """Search the source project's configured wiki using App access."""
         return await github.search_wiki(repository, query, ref)
 
     @server.tool()
     async def list_wiki_history(
         repository: str, path: str | None = None, limit: int = 30, ref: str = "HEAD"
     ) -> Any:
+        """Read history in the source project's configured wiki using App access."""
         return await github.list_wiki_history(repository, path, limit, ref)
 
     @server.tool()
     async def get_wiki_diff(repository: str, base: str, head: str = "HEAD") -> Any:
+        """Diff snapshots in the source project's configured wiki using App access."""
         return await github.get_wiki_diff(repository, base, head)
 
     if github.wiki_writes_enabled:
@@ -214,8 +223,11 @@ def create_server(
             expected_base: str,
             message: str,
         ) -> Any:
-            """Write a bounded page batch to one exactly allowlisted repository wiki.
+            """Write source-project memory to its configured wiki using App access.
 
+            repository is the source project, never a raw wiki destination or
+            remote. Validated team-memory customization resolves the destination;
+            its App installation and contents-write token authorize access.
             Read a new wiki snapshot first and pass its full SHA as expected_base.
             Paths must be relative Markdown pages: 1-20 pages, at most 64 KiB per
             page and 256 KiB per batch. The single-line message is at most 512
@@ -279,34 +291,24 @@ def create_server(
 
 def build_server_from_environment(
     environment: Mapping[str, str] | None = None,
+    *,
+    wiki_writer: bool = False,
 ) -> MCPServer:
-    """Build a server using only validated environment configuration."""
+    """Build a server with validated credentials and an explicit internal role."""
+    if not isinstance(wiki_writer, bool):
+        raise ConfigurationError("wiki_writer must be a boolean")
     environment = os.environ if environment is None else environment
     app_config = GitHubAppConfig.from_environment(environment)
-    writes_enabled = _boolean(
+    writes_enabled = False if wiki_writer else _boolean(
         environment.get(_ENABLE_WRITES_ENV, "false"),
         _ENABLE_WRITES_ENV,
     )
-    wiki_repositories = environment.get(_WIKI_WRITE_REPOSITORIES_ENV, "").strip()
-    wiki_write_repositories = (
-        [repository.strip() for repository in wiki_repositories.split(",")]
-        if wiki_repositories else []
-    )
-    if any(not repository for repository in wiki_write_repositories):
-        raise ConfigurationError(
-            f"{_WIKI_WRITE_REPOSITORIES_ENV} cannot contain blank entries"
-        )
     provider = GitHubAppTokenProvider(app_config)
-    try:
-        github = GitHubClient(
-            provider,
-            writes_enabled=writes_enabled,
-            wiki_write_repositories=wiki_write_repositories,
-        )
-    except GitHubAppError:
-        raise ConfigurationError(
-            f"{_WIKI_WRITE_REPOSITORIES_ENV} must contain unique owner/repository names"
-        ) from None
+    github = GitHubClient(
+        provider,
+        writes_enabled=writes_enabled,
+        wiki_writes_enabled=wiki_writer,
+    )
     return create_server(github)
 
 
@@ -321,8 +323,14 @@ def _boolean(value: str, name: str) -> bool:
 
 def main() -> None:
     """Run the server over stdio without writing non-protocol data to stdout."""
+    parser = argparse.ArgumentParser(description="IssueLens GitHub MCP server")
+    parser.add_argument(
+        "--wiki-writer", action="store_true",
+        help="Internal wiki-writer role; disables issue writes",
+    )
+    options = parser.parse_args()
     try:
-        server = build_server_from_environment()
+        server = build_server_from_environment(wiki_writer=options.wiki_writer)
     except (ConfigurationError, GitHubAppError) as error:
         raise SystemExit(f"IssueLens GitHub MCP configuration failed: {error}") from error
     server.run(transport="stdio")

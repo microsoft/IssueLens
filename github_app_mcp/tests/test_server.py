@@ -4,6 +4,7 @@ import pathlib
 import sys
 import unittest
 from typing import cast
+from unittest.mock import patch
 
 from mcp import Client
 
@@ -16,6 +17,7 @@ from issuelens_github_mcp.github import GitHubClient  # noqa: E402
 from issuelens_github_mcp.server import (  # noqa: E402
     build_server_from_environment,
     create_server,
+    main,
 )
 
 
@@ -185,6 +187,28 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             ("list_wiki_history", ("microsoft/IssueLens", "Home.md", 5, "a" * 40), {}),
         ])
 
+    async def test_all_wiki_read_schemas_keep_source_repository_and_bounded_arguments(self):
+        github = FakeGitHubClient()
+        cases = {
+            "get_wiki_snapshot": {},
+            "list_wiki_pages": {"ref": "a" * 40},
+            "get_wiki_page": {"path": "Home.md", "ref": "a" * 40},
+            "search_wiki": {"query": "memory", "ref": "a" * 40},
+            "list_wiki_history": {"path": "Home.md", "limit": 5, "ref": "a" * 40},
+            "get_wiki_diff": {"base": "a" * 40, "head": "b" * 40},
+        }
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            for name, arguments in cases.items():
+                with self.subTest(tool=name):
+                    parameters = {"repository": "owner/source", **arguments}
+                    self.assertEqual(set(tools[name].input_schema["properties"]), set(parameters))
+                    self.assertIn("source project", tools[name].description)
+                    self.assertIn("configured wiki", tools[name].description)
+                    result = await client.call_tool(name, parameters)
+                    self.assertFalse(result.is_error)
+                    self.assertEqual(github.calls[-1], (name, tuple(parameters.values()), {}))
+
     async def test_get_file_forwarding_remains_unchanged(self):
         github = FakeGitHubClient()
         async with Client(create_server(cast(GitHubClient, github))) as client:
@@ -259,39 +283,45 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EnvironmentDiscoveryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_wiki_allowlist_and_triage_flag_are_independent_and_lazy(self):
-        for settings, expected in (
-            ({}, READ_TOOLS),
-            ({"GITHUB_MCP_WIKI_WRITE_REPOSITORIES": " "}, READ_TOOLS),
-            ({"GITHUB_MCP_ENABLE_WRITES": "true"}, READ_TOOLS | WRITE_TOOLS),
-            ({"GITHUB_MCP_WIKI_WRITE_REPOSITORIES": " microsoft/IssueLens , owner/Other "}, READ_TOOLS | {"write_wiki_pages"}),
-            ({"GITHUB_MCP_ENABLE_WRITES": "true", "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": "microsoft/IssueLens"}, READ_TOOLS | WRITE_TOOLS | {"write_wiki_pages"}),
+    async def test_wiki_writer_role_and_triage_flag_are_independent_and_lazy(self):
+        for settings, wiki_writer, expected in (
+            ({}, False, READ_TOOLS),
+            ({"GITHUB_MCP_ENABLE_WRITES": "true"}, False, READ_TOOLS | WRITE_TOOLS),
+            ({}, True, READ_TOOLS | {"write_wiki_pages"}),
+            ({"GITHUB_MCP_ENABLE_WRITES": "true"}, True, READ_TOOLS | {"write_wiki_pages"}),
+            ({"GITHUB_MCP_ENABLE_WRITES": "not-a-triage-process"}, True, READ_TOOLS | {"write_wiki_pages"}),
         ):
-            with self.subTest(settings=settings):
-                server = build_server_from_environment({
-                    "GITHUB_APP_ID": "1816975",
-                    "GITHUB_APP_PRIVATE_KEY_SECRET_URI": "https://issuelens.vault.azure.net/secrets/not-read-at-startup",
-                    **settings,
-                })
-                async with Client(server) as client:
-                    tools = await client.list_tools()
+            with self.subTest(settings=settings, wiki_writer=wiki_writer):
+                with patch("issuelens_github_mcp.server.GitHubAppTokenProvider") as provider:
+                    server = build_server_from_environment({
+                        "GITHUB_APP_ID": "1816975",
+                        "GITHUB_APP_PRIVATE_KEY_SECRET_URI": "https://issuelens.vault.azure.net/secrets/not-read-at-startup",
+                        **settings,
+                    }, wiki_writer=wiki_writer)
+                    async with Client(server) as client:
+                        tools = await client.list_tools()
+                    provider.return_value.get_token.assert_not_called()
+                    provider.return_value.get_bot_identity.assert_not_called()
                 self.assertEqual({tool.name for tool in tools.tools}, expected)
 
 
 class EnvironmentTests(unittest.TestCase):
-    def test_wiki_allowlist_rejects_blanks_malformed_names_and_duplicates(self):
-        for value in (
-            ",", "microsoft/IssueLens,", ",microsoft/IssueLens",
-            "microsoft/IssueLens, ,owner/other", "invalid", "owner/*", "owner/..",
-            "https://github.com/microsoft/IssueLens", "owner/repo,OWNER/REPO",
-        ):
+    def test_wiki_writer_role_requires_a_boolean(self):
+        for value in (None, 0, 1, "true", "false", [], {}):
             with self.subTest(value=value):
-                with self.assertRaisesRegex(ConfigurationError, "GITHUB_MCP_WIKI_WRITE_REPOSITORIES"):
-                    build_server_from_environment({
-                        "GITHUB_APP_ID": "1816975",
-                        "GITHUB_APP_PRIVATE_KEY_SECRET_URI": "https://issuelens.vault.azure.net/secrets/not-read-at-startup",
-                        "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": value,
-                    })
+                with self.assertRaisesRegex(ConfigurationError, "wiki_writer must be a boolean"):
+                    build_server_from_environment({}, wiki_writer=value)
+
+    def test_cli_selects_internal_role_without_a_wiki_environment_setting(self):
+        for arguments, wiki_writer in (([], False), (["--wiki-writer"], True)):
+            with self.subTest(arguments=arguments):
+                with (
+                    patch.object(sys, "argv", ["issuelens_github_mcp.server", *arguments]),
+                    patch("issuelens_github_mcp.server.build_server_from_environment") as build,
+                ):
+                    main()
+                    build.assert_called_once_with(wiki_writer=wiki_writer)
+                    build.return_value.run.assert_called_once_with(transport="stdio")
 
     def test_write_flag_must_be_boolean(self):
         with self.assertRaisesRegex(ConfigurationError, "true or false"):

@@ -1,9 +1,7 @@
 import ast
 import json
-import os
 import pathlib
 import unittest
-from unittest.mock import patch
 
 import yaml
 from copilot.tools import ToolInvocation
@@ -110,7 +108,8 @@ class TeamMemoryInstructionTests(unittest.TestCase):
         self.assertIn('domain="team_memory"', prompt)
         self.assertIn("call the `issuelens-config` tool", prompt)
         self.assertIn("returned `content`", prompt)
-        self.assertIn("stop memory maintenance", prompt)
+        self.assertIn("`wiki_repository`", prompt)
+        self.assertIn("stops maintenance without silent source-wiki fallback", prompt)
         self.assertIn("priority knowledge areas", prompt)
         self.assertIn("Wiki writes belong to this maintenance job", prompt)
         self.assertIn("publication result confirms the wiki commit", prompt)
@@ -125,8 +124,9 @@ class TeamMemoryInstructionTests(unittest.TestCase):
         self.assertIn("Read-only", frontmatter["description"])
         self.assertIn('domain="team_memory"', prompt)
         self.assertIn("stops wiki retrieval", prompt)
-        self.assertIn("returned `content`", prompt)
-        self.assertIn("must not create proposals", prompt)
+        self.assertIn("returned\n`content`", prompt)
+        self.assertIn("returned `wiki_repository`", prompt)
+        self.assertIn("must not call `write_wiki_pages`", prompt)
         self.assertIn("same snapshot", prompt)
         self.assertIn("Do not delegate ordinary retrieval", prompt)
 
@@ -136,13 +136,13 @@ class TeamMemoryInstructionTests(unittest.TestCase):
         )
         self.assertIn("- `team_memory`", prompt)
         self.assertIn("inclusion/exclusion guidance", prompt)
-        self.assertIn("independent wiki-write authorization", prompt)
+        self.assertIn("Policy grants no independent write permission", prompt)
 
     def test_orchestrator_routes_maintenance_not_shared_retrieval(self):
         prompt = (ROOT / "agents.md").read_text(encoding="utf-8")
         self.assertIn("planning, and team-memory capabilities", prompt)
         self.assertIn("do not dispatch routine\nretrieval", prompt)
-        self.assertIn("Retrieval cannot propose or publish wiki", prompt)
+        self.assertIn("Retrieval cannot publish wiki", prompt)
         self.assertIn("write_wiki_pages", prompt)
         self.assertIn("not stored approval state", prompt)
 
@@ -165,7 +165,6 @@ class TeamMemoryAccessTests(unittest.TestCase):
         ]
         self.agent = {"name": "team-memory", "skills": ["issuelens-config", "team-memory"]}
         self.namespace = {
-            "os": os,
             "CustomAgentConfig": dict,
             "Tool": object,
             "_TEAM_MEMORY_AGENT": self.agent,
@@ -183,40 +182,38 @@ class TeamMemoryAccessTests(unittest.TestCase):
         self.servers = {"github": {
             "type": "stdio", "command": "python", "args": ["-m", "issuelens_github_mcp.server"],
             "tools": ["*"],
-            "env": {"GITHUB_MCP_ENABLE_WRITES": "true", "GITHUB_MCP_WIKI_WRITE_REPOSITORIES": ""},
+            "env": {"GITHUB_MCP_ENABLE_WRITES": "true"},
         }}
 
     def test_writer_is_agent_local_without_mutating_shared_server(self):
-        with patch.dict(os.environ, {"ISSUELENS_WIKI_WRITE_REPOSITORIES": "microsoft/IssueLens"}):
-            options = self.namespace["_session_options"](self.servers)
+        options = self.namespace["_session_options"](self.servers)
         for agent in options["custom_agents"]:
             if agent["name"] == "team-memory":
                 writer = agent["mcp_servers"]["wiki-writer"]
                 self.assertEqual(writer["tools"], ["write_wiki_pages"])
                 self.assertEqual(writer["env"]["GITHUB_MCP_ENABLE_WRITES"], "false")
-                self.assertEqual(writer["env"]["GITHUB_MCP_WIKI_WRITE_REPOSITORIES"], "microsoft/IssueLens")
+                self.assertEqual(writer["args"], ["-m", "issuelens_github_mcp.server", "--wiki-writer"])
             else:
                 self.assertNotIn("mcp_servers", agent)
         self.assertIs(options["mcp_servers"], self.servers)
-        self.assertEqual(self.servers["github"]["env"]["GITHUB_MCP_WIKI_WRITE_REPOSITORIES"], "")
+        self.assertNotIn("--wiki-writer", self.servers["github"]["args"])
         self.assertNotIn("mcp_servers", self.agent)
 
-    def test_writer_is_not_available_without_explicit_opt_in(self):
-        with patch.dict(os.environ, {"ISSUELENS_WIKI_WRITE_REPOSITORIES": ""}):
-            options = self.namespace["_session_options"](self.servers)
+    def test_writer_is_not_available_without_github_server(self):
+        options = self.namespace["_session_options"]({})
         self.assertTrue(all("mcp_servers" not in agent for agent in options["custom_agents"]))
 
-    def test_shared_server_explicitly_clears_inherited_wiki_scope(self):
+    def test_shared_server_does_not_launch_writer_mode(self):
         module = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
         function = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "_github_mcp_server")
-        env = next(
+        arguments = next(
             value for node in ast.walk(function) if isinstance(node, ast.Dict)
             for key, value in zip(node.keys, node.values)
-            if isinstance(key, ast.Constant) and key.value == "GITHUB_MCP_WIKI_WRITE_REPOSITORIES"
+            if isinstance(key, ast.Constant) and key.value == "args"
         )
-        self.assertEqual(ast.literal_eval(env), "")
+        self.assertEqual(ast.literal_eval(arguments), ["-m", "issuelens_github_mcp.server"])
 
-    def test_hosted_manifests_forward_only_the_host_opt_in(self):
+    def test_no_wiki_repository_environment_configuration(self):
         agent = yaml.safe_load((ROOT / "agent.yaml").read_text(encoding="utf-8"))
         azure = yaml.safe_load((ROOT / "azure.yaml").read_text(encoding="utf-8"))
         for entries in (
@@ -224,11 +221,16 @@ class TeamMemoryAccessTests(unittest.TestCase):
             azure["services"]["IssueLens"]["environmentVariables"],
         ):
             variables = {entry["name"]: entry["value"] for entry in entries}
-            self.assertEqual(
-                variables["ISSUELENS_WIKI_WRITE_REPOSITORIES"],
-                "${ISSUELENS_WIKI_WRITE_REPOSITORIES}",
-            )
+            self.assertNotIn("ISSUELENS_WIKI_WRITE_REPOSITORIES", variables)
             self.assertNotIn("GITHUB_MCP_WIKI_WRITE_REPOSITORIES", variables)
+        main_source = (ROOT / "main.py").read_text(encoding="utf-8")
+        self.assertNotIn("WIKI_WRITE_REPOSITORIES", main_source)
+
+    def test_actual_project_customization_names_its_wiki(self):
+        config = yaml.safe_load((ROOT / ".github" / "issuelens.yml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            config["instructions"]["team_memory"]["wiki_repository"], "microsoft/IssueLens"
+        )
 
 
 if __name__ == "__main__":

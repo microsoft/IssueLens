@@ -8,64 +8,88 @@ A GitHub issue-triage and planning agent built on the [GitHub Copilot SDK](https
 
 Both protocols run in the same process and share the same orchestrator, skills,
 four sub-agents, and bundled GitHub App MCP reads. Wiki writes use a separate,
-opt-in MCP server local to the maintenance agent.
+parent-configured MCP server local to the maintenance agent.
 
-### Team memory (opt-in)
+### Team memory
 
 The `team-memory` agent makes minimal, evidence-backed Markdown wiki updates
 through `write_wiki_pages`. The shared `team-memory` skill remains read-only and
 is preloaded on every agent, including the orchestrator. Agents retrieve relevant
 knowledge directly without delegating ordinary reads to the maintenance agent.
 
-Both paths first call `issuelens-config` with the explicit repository and
-`domain="team_memory"`, then apply its returned `content`. Configure the policy
-in `.github/issuelens.yml`:
+Both paths first call `issuelens-config` with the explicit source project and
+`domain="team_memory"`. Read its returned `wiki_repository` for the validated
+destination and `content` for organization and topics. For example, to store
+`microsoft/project` memory in `microsoft/team-knowledge.wiki.git`, configure the
+source project's `.github/issuelens.yml`:
 
 ```yaml
 version: 1
 instructions:
   team_memory:
     path: .github/issuelens/team-memory.md
+    wiki_repository: microsoft/team-knowledge
 ```
 
-The Markdown policy describes wiki location/access, structure and navigation,
-priority knowledge areas, content inclusion/exclusion rules, and retrieval
-guidance. See [the policy example](examples/team-memory.md) and
-[IssueLens's own customization](.github/issuelens/team-memory.md). An absent
-config or omitted domain uses built-in behavior; invalid config stops memory
-access rather than silently applying defaults. Other agent work may continue
-with authorized source evidence while reporting that memory was unavailable.
+The policy `path` remains required when the domain is present. Optional
+`wiki_repository` must pass GitHub parent repository identifier validation as
+`owner/repository`; it is not a wiki UI name, `.wiki.git` URL, or arbitrary Git
+remote. The shared package policy parser returns its resolved value alongside
+`content` in the config-tool response. Markdown supplies only organization,
+navigation, topics, inclusion/exclusion, and evidence guidance; it cannot override
+the target or supply arbitrary Git URLs, tokens, or shell settings.
 
-The supported destination is the explicit repository's own `.wiki.git`.
-Customization cannot grant writes, select arbitrary remotes or other projects,
-or supply credentials. Keep private-project knowledge out of public wikis.
+All wiki read/write MCP calls in this example still use
+`repository="microsoft/project"`, **not** `microsoft/team-knowledge`. Every tool
+independently re-reads and validates the same mapping, then resolves credentials
+and Git transport to the destination. See [the policy example](examples/team-memory.md) and
+[IssueLens's own customization](.github/issuelens/team-memory.md). An absent
+field, config, or domain defaults to the source project's own wiki. Invalid
+configuration or an inaccessible target stops memory access without silent
+source-wiki fallback. Other work may continue with authorized source evidence
+while reporting that memory was unavailable.
+
+Validated `team_memory.wiki_repository` is a narrow scope exception selecting
+only the wiki capability's destination. It grants no other writes, additional
+source repositories, or notification scope. Never publish private-source
+knowledge to a public wiki or read a private wiki for public-source context.
+Mappings across projects may share a privacy category without identical ACLs
+or permission to disclose to another audience. Source-user authorization is
+separate from App installation access.
 Writes require an explicit current-user wiki-update request or an accepted
-trusted postmerge job authorizing that target; existing issue-loop commands and
+trusted postmerge job authorizing the source project and its mapped wiki; existing issue-loop commands and
 repository policy alone do not authorize them. Sensitive, conflicting,
 destructive, or unsupported changes need ordinary human interaction.
 
-Set `ISSUELENS_WIKI_WRITE_REPOSITORIES` to a comma-separated explicit owner/repo
-allowlist (default empty). The host passes it as
-`GITHUB_MCP_WIKI_WRITE_REPOSITORIES` only to the `team-memory` agent-local MCP
-server with `tools: ["write_wiki_pages"]`; shared reader/triage servers receive
-an explicitly empty wiki-write allowlist. This enables capability, not permission
-from policy. Git, an initialized wiki, and App **Contents: write** are required.
+Only the team-memory agent-local server exposes `write_wiki_pages`; the parent
+supplies its internal `--wiki-writer` launch mode automatically. Users need no
+environment flag or per-repository App environment configuration. Shared
+reader/triage servers do not expose the writer. The existing
+`GITHUB_MCP_ENABLE_WRITES` gate remains for triage issue writes, not wiki writes.
+Git and an initialized destination wiki are required. The App must be installed
+at the actual destination with **Contents: read** for wiki reads and **Contents:
+write** for maintenance; source installation alone is insufficient. Tokens are
+scoped to that destination and the operation's required permission.
 
-Maintenance pins reads to one wiki SHA and sends full UTF-8 page contents with
-`expected_base` and a short commit summary including the PR/source SHA where
-relevant. The [MCP wiki backend](github_app_mcp/src/issuelens_github_mcp/wiki.py)
+Maintenance pins reads to one full wiki SHA and sends full UTF-8 page contents
+with `expected_base`. Pages cite evidence and the full source commit SHA, not an
+abbreviation, where relevant; the short commit summary also includes that full
+SHA. No force option is exposed. The [MCP wiki backend](github_app_mcp/src/issuelens_github_mcp/wiki.py)
 persists pages and history in an atomic Git commit. No knowledge change means no
 write. Limits are 20 `.md` pages, 64 KiB each, 256 KiB total; deletion/rename are
 deferred. Stale conflicts require re-reading and regeneration; a lost response
 requires comparing current content before retrying. Only tool-confirmed status
-and wiki SHAs are reported. See [MCP details](github_app_mcp/README.md).
+and wiki SHAs are reported. If a mapping change conflicts with the read SHA,
+stop and re-establish destination, authorization, and evidence; never overwrite
+automatically or reuse edits for another wiki. See [MCP details](github_app_mcp/README.md).
 
 **Integration scope:** this simplifies direct maintenance, without a standalone
 host publisher or database/proposal/approval persistence. Full merge
 orchestration remains separate: the postmerge shell skeleton is not functional
 and does not submit automatic updates. There is no durable job queue,
 reconciliation service, or guaranteed exactly-once delivery. Git is knowledge,
-history, and conflict detection, not an external workflow scheduler.
+history, and conflict detection, not an external workflow scheduler. These local
+contracts do not establish live hosted sub-agent dispatch or deployment.
 
 ### Automation — `POST /invocations`
 
@@ -96,7 +120,7 @@ history, and conflict detection, not an external workflow scheduler.
    issue and comment reads/searches, fixed-eyes activity acknowledgements, label
    reads/additions, assignee updates, and explicitly requested issue comments.
   Wiki retrieval is read-only; separately authorized maintenance uses only the
-  opted-in `team-memory` agent-local writer.
+  `team-memory` agent-local writer.
 6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
 
 ## Environment Variables
@@ -121,7 +145,6 @@ installation dynamically:
 |----------|----------|-------------|
 | `GITHUB_APP_ID` | Yes | Numeric GitHub App ID |
 | `GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Yes | Azure Key Vault secret URI containing the App PEM |
-| `ISSUELENS_WIKI_WRITE_REPOSITORIES` | No | Empty by default; comma-separated explicit `owner/repository` allowlist for the maintenance agent-local wiki writer |
 
 Store the PEM in Key Vault; never place it in `.env`, an azd environment, or a
 deployment manifest. Grant the hosted agent's managed identity **Key Vault
@@ -138,15 +161,16 @@ azd env set GITHUB_APP_PRIVATE_KEY_SECRET_URI `
 ```
 
 Target repositories and all repositories receiving writes must be included in
-an installation of the App. Bounded reads prefer App authentication but fall
+an installation of the App. Bounded REST reads prefer App authentication but fall
 back to anonymous access for public repositories when no installation is
 available. Private repository reads still require an installation. Each Copilot
 session owns its stdio MCP processes. Each process caches tokens only in memory by
 repository and permission set, refreshes them five minutes before expiry, and
 discards them when the process exits. Configure the App with **Metadata: Read**,
 **Issues: Read and write**, **Pull requests: Read and write**, and **Contents:
-Read**. Opt-in wiki maintenance additionally requires **Contents: Write** for
-the target repository. Tokens and the private key never enter model context.
+Read**. Wiki reads require destination App access; maintenance additionally
+requires **Contents: Write** for that actual destination. Tokens and the private
+key never enter model context.
 
 ## Target Repository Configuration
 
@@ -173,6 +197,7 @@ instructions:
     path: .github/issuelens/planning.md
   team_memory:
     path: .github/issuelens/team-memory.md
+    wiki_repository: owner/project-knowledge
 ```
 
 Every instruction domain is optional:
@@ -185,7 +210,7 @@ Every instruction domain is optional:
 | `assignment` | Area owners, keyword/path mappings, routing rules, and default owners |
 | `notification_content` | Report title, grouping, emphasis, and presentation only |
 | `planning` | Required planning sections, repository design expectations, readiness statuses, and human signals |
-| `team_memory` | Wiki location/access, page structure, priority knowledge areas, evidence rules, and retrieval guidance; never write authorization |
+| `team_memory` | Required policy `path` for organization, topics, and evidence guidance; optional structured `wiki_repository` selects the GitHub wiki destination, never write authorization |
 
 Target repositories do not need `.github/issuelens.yml` or any customization
 Markdown files. When the config is absent, or when it omits a capability,
@@ -203,7 +228,11 @@ thresholds, mappings, readiness states, publication behavior, and response
 presentation. They cannot change the owning sub-agent's role, required
 parent-facing data contract, security or repository-scope boundaries, or write
 authorization. Explicit user instructions win when they conflict with
-customization.
+customization within content guidance; they cannot override the structured wiki
+destination. Validated `team_memory.wiki_repository` is the narrow wiki-only
+scope exception described above, not access to additional source repositories,
+other writes, or notifications. Omitting that field defaults to the source's
+own wiki without making the domain's policy `path` optional.
 
 The global IssueLens command language is outside this precedence and has no
 configuration domain. Target repositories cannot rename commands, add aliases,
@@ -343,7 +372,7 @@ App endpoint variables are configured.
 ### Prerequisites
 
 - Python 3.12+
-- Git on `PATH` for wiki reads and opt-in writes; an existing initialized wiki
+- Git on `PATH` for wiki reads and authorized writes; an existing initialized wiki
 - A GitHub fine-grained PAT (`github_pat_` prefix)
 - Azure credentials that can read the configured Key Vault secret
 
