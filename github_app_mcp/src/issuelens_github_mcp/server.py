@@ -181,8 +181,14 @@ def create_server(
         With ref, resolve a branch, tag, or commit to one immutable commit and
         search its regular UTF-8 files for the trimmed, case-insensitive literal
         query within each line, not in paths. No regex or search operators apply.
-        At most 64 regular files, 256 KiB eligible content, and 66 API requests
-        are allowed; files over 64 KiB, binary/non-UTF-8 content, unsupported
+        At most 64 regular files, 256 KiB eligible content, and 66 content API
+        requests are allowed, plus initial authentication lookup/minting overhead.
+        One HTTP client is reused for the scan's content requests and closed on
+        success, error, cancellation, or deadline expiry. A fixed 60-second overall
+        scan time budget covers authentication, response-body reads, and local
+        result construction without resetting per request. Deadline expiry fails
+        explicitly without partial results or indexed fallback; host cancellation
+        propagates after cleanup. Files over 64 KiB, binary/non-UTF-8 content, unsupported
         encodings, symlinks, and submodules are skipped explicitly. Truncated
         trees, exhausted scan limits, and malformed responses fail without an
         indexed fallback. API responses and returned results are capped at 100 KB.

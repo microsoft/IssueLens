@@ -297,12 +297,15 @@ class WikiRepository:
             (self._parent / "hooks").mkdir()
             (self._parent / "templates").mkdir()
             self._run("clone", "--bare", "--single-branch", "--no-tags", "--no-local", "--no-hardlinks", "--", self.remote, str(self._root), external=True)
-            branch_ref = _text(self._run("symbolic-ref", "HEAD")).strip()
+            branch_ref = _text(self._run("symbolic-ref", "HEAD")).removesuffix("\n")
             if not branch_ref.startswith("refs/heads/"):
                 raise WikiError("wiki default branch is unavailable")
             self._branch = branch_ref[len("refs/heads/"):]
             self._run("check-ref-format", branch_ref)
-            if not self._branch or len(self._branch) > 200 or any(ord(char) < 33 or ord(char) > 126 for char in self._branch):
+            if (
+                not self._branch or len(self._branch.encode("utf-8")) > 200
+                or any(unicodedata.category(char).startswith("C") for char in self._branch)
+            ):
                 raise WikiError("invalid wiki default branch")
             present = self._run("show-ref", "--heads", allowed_codes=(0, 1))
             self._sha = self._resolve("HEAD", pinned=False) if present else None
@@ -593,7 +596,7 @@ class WikiRepository:
     def _remote_tip(self) -> str:
         branch_ref = f"refs/heads/{self._branch}"
         output = self._run("ls-remote", "--exit-code", "--refs", "--", self.remote, branch_ref, max_output=1024)
-        rows = _text(output).splitlines()
+        rows = _text(output).removesuffix("\n").split("\n")
         if len(rows) != 1:
             raise WikiError("wiki remote branch could not be verified")
         parts = rows[0].split("\t")

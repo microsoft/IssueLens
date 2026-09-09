@@ -9,6 +9,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from .auth import GitHubAppError, validate_repository
+
 
 CONFIG_DIRECTORY = ".github"
 CONFIG_FILENAME = "issuelens.yml"
@@ -250,7 +252,14 @@ async def load_instruction(
     domain: str,
 ) -> dict[str, Any]:
     """Load one domain's configured instruction or its legacy fallback."""
-    repository = validate_wiki_repository(repository)
+    if not isinstance(repository, str):
+        raise IssueLensConfigError("Source repository must use the owner/repository format")
+    try:
+        repository = validate_repository(repository)
+    except GitHubAppError as error:
+        raise IssueLensConfigError("Source repository must use the owner/repository format") from error
+    if repository.rsplit("/", 1)[-1] in {".", ".."}:
+        raise IssueLensConfigError("Source repository must not be a path traversal segment")
     if not isinstance(domain, str) or domain not in INSTRUCTION_DOMAINS:
         raise IssueLensConfigError(f"Unsupported instruction domain: {domain}")
 

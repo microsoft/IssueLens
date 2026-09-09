@@ -283,7 +283,7 @@ class PolicyLoadTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual({repository for repository, _ in client.calls}, {source})
 
     async def test_invalid_source_is_rejected_before_any_network_read(self):
-        for source in (None, [], "owner/..", "owner/repo.git", "https://github.com/owner/repo"):
+        for source in (None, [], "owner/..", "owner/.", "owner/repo/extra", "https://github.com/owner/repo"):
             with self.subTest(source=source):
                 client = FakeClient({})
                 for domain in ("team_memory", "labeling"):
@@ -292,6 +292,51 @@ class PolicyLoadTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(policy.IssueLensConfigError):
                     await policy.resolve_wiki_repository(client, source)
                 self.assertEqual(client.calls, [])
+
+    async def test_source_uses_normal_repository_validation_for_all_domains(self):
+        for source in ("owner/project.git", "owner/project.wiki.git", "my--team/project"):
+            for domain in policy.INSTRUCTION_DOMAINS:
+                with self.subTest(source=source, domain=domain):
+                    client = FakeClient({})
+                    result = await policy.load_instruction(client, f" {source} ", domain)
+                    self.assertEqual(result["repository"], source)
+                    self.assertEqual(result["source"], "built-in")
+                    self.assertTrue(all(repository == source for repository, _ in client.calls))
+                    if domain == "team_memory":
+                        self.assertEqual(result["wiki_repository"], source)
+
+    async def test_configured_and_legacy_instructions_load_for_dot_git_source(self):
+        source = "owner/project.git"
+        for domain in ("labeling", "planning", "team_memory"):
+            with self.subTest(domain=domain):
+                config = f"version: 1\ninstructions:\n  {domain}:\n    path: {INSTRUCTION_PATH}\n"
+                if domain == "team_memory":
+                    config += f"    wiki_repository: {DESTINATION}\n"
+                client = FakeClient({CONFIG_PATH: config, INSTRUCTION_PATH: "Project policy"})
+                result = await policy.load_instruction(client, source, domain)
+                self.assertEqual(result["content"], "Project policy")
+                self.assertEqual(result["source"], "configured")
+                self.assertEqual(client.calls, [
+                    (source, ".github"), (source, CONFIG_PATH), (source, INSTRUCTION_PATH),
+                ])
+                if domain == "team_memory":
+                    self.assertEqual(result["wiki_repository"], DESTINATION)
+        result = await policy.load_instruction(
+            FakeClient({".github/label-instructions.md": "Legacy labels"}), source, "labeling"
+        )
+        self.assertEqual(result["source"], "legacy")
+        self.assertEqual(result["content"], "Legacy labels")
+
+    async def test_dot_git_source_does_not_relax_explicit_destination_rules(self):
+        client = FakeClient({
+            CONFIG_PATH: PATH_CONFIG + "    wiki_repository: owner/destination.git\n",
+            INSTRUCTION_PATH: "Must not be read",
+        })
+        with self.assertRaisesRegex(policy.IssueLensConfigError, "wiki_repository"):
+            await policy.load_instruction(client, "owner/project.git", "team_memory")
+        self.assertEqual(client.calls, [
+            ("owner/project.git", ".github"), ("owner/project.git", CONFIG_PATH),
+        ])
 
     async def test_invalid_policy_stops_before_markdown_and_never_defaults(self):
         for config in (

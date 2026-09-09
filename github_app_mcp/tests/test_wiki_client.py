@@ -131,6 +131,51 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
         self.get_file.assert_not_awaited()
         self.get_repository.assert_not_awaited()
 
+    async def test_canonical_source_default_wiki_snapshot_can_be_used_for_writing(self):
+        for source in ("owner/project.git", "owner/project.wiki.git", "my--team/project"):
+            with self.subTest(source=source):
+                self.provider.get_token.reset_mock()
+                self.get_file.reset_mock()
+                with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+                    wiki = backend.return_value.__enter__.return_value
+                    wiki.snapshot.return_value = {"repository": source, "sha": BASE}
+                    wiki.write.return_value = {"repository": source, "sha": HEAD, "status": "updated"}
+                    snapshot = await self.github.get_wiki_snapshot(f" {source} ")
+                    self.assertEqual(snapshot["wiki_repository"], source)
+                    result = await self.writer().write_wiki_pages(
+                        source, WRITE_ARGUMENTS[0], snapshot["sha"], "Update",
+                        expected_wiki_repository=snapshot["wiki_repository"].upper(),
+                    )
+                    self.assertEqual(result["wiki_repository"], source)
+                    self.assertEqual(result["status"], "updated")
+                    self.assertEqual(backend.call_args_list, [
+                        call(source, token=TOKEN), call(source, token=TOKEN),
+                    ])
+                    wiki.write.assert_called_once_with(
+                        *WRITE_ARGUMENTS, author_name=IDENTITY[0], author_email=IDENTITY[1],
+                    )
+                self.assertEqual(self.provider.get_token.await_args_list, [
+                    call(source, {"contents": "read"}), call(source, {"contents": "write"}),
+                ])
+        self.get_repository.assert_not_awaited()
+
+    async def test_dot_git_expectation_does_not_bypass_a_changed_mapping(self):
+        source = "owner/project.git"
+        files = {
+            ".github": [{"name": "issuelens.yml", "type": "file"}],
+            CONFIG_PATH: {"decoded_content": CONFIG},
+            INSTRUCTION_PATH: {"decoded_content": "Topics"},
+        }
+        self.get_file.side_effect = lambda repository, path: files[path]
+        with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+            with self.assertRaisesRegex(GitHubAppError, "Wiki destination changed"):
+                await self.writer().write_wiki_pages(
+                    source, *WRITE_ARGUMENTS, expected_wiki_repository=source,
+                )
+            backend.assert_not_called()
+        self.provider.get_token.assert_not_awaited()
+        self.get_repository.assert_not_awaited()
+
     async def test_all_reads_resolve_source_policy_before_destination_authentication(self):
         self.configure_memory()
 

@@ -11,6 +11,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
@@ -32,6 +33,7 @@ _MAX_FILE_BYTES = 64 * 1024
 _MAX_QUERY_CHARS = 512
 _MAX_SEARCH_FILES = 64
 _MAX_SEARCH_BYTES = 256 * 1024
+_MAX_SEARCH_SECONDS = 60
 _MAX_SEARCH_MATCH_LINES = 3
 _MAX_SEARCH_EXCERPT_CHARS = 160
 _SEARCH_OID_PATTERN = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
@@ -422,6 +424,31 @@ class GitHubClient:
             )
 
         ref = _ref(ref)
+        scan_timeout = asyncio.timeout(_MAX_SEARCH_SECONDS)
+        budget_error = f"Repository search exceeded its {_MAX_SEARCH_SECONDS}-second scan time budget"
+        async with AsyncExitStack() as stack:
+            try:
+                async with scan_timeout:
+                    client = httpx.AsyncClient(
+                        transport=self._transport, timeout=30, follow_redirects=False,
+                    )
+                    stack.push_async_callback(client.aclose)
+                    result = await self._search_repository_content_at_ref(
+                        repository, query, ref, per_page=per_page, page=page, client=client,
+                    )
+                    deadline = scan_timeout.when()
+                    if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                        raise GitHubAppError(budget_error)
+                    return result
+            except TimeoutError:
+                if not scan_timeout.expired():
+                    raise
+                raise GitHubAppError(budget_error) from None
+
+    async def _search_repository_content_at_ref(
+        self, repository: str, query: str, ref: str, *,
+        per_page: int, page: int, client: httpx.AsyncClient,
+    ) -> Any:
         try:
             credential = await self._token_provider.get_token(
                 repository, {"contents": "read"}
@@ -432,6 +459,7 @@ class GitHubClient:
         commit = await self._request(
             "GET", repository, f"/commits/{quote(ref, safe='')}",
             permissions={"contents": "read"}, content_read_auth=content_read_auth,
+            _client=client,
         )
         if (
             not isinstance(commit, Mapping)
@@ -447,6 +475,7 @@ class GitHubClient:
             "GET", repository, f"/git/trees/{tree_sha}",
             permissions={"contents": "read"}, params={"recursive": "1"},
             content_read_auth=content_read_auth,
+            _client=client,
         )
         if (
             not isinstance(tree, Mapping)
@@ -499,6 +528,7 @@ class GitHubClient:
             blob = await self._request(
                 "GET", repository, f"/git/blobs/{blob_sha}",
                 permissions={"contents": "read"}, content_read_auth=content_read_auth,
+                _client=client,
             )
             text, reason = _search_blob_text(blob, blob_sha, size)
             if reason is not None:
@@ -567,7 +597,11 @@ class GitHubClient:
         if not self.wiki_writes_enabled:
             raise GitHubAppError("Wiki writes are not enabled")
         try:
-            expected_wiki_repository = validate_wiki_repository(expected_wiki_repository)
+            if not (
+                isinstance(expected_wiki_repository, str)
+                and expected_wiki_repository.casefold() == repository.casefold()
+            ):
+                expected_wiki_repository = validate_wiki_repository(expected_wiki_repository)
         except IssueLensConfigError:
             raise GitHubAppError(
                 "expected_wiki_repository must be a GitHub owner/repository identifier; "
@@ -909,8 +943,11 @@ class GitHubClient:
         body: Mapping[str, Any] | None = None,
         write: bool = False,
         content_read_auth: _ContentReadAuth | None = None,
+        _client: httpx.AsyncClient | None = None,
     ) -> Any:
         repository = self._authorize(repository, write=write)
+        if _client is not None and content_read_auth is None:
+            raise GitHubAppError("Repository content authentication scope mismatch")
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "IssueLens-GitHub-MCP/0.1",
@@ -949,11 +986,15 @@ class GitHubClient:
             headers["Authorization"] = f"Bearer {credential.token}"
         url = absolute_url or f"{_API_ROOT}/repos/{repository}{path}"
         try:
-            async with httpx.AsyncClient(
-                transport=self._transport,
-                timeout=30,
-                follow_redirects=False,
-            ) as client:
+            async with AsyncExitStack() as stack:
+                client = _client
+                if client is None:
+                    client = httpx.AsyncClient(
+                        transport=self._transport,
+                        timeout=30,
+                        follow_redirects=False,
+                    )
+                    stack.push_async_callback(client.aclose)
                 async with client.stream(
                     method,
                     url,

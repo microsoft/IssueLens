@@ -39,6 +39,7 @@ class WikiTests(unittest.TestCase):
         self.base = self.git(self.seed, "rev-parse", "HEAD").decode().strip()
         self.git(self.directory, "clone", "--bare", "--", str(self.seed), str(self.remote))
         fixture_remote = self.remote
+
         class LocalWiki(WikiRepository):
             @property
             def remote(self) -> str:
@@ -58,7 +59,7 @@ class WikiTests(unittest.TestCase):
     def test_bare_snapshot_and_unicode_reads(self) -> None:
         with self.local_wiki("example/repository") as wiki:
             self.assertEqual(wiki.snapshot(), {"repository": "example/repository", "branch": "docs/wiki",
-                                              "sha": self.base, "initialized": True})
+                                               "sha": self.base, "initialized": True})
             self.assertEqual([page["path"] for page in wiki.pages()], ["Home.md", self.unicode_path])
             page = wiki.page(self.unicode_path)
             self.assertEqual(page["content"], "# \u8bbe\u8ba1\nCaf\u00e9\n")
@@ -67,6 +68,61 @@ class WikiTests(unittest.TestCase):
             self.assertFalse((wiki._root / "Home.md").exists())
             parent = wiki._parent
         self.assertFalse(parent.exists())
+
+    def test_unicode_default_branch_supports_reads_and_atomic_writes(self) -> None:
+        for branch in (
+            "\u6587\u6863/wiki", "release/Cafe\u0301", "notes/\u00e9\u00a0",
+            "notes/\u2028wiki", "notes/\u2029wiki",
+        ):
+            with self.subTest(branch=branch):
+                branch_ref = f"refs/heads/{branch}"
+                self.git(self.remote, "update-ref", branch_ref, self.base)
+                self.git(self.remote, "symbolic-ref", "HEAD", branch_ref)
+                with self.local_wiki("example/repository") as wiki:
+                    self.assertEqual(wiki.snapshot()["branch"], branch)
+                    self.assertEqual(wiki.snapshot()["sha"], self.base)
+                    self.assertIn("Home.md", [page["path"] for page in wiki.pages()])
+                    self.assertEqual(wiki.page("Home.md")["content"], "# Home\nWelcome\n")
+                    self.assertIn(self.unicode_path, [page["path"] for page in wiki.search("Caf\u00e9")])
+                    self.assertEqual(wiki.history(ref=self.base), [self.base])
+                    self.assertEqual(wiki.diff(self.base), "")
+                    updated = self.write(wiki, {"Home.md": "Unicode branch update\n"})
+                    self.assertEqual(updated["status"], "updated")
+                    self.assertEqual(updated["branch"], branch)
+                    self.assertEqual(self.git(self.remote, "rev-parse", "HEAD").decode().strip(), updated["sha"])
+                    self.assertIn("+Unicode branch update", wiki.diff(self.base))
+                    self.assertEqual(wiki.history("Home.md"), [updated["sha"], self.base])
+                    self.assertEqual(wiki.page("Home.md", self.base)["content"], "# Home\nWelcome\n")
+                    retry = self.write(wiki, {"Home.md": "Unicode branch update\n"})
+                    self.assertEqual(retry["status"], "no-change")
+                    self.assertEqual(retry["sha"], updated["sha"])
+                    with self.assertRaisesRegex(WikiError, "conflict"):
+                        self.write(wiki, {"Home.md": "Conflicting update"})
+                self.assertEqual(self.git(self.remote, "rev-parse", "refs/heads/docs/wiki").decode().strip(), self.base)
+
+    def test_default_branch_limit_counts_utf8_bytes_and_rejects_controls(self) -> None:
+        branch = "\u00e9" * 100
+        branch_ref = f"refs/heads/{branch}"
+        self.git(self.remote, "update-ref", branch_ref, self.base)
+        self.git(self.remote, "symbolic-ref", "HEAD", branch_ref)
+        with self.local_wiki("example/repository") as wiki:
+            self.assertEqual(wiki.snapshot()["branch"], branch)
+        for invalid in ("\u00e9" * 100 + "a", "\u6587" * 67, "notes/\u200b", "notes/\u0085"):
+            with self.subTest(branch=ascii(invalid)):
+                wiki = self.local_wiki("example/repository")
+                original_run = wiki._run
+
+                def advertised_branch(*arguments, **kwargs):
+                    if arguments == ("symbolic-ref", "HEAD"):
+                        return f"refs/heads/{invalid}\n".encode("utf-8")
+                    return original_run(*arguments, **kwargs)
+
+                with patch.object(wiki, "_run", side_effect=advertised_branch):
+                    with self.assertRaisesRegex(WikiError, "invalid wiki default branch"):
+                        with wiki:
+                            self.fail("Invalid default branch was accepted")
+                self.assertIsNone(wiki._root)
+                self.assertIsNone(wiki._parent)
 
     def write(self, wiki: WikiRepository, pages: dict[str, str], base: str | None = None) -> dict:
         return wiki.write(pages, base or self.base, "Update team notes", author_name="IssueLens App",
@@ -133,7 +189,6 @@ class WikiTests(unittest.TestCase):
             self.assertEqual(outside.read_bytes(), b"unchanged")
             self.assertEqual(self.git(self.remote, "rev-parse", "HEAD").decode().strip(), self.base)
             self.assertNotIn("Valid.md", [page["path"] for page in wiki.pages()])
-
 
     def test_all_ref_inputs_reject_options_and_unknown_commits(self) -> None:
         with self.local_wiki("example/repository") as wiki:
@@ -266,6 +321,7 @@ class WikiTests(unittest.TestCase):
         with self.local_wiki("example/repository") as first, self.local_wiki("example/repository") as second:
             run = first._run
             concurrent = {}
+
             def race(*arguments: str, **keywords: object) -> bytes:
                 if arguments[0] == "push":
                     concurrent.update(self.write(second, {"Other.md": "Concurrent writer"}))
@@ -332,6 +388,7 @@ class WikiTests(unittest.TestCase):
         with self.local_wiki("example/repository", token=token) as wiki:
             recorded = []
             original = subprocess.Popen
+
             def record(command: list[str], **keywords: object) -> subprocess.Popen:
                 recorded.append((command, dict(keywords["env"])))
                 return original(command, **keywords)
@@ -344,9 +401,9 @@ class WikiTests(unittest.TestCase):
                 if path.is_file():
                     self.assertNotIn(token.encode(), path.read_bytes())
 
-
     def subprocess_fixture(self, script: str):
         original = subprocess.Popen
+
         def launch(command: list[str], **keywords: object) -> subprocess.Popen:
             return original([sys.executable, "-B", "-c", script], **keywords)
         return patch("issuelens_github_mcp.wiki.subprocess.Popen", side_effect=launch)

@@ -67,11 +67,17 @@ With a supplied `ref`, `search_repository_content` scans an immutable snapshot:
 at most 64 regular files, 256 KiB of eligible content (64 KiB per file), and
 66 content API requests (one commit, one tree, and up to 64 blobs). App
 authentication lookup/minting is performed once per scan; initial authentication
-overhead is additional and is not counted in those 66 content requests. A
-missing-installation result is retained only for that scan; no negative
-authentication cache survives the scan. Anonymous fallback remains read-only
-and never authorizes writes. Without `ref`, search uses GitHub's indexed
-default-branch code search.
+overhead is additional and is not counted in those 66 content requests. One
+HTTP client is reused for all content requests in a scan, never shared across
+scans, and closed on success, error, cancellation, or deadline expiry. A fixed
+60-second overall scan time budget includes authentication, commit/tree/blob
+response-body reads, and local result construction; it never resets per request.
+Exceeding it fails explicitly without returning partial results or falling back
+to indexed search. Host cancellation propagates after cleanup. A missing-installation
+result is retained only for that scan; no negative authentication cache survives
+the scan. Anonymous fallback remains read-only and never authorizes writes.
+Without `ref`, search uses GitHub's indexed default-branch code search with its
+existing single-request 30-second HTTP timeout, not the scan budget.
 
 Wiki tools always take `repository` as the **source project**, even when its
 memory is stored in another repository's wiki. The shared package policy parser

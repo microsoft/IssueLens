@@ -11,6 +11,7 @@ import httpx
 
 from github_app_mcp.src.issuelens_github_mcp.auth import GitHubAppError, GitHubAppTokenProvider, InstallationCredential
 from github_app_mcp.src.issuelens_github_mcp.config import GitHubAppConfig
+from github_app_mcp.src.issuelens_github_mcp import github as github_module
 from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient, _ContentReadAuth
 
 
@@ -39,6 +40,25 @@ class FakeProvider:
         )
 
 
+class BlockingBody(httpx.AsyncByteStream):
+    def __init__(self, first_chunk=b'{"sha":'):
+        self.first_chunk = first_chunk
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.closed = False
+
+    async def __aiter__(self):
+        yield self.first_chunk
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.cancelled.set()
+
+    async def aclose(self):
+        self.closed = True
+
+
 class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.requests = []
@@ -59,6 +79,25 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.client = GitHubClient(
             self.provider, transport=httpx.MockTransport(self.handler)
         )
+
+    def track_clients(self):
+        clients = []
+        original_client = httpx.AsyncClient
+
+        def create_client(**kwargs):
+            client = original_client(**kwargs)
+            client.aclose = AsyncMock(wraps=client.aclose)
+            client.send = AsyncMock(wraps=client.send)
+            clients.append(client)
+            return client
+
+        self.enterContext(patch.object(github_module.httpx, "AsyncClient", side_effect=create_client))
+        return clients
+
+    def assert_clients_closed(self, clients):
+        for client in clients:
+            client.aclose.assert_awaited_once_with()
+            self.assertTrue(client.is_closed)
 
     def add_file(self, path, content, *, tree=OLD_TREE, mode="100644"):
         blob_sha = hashlib.sha1(
@@ -132,6 +171,377 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.client = GitHubClient(self.provider, transport=httpx.MockTransport(self.handler))
         return lookup
 
+    async def test_scan_deadline_includes_authentication(self):
+        clients = self.track_clients()
+        blocked = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def get_token(repository, permissions):
+            try:
+                await blocked.wait()
+            finally:
+                cancelled.set()
+
+        with patch.object(self.provider, "get_token", side_effect=get_token) as lookup:
+            with patch.object(github_module, "_MAX_SEARCH_SECONDS", 0.05):
+                with self.assertRaisesRegex(GitHubAppError, "scan time budget"):
+                    await asyncio.wait_for(
+                        self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT),
+                        timeout=2,
+                    )
+        self.assertTrue(cancelled.is_set())
+        lookup.assert_awaited_once_with(REPOSITORY, {"contents": "read"})
+        self.assertEqual(self.requests, [])
+        self.assertEqual(len(clients), 1)
+        self.assert_clients_closed(clients)
+
+        result = await asyncio.wait_for(
+            self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT),
+            timeout=2,
+        )
+        self.assertEqual(result["total_count"], 0)
+        self.assertFalse(result["incomplete_results"])
+        self.assertEqual(len(clients), 2)
+        self.assertIsNot(clients[0], clients[1])
+        self.assert_clients_closed(clients)
+
+    async def test_deadline_cancels_underlying_auth_http_and_body_reads(self):
+        clients = self.track_clients()
+        for stage in ("installation", "mint", "body"):
+            with self.subTest(stage=stage):
+                self.requests.clear()
+                auth_requests = []
+                stream = BlockingBody()
+
+                async def handler(request):
+                    auth_requests.append(request)
+                    self.assertEqual(request.url.host, "api.github.com")
+                    self.assertEqual(request.headers["Authorization"], "Bearer fake-app-jwt")
+                    if request.url.path == f"/repos/{REPOSITORY}/installation" and stage != "installation":
+                        return httpx.Response(200, json={"id": 1234})
+                    if stage == "body":
+                        return httpx.Response(201, stream=stream)
+                    stream.started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        stream.cancelled.set()
+
+                provider = GitHubAppTokenProvider(
+                    GitHubAppConfig("1234", "https://unused.vault.azure.net/secrets/unused"),
+                    private_key_loader=AsyncMock(side_effect=AssertionError("Unexpected secret read")),
+                    transport=httpx.MockTransport(handler),
+                    clock=lambda: 1_700_000_000,
+                )
+                client = GitHubClient(provider, transport=httpx.MockTransport(self.handler))
+                before = len(clients)
+                with patch.object(provider, "_app_jwt", new=AsyncMock(return_value="fake-app-jwt")):
+                    with patch.object(github_module, "_MAX_SEARCH_SECONDS", 0.05):
+                        with self.assertRaisesRegex(GitHubAppError, "scan time budget"):
+                            await asyncio.wait_for(
+                                client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT),
+                                timeout=2,
+                            )
+                self.assertTrue(stream.started.is_set())
+                self.assertTrue(stream.cancelled.is_set())
+                self.assertEqual(len(auth_requests), 1 if stage == "installation" else 2)
+                self.assertEqual(self.requests, [])
+                self.assertTrue(all(http_client.is_closed for http_client in clients[before:]))
+                clients[before].aclose.assert_awaited_once_with()
+                if stage == "body":
+                    self.assertTrue(stream.closed)
+
+    async def test_deadline_cancels_each_content_stage_and_next_scan_recovers(self):
+        self.add_file("a.txt", b"needle already matched")
+        last_blob = self.add_file("z.txt", b"needle last file")
+        clients = self.track_clients()
+        routes = {
+            "commit": (f"commits/{OLD_COMMIT}", 1),
+            "tree": (f"git/trees/{OLD_TREE}", 2),
+            "blob": (f"git/blobs/{last_blob}", 4),
+            "body": (f"git/blobs/{last_blob}", 4),
+        }
+        for stage, (route, request_count) in routes.items():
+            with self.subTest(stage=stage):
+                self.requests.clear()
+                self.provider.calls.clear()
+                stream = BlockingBody()
+                started = stream.started
+                cancelled = stream.cancelled
+                recovered = False
+
+                async def handler(request):
+                    response = self.handler(request)
+                    if not recovered and request.url.path.endswith(f"/{route}"):
+                        if stage == "body":
+                            return httpx.Response(200, stream=stream)
+                        started.set()
+                        try:
+                            await asyncio.Event().wait()
+                        finally:
+                            cancelled.set()
+                    return response
+
+                client = GitHubClient(self.provider, transport=httpx.MockTransport(handler))
+                before = len(clients)
+                with patch.object(github_module, "_MAX_SEARCH_SECONDS", 0.05):
+                    with self.assertRaisesRegex(GitHubAppError, "scan time budget"):
+                        await asyncio.wait_for(
+                            client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT),
+                            timeout=2,
+                        )
+                self.assertTrue(started.is_set())
+                self.assertTrue(cancelled.is_set())
+                self.assertEqual(len(self.requests), request_count)
+                self.assertEqual(self.provider.calls, [(REPOSITORY, {"contents": "read"})])
+                self.assertEqual(len(clients), before + 1)
+                self.assert_clients_closed(clients)
+                if stage == "body":
+                    self.assertTrue(stream.closed)
+
+                recovered = True
+                self.requests.clear()
+                result = await asyncio.wait_for(
+                    client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT),
+                    timeout=2,
+                )
+                self.assertEqual(result["total_count"], 2)
+                self.assertFalse(result["incomplete_results"])
+                self.assertEqual(len(self.requests), 4)
+                self.assertEqual(len(self.provider.calls), 2)
+                self.assertEqual(len(clients), before + 2)
+                self.assertIsNot(clients[-1], clients[-2])
+                self.assert_clients_closed(clients)
+
+    async def test_host_cancellation_propagates_and_closes_each_scan_stage(self):
+        self.add_file("a.txt", b"needle already matched")
+        last_blob = self.add_file("z.txt", b"needle last file")
+        clients = self.track_clients()
+        original_get_token = self.provider.get_token
+        routes = {
+            "auth": (None, 0),
+            "commit": (f"commits/{OLD_COMMIT}", 1),
+            "tree": (f"git/trees/{OLD_TREE}", 2),
+            "blob": (f"git/blobs/{last_blob}", 4),
+            "body": (f"git/blobs/{last_blob}", 4),
+        }
+        for stage, (route, request_count) in routes.items():
+            with self.subTest(stage=stage):
+                self.requests.clear()
+                stream = BlockingBody()
+
+                async def block():
+                    stream.started.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        stream.cancelled.set()
+
+                async def get_token(repository, permissions):
+                    if stage == "auth":
+                        await block()
+                    return await original_get_token(repository, permissions)
+
+                async def handler(request):
+                    response = self.handler(request)
+                    if route and request.url.path.endswith(f"/{route}"):
+                        if stage == "body":
+                            return httpx.Response(200, stream=stream)
+                        await block()
+                    return response
+
+                client = GitHubClient(self.provider, transport=httpx.MockTransport(handler))
+                before = len(clients)
+                with patch.object(self.provider, "get_token", side_effect=get_token) as lookup:
+                    task = asyncio.create_task(
+                        client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+                    )
+                    try:
+                        await asyncio.wait_for(stream.started.wait(), timeout=2)
+                        task.cancel()
+                        with self.assertRaises(asyncio.CancelledError):
+                            await asyncio.wait_for(task, timeout=2)
+                    finally:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                    lookup.assert_awaited_once_with(REPOSITORY, {"contents": "read"})
+                self.assertTrue(stream.cancelled.is_set())
+                self.assertEqual(len(self.requests), request_count)
+                self.assertEqual(len(clients), before + 1)
+                self.assert_clients_closed(clients)
+                if stage == "body":
+                    self.assertTrue(stream.closed)
+
+    async def test_one_deadline_covers_auth_requests_and_local_results(self):
+        for index in range(64):
+            self.add_file(f"{index:02}.txt", b"needle")
+        budget = asyncio.timeout(60)
+        deadlines = []
+        original_get_token = self.provider.get_token
+        original_matches = github_module._search_line_matches
+
+        async def get_token(repository, permissions):
+            deadlines.append(budget.when())
+            return await original_get_token(repository, permissions)
+
+        def handler(request):
+            deadlines.append(budget.when())
+            return self.handler(request)
+
+        def matches(text, query):
+            deadlines.append(budget.when())
+            return original_matches(text, query)
+
+        self.client = GitHubClient(self.provider, transport=httpx.MockTransport(handler))
+        with patch.object(github_module.asyncio, "timeout", return_value=budget) as timeout:
+            with patch.object(self.provider, "get_token", side_effect=get_token):
+                with patch.object(github_module, "_search_line_matches", side_effect=matches):
+                    result = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+        timeout.assert_called_once_with(60)
+        self.assertEqual(len(deadlines), 1 + 66 + 64)
+        self.assertEqual(set(deadlines), {budget.when()})
+        self.assertFalse(budget.expired())
+        self.assertEqual(result["total_count"], 64)
+
+    async def test_expired_budget_rejects_locally_constructed_result(self):
+        self.add_file("file.txt", b"needle")
+        clients = self.track_clients()
+        budget = asyncio.timeout(60)
+        original_matches = github_module._search_line_matches
+
+        def matches(text, query):
+            budget.reschedule(asyncio.get_running_loop().time() - 1)
+            return original_matches(text, query)
+
+        with patch.object(github_module.asyncio, "timeout", return_value=budget):
+            with patch.object(github_module, "_search_line_matches", side_effect=matches):
+                with self.assertRaisesRegex(GitHubAppError, "scan time budget"):
+                    await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(len(clients), 1)
+        self.assert_clients_closed(clients)
+
+    async def test_unrelated_timeouts_are_not_reported_as_scan_deadline(self):
+        clients = self.track_clients()
+        for stage in ("auth", "request"):
+            with self.subTest(stage=stage):
+                failure = TimeoutError("upstream timeout")
+                if stage == "auth":
+                    with patch.object(self.provider, "get_token", side_effect=failure):
+                        with self.assertRaises(TimeoutError) as raised:
+                            await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+                else:
+                    self.overrides[f"commits/{OLD_COMMIT}"] = failure
+                    with self.assertRaises(TimeoutError) as raised:
+                        await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+                self.assertIs(raised.exception, failure)
+                self.assert_clients_closed(clients)
+        self.assertEqual(len(clients), 2)
+        self.assertEqual(len(self.requests), 1)
+
+    async def test_borrowed_client_requires_scoped_auth_and_is_not_closed_per_request(self):
+        clients = self.track_clients()
+        borrowed = httpx.AsyncClient(transport=httpx.MockTransport(self.handler))
+        credential = await self.provider.get_token(REPOSITORY, {"contents": "read"})
+        self.provider.calls.clear()
+        context = _ContentReadAuth(REPOSITORY, credential)
+        try:
+            with self.assertRaisesRegex(GitHubAppError, "scope mismatch"):
+                await self.client._request(
+                    "GET", REPOSITORY, permissions={"contents": "read"}, _client=borrowed,
+                )
+            with self.assertRaisesRegex(GitHubAppError, "scope mismatch"):
+                await self.client._request(
+                    "GET", REPOSITORY, permissions={"contents": "read"},
+                    absolute_url="https://other.example/", content_read_auth=context, _client=borrowed,
+                )
+            with self.assertRaisesRegex(GitHubAppError, "write tools are disabled"):
+                await self.client._request(
+                    "POST", REPOSITORY, permissions={"contents": "write"}, write=True,
+                    content_read_auth=context, _client=borrowed,
+                )
+            self.assertEqual(self.requests, [])
+            for route, params in (
+                (f"commits/{OLD_COMMIT}", None),
+                (f"git/trees/{OLD_TREE}", {"recursive": "1"}),
+            ):
+                await self.client._request(
+                    "GET", REPOSITORY, f"/{route}", permissions={"contents": "read"},
+                    params=params, content_read_auth=context, _client=borrowed,
+                )
+                borrowed.aclose.assert_not_awaited()
+                self.assertFalse(borrowed.is_closed)
+            self.assertEqual(self.provider.calls, [])
+            self.assertEqual(len(self.requests), 2)
+            self.assertEqual(len(clients), 1)
+        finally:
+            await borrowed.aclose()
+        self.assert_clients_closed(clients)
+
+    async def test_streamed_response_limit_closes_owned_and_scan_clients(self):
+        clients = self.track_clients()
+        for ref in (None, OLD_COMMIT):
+            with self.subTest(ref=ref):
+                stream = BlockingBody(b"x" * (128 * 1024 + 1))
+                client = GitHubClient(
+                    self.provider,
+                    transport=httpx.MockTransport(lambda request: httpx.Response(200, stream=stream)),
+                )
+                with self.assertRaisesRegex(GitHubAppError, "response is too large"):
+                    await asyncio.wait_for(
+                        client.search_repository_content(REPOSITORY, "needle", ref=ref),
+                        timeout=2,
+                    )
+                self.assertFalse(stream.started.is_set())
+                self.assertTrue(stream.closed)
+                self.assert_clients_closed(clients)
+        self.assertEqual(len(clients), 2)
+
+    async def test_httpx_timeout_keeps_safe_error_and_closes_clients(self):
+        clients = self.track_clients()
+
+        def handler(request):
+            self.requests.append(request)
+            raise httpx.ReadTimeout("secret-response-sentinel")
+
+        client = GitHubClient(self.provider, transport=httpx.MockTransport(handler))
+        for ref in (None, OLD_COMMIT):
+            with self.subTest(ref=ref):
+                with self.assertRaisesRegex(GitHubAppError, "^GitHub API request failed$"):
+                    await client.search_repository_content(REPOSITORY, "needle", ref=ref)
+                self.assert_clients_closed(clients)
+        self.assertEqual(len(clients), 2)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(len(self.provider.calls), 2)
+
+    async def test_concurrent_scans_of_same_repository_own_clients_and_auth(self):
+        self.add_file("file.txt", b"needle")
+        clients = self.track_clients()
+        both_started = asyncio.Event()
+        started_count = 0
+
+        async def handler(request):
+            nonlocal started_count
+            if request.url.path.endswith(f"/commits/{OLD_COMMIT}"):
+                started_count += 1
+                if started_count == 2:
+                    both_started.set()
+                await both_started.wait()
+            return self.handler(request)
+
+        client = GitHubClient(self.provider, transport=httpx.MockTransport(handler))
+        results = await asyncio.wait_for(asyncio.gather(
+            client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT),
+            client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT),
+        ), timeout=2)
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[0]["total_count"], 1)
+        self.assertEqual(self.provider.calls, [(REPOSITORY, {"contents": "read"})] * 2)
+        self.assertEqual(len(clients), 2)
+        self.assertIsNot(clients[0], clients[1])
+        self.assertEqual([client.send.await_count for client in clients], [3, 3])
+        self.assert_clients_closed(clients)
+
     async def test_ref_search_uses_only_requested_snapshot(self):
         old_blob = self.add_file("src/old.py", b"old implementation\nNEEDLE from release\n")
         self.add_file("src/new.py", b"needle from current main", tree=NEW_TREE)
@@ -165,9 +575,11 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         ))
 
     async def test_no_ref_preserves_indexed_query(self):
-        result = await self.client.search_repository_content(
-            REPOSITORY, "needle", per_page=5, page=2
-        )
+        clients = self.track_clients()
+        with patch.object(github_module.asyncio, "timeout", side_effect=AssertionError("Indexed search has no scan deadline")):
+            result = await self.client.search_repository_content(
+                REPOSITORY, "needle", per_page=5, page=2
+            )
 
         self.assertEqual(result, self.indexed)
         self.assertEqual(len(self.requests), 1)
@@ -176,6 +588,11 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests[0].url.params["per_page"], "5")
         self.assertEqual(self.requests[0].url.params["page"], "2")
         self.assertEqual(self.provider.calls, [(REPOSITORY, {"contents": "read"})])
+        self.assertEqual(len(clients), 1)
+        self.assert_clients_closed(clients)
+        self.assertEqual(self.requests[0].extensions["timeout"], {
+            "connect": 30, "read": 30, "write": 30, "pool": 30,
+        })
 
     async def test_invalid_queries_are_rejected_before_authentication(self):
         queries = (
@@ -307,6 +724,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 2)
 
     async def test_exact_file_and_byte_limits_are_accepted(self):
+        clients = self.track_clients()
         for index in range(64):
             self.add_file(f"{index:02}.txt", b"needle" + b"x" * (4096 - 6))
         results = []
@@ -320,6 +738,9 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result["total_count"], 64)
                 self.assertEqual(len(result["items"]), 64)
                 self.assertEqual(len(self.requests), 66)
+                self.assertEqual(len(clients), len(results))
+                self.assertEqual(clients[-1].send.await_count, 66)
+                self.assert_clients_closed(clients)
                 self.assertEqual(self.provider.calls, [(REPOSITORY, {"contents": "read"})])
                 expected_auth = "Bearer fake-repository-token" if available else None
                 self.assertTrue(all(request.headers.get("Authorization") == expected_auth for request in self.requests))
@@ -401,12 +822,13 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(all(request.headers.get("Authorization") == "Bearer fake-repository-token" for request in self.requests))
 
     async def test_content_errors_keep_auth_mode_and_never_fall_back(self):
+        clients = self.track_clients()
         blob_sha = self.add_file("file.txt", b"needle")
         routes = (f"commits/{OLD_COMMIT}", f"git/trees/{OLD_TREE}", f"git/blobs/{blob_sha}")
         for available in (True, False):
             self.provider.available = available
             for completed, route in enumerate(routes, start=1):
-                for status, headers in ((401, {}), (403, {}), (403, {"x-ratelimit-remaining": "0"}), (404, {}), (500, {})):
+                for status, headers in ((401, {}), (403, {}), (403, {"x-ratelimit-remaining": "0"}), (404, {}), (429, {}), (500, {})):
                     with self.subTest(available=available, route=route, status=status, headers=headers):
                         self.requests.clear()
                         self.provider.calls.clear()
@@ -423,8 +845,10 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                         ])
                         expected_auth = "Bearer fake-repository-token" if available else None
                         self.assertTrue(all(request.headers.get("Authorization") == expected_auth for request in self.requests))
+                        self.assert_clients_closed(clients)
 
     async def test_concurrent_repository_scans_have_independent_auth(self):
+        clients = self.track_clients()
         blob_sha = self.add_file("file.txt", b"needle")
         other_repository = "other/project"
         repositories = (REPOSITORY, other_repository)
@@ -468,6 +892,19 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(lookup.await_count, 2)
                     lookup.assert_has_awaits([call(repository, {"contents": "read"}) for repository in repositories], any_order=True)
                 self.assertEqual(len(requests), 6)
+                self.assertEqual(len(clients), 2 if other_installed else 4)
+                self.assertIsNot(clients[-1], clients[-2])
+                self.assert_clients_closed(clients)
+                client_repositories = []
+                for http_client in clients[-2:]:
+                    self.assertEqual(http_client.send.await_count, 3)
+                    scopes = {
+                        "/".join(sent.kwargs["request"].url.path.split("/")[2:4])
+                        for sent in http_client.send.await_args_list
+                    }
+                    self.assertEqual(len(scopes), 1)
+                    client_repositories.extend(scopes)
+                self.assertCountEqual(client_repositories, repositories)
                 for repository, result in zip(repositories, results):
                     self.assertEqual(result["total_count"], 1)
                     self.assertEqual(result["items"][0]["repository"], {"full_name": repository})
