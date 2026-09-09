@@ -86,7 +86,7 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
             return result
 
         self.get_file.side_effect = get_file
-        self.get_repository.side_effect = lambda repository: {"visibility": "private"}
+        self.get_repository.side_effect = lambda repository: {"visibility": "public"}
         return files
 
     async def test_all_reads_run_context_and_operation_in_one_worker_thread(self):
@@ -237,10 +237,12 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                         }
                         self.provider.get_token.reset_mock()
                         self.provider.get_bot_identity.reset_mock()
-                        blocked = (
+                        directional_block = (
                             source != "public" and destination == "public" if write
                             else source == "public" and destination != "public"
                         )
+                        unverified_audience = source != "public" and destination != "public"
+                        blocked = directional_block or unverified_audience
                         with patch("issuelens_github_mcp.github.WikiRepository") as backend:
                             wiki = backend.return_value.__enter__.return_value
                             wiki.snapshot.return_value = wiki.write.return_value = {}
@@ -262,6 +264,29 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                                 self.provider.get_token.assert_awaited_once_with(
                                     WIKI_REPOSITORY, {"contents": "write" if write else "read"},
                                 )
+
+    async def test_separate_non_public_audiences_block_every_wiki_tool(self):
+        operations = [(method, arguments) for method, arguments, _, _ in READ_CASES]
+        operations.append(("write_wiki_pages", WRITE_ARGUMENTS))
+        for source in ("private", "internal"):
+            for destination in ("private", "internal"):
+                for method, arguments in operations:
+                    with self.subTest(source=source, destination=destination, method=method):
+                        self.configure_memory()
+                        self.get_repository.side_effect = lambda repository: {
+                            "visibility": source if repository == REPOSITORY else destination,
+                            "permissions": {"admin": True, "pull": True, "push": True},
+                        }
+                        with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+                            with self.assertRaisesRegex(GitHubAppError, "verified audience relationship"):
+                                kwargs = (
+                                    {"expected_wiki_repository": WIKI_REPOSITORY}
+                                    if method == "write_wiki_pages" else {}
+                                )
+                                await getattr(self.writer(), method)(REPOSITORY, *arguments, **kwargs)
+                            backend.assert_not_called()
+        self.provider.get_token.assert_not_awaited()
+        self.provider.get_bot_identity.assert_not_awaited()
 
     async def test_invalid_or_unavailable_visibility_fails_closed_for_both_repositories(self):
         invalid = (
@@ -669,7 +694,7 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
         self.config = CONFIG
         self.source_app_available = True
         self.destination_app_available = True
-        self.visibilities = {REPOSITORY: "private", WIKI_REPOSITORY: "private"}
+        self.visibilities = {REPOSITORY: "public", WIKI_REPOSITORY: "public"}
 
         def handler(request):
             self.requests.append(request)
@@ -729,6 +754,29 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
             timeout=15, env=self.environment, shell=False,
         ).stdout.decode("utf-8")
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
+    async def test_installed_app_does_not_authorize_cross_private_wiki_audiences(self, _):
+        self.visibilities = {REPOSITORY: "private", WIKI_REPOSITORY: "private"}
+        with patch("issuelens_github_mcp.github.WikiRepository", self.local_wiki):
+            async with Client(create_server(self.github_client())) as client:
+                read = await client.call_tool("get_wiki_snapshot", {"repository": REPOSITORY})
+                written = await client.call_tool("write_wiki_pages", {
+                    "repository": REPOSITORY, "pages": {"Home.md": "Private project knowledge"},
+                    "expected_base": self.base, "expected_wiki_repository": WIKI_REPOSITORY,
+                    "message": "Update memory",
+                })
+        for result in (read, written):
+            self.assertTrue(result.is_error)
+            self.assertIn("verified audience relationship", str(result.content))
+        self.assertEqual(self.opened_repositories, [])
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        destination_tokens = [
+            json.loads(request.content)["permissions"] for request in self.requests
+            if request.url.path == "/app/installations/5678/access_tokens"
+        ]
+        self.assertEqual(destination_tokens, [{"metadata": "read"}])
+        self.assertFalse(any(request.url.path == "/app" for request in self.requests))
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
     async def test_maximum_utf8_page_can_be_read_after_writing(self, _):
@@ -850,7 +898,7 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
             snapshot = await github.get_wiki_snapshot(REPOSITORY)
         self.assertEqual(snapshot["sha"], self.base)
         self.config = CONFIG.replace(WIKI_REPOSITORY, OTHER_WIKI_REPOSITORY)
-        self.visibilities[OTHER_WIKI_REPOSITORY] = "private"
+        self.visibilities[OTHER_WIKI_REPOSITORY] = "public"
         with patch("issuelens_github_mcp.github.WikiRepository", self.local_wiki):
             remapped_snapshot = await github.get_wiki_snapshot(REPOSITORY)
         self.assertEqual(remapped_snapshot["sha"], snapshot["sha"])

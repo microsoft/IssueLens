@@ -164,9 +164,14 @@ protocol for chat.
   destination. Markdown guides organization/topics only; it cannot override
   the target or supply arbitrary Git URLs, tokens, or shell settings.
 - Source-user authorization is separate from destination App installation
-  access. Never publish private-source knowledge to a public wiki or read a
-  private wiki for public-source context. Other mappings may share a privacy
-  category without identical ACLs or permission to disclose to another audience.
+  access. Never publish private/internal-source knowledge to a public wiki or
+  read a private/internal wiki for public-source context. Cross-repository
+  mappings between private/internal repositories are rejected for both reads
+  and writes because their audience relationship cannot be verified; use the
+  source project's own wiki. Same-repository and public-to-public mappings
+  remain supported. A private/internal source may read a public wiki, and a
+  public source may write public information to a private/internal wiki,
+  subject to job authorization and destination App access.
   Invalid or inaccessible destinations fail without silent source-wiki fallback.
   No per-repository App environment configuration is needed.
 - Wiki writes require an explicit current-user wiki-update request or an

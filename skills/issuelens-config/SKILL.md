@@ -55,9 +55,13 @@ read/write MCP tool. Each independently re-reads and validates the same mapping
 with the shared parser and resolves credentials and transport to the destination.
 App installation and operation-scoped read/write permission are required there;
 tokens are scoped to that actual destination. Source-user authorization remains
-separate from App installation access. No private-source publication to a public
-wiki and no private-wiki reading for public-source context are allowed.
-Same-privacy-category mappings do not imply identical ACLs. Misconfigured or
+separate from App installation access. No private/internal-source publication
+to a public wiki and no private/internal-wiki reading for public-source context
+are allowed. Cross-repository mappings between private/internal repositories
+are rejected for both reads and writes because their audience relationship
+cannot be verified; use the source project's own wiki. Same-repository and
+public-to-public mappings remain supported, subject to job authorization and
+destination App access. Misconfigured or
 inaccessible destinations fail without silent source-wiki fallback. If a mapping
 change conflicts with a read SHA, stop and re-establish the target and evidence,
 not an automatic overwrite. The reader may continue its owning job with other

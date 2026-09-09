@@ -50,10 +50,13 @@ deployed, and planned behavior. Preserve unrelated content and existing assets.
 Exclude credentials, personal or private cross-project data, transcripts, and
 raw logs. Conflicting evidence, destructive edits, and changes to human-owned
 policy require ordinary human interaction, not a stored approval workflow.
-No knowledge impact means no wiki change. Never copy private-project knowledge
-into a public wiki or read a private wiki for public-source context. Mappings
-within a privacy category do not imply identical ACLs or authorize disclosure to
-another audience.
+No knowledge impact means no wiki change. Never copy private/internal-project
+knowledge into a public wiki or read a private/internal wiki for public-source
+context. Cross-repository mappings between private/internal repositories are
+rejected for both reads and writes because their audience relationship cannot
+be verified; use the source project's own wiki. Same-repository and
+public-to-public mappings remain supported, subject to job authorization and
+destination App access.
 
 Readers and the maintenance agent first call `issuelens-config` with the explicit
 source project as `repository` and `domain="team_memory"`. Read the returned
@@ -71,9 +74,11 @@ content-supplied remote, token, or shell configuration.
 
 Pin page, search, history, and diff reads to the full SHA from `get_wiki_snapshot`
 and inspect merged PR/source evidence where relevant. The writer calls
-`write_wiki_pages(repository="owner/project", pages={path: full_utf8_content}, expected_base=full_sha, message=short_summary)`
+`write_wiki_pages(repository="owner/project", pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot.wiki_repository, expected_base=read_snapshot.sha, message=short_summary)`
 for minimal changes, including the full source commit SHA in the summary where
-relevant. No force option is exposed.
+relevant. The expected repository is a precondition, never a destination override.
+If the mapping changes, even if the SHA is unchanged, stop and read a fresh
+snapshot before preparing a new update. No force option is exposed.
 Create/update `.md` pages only: at most 20 pages, 64 KiB each, 256 KiB total.
 Deletion/rename are deferred. The backend persists knowledge and history in an
 atomic Git commit; no separate host publisher or proposal persistence is needed.

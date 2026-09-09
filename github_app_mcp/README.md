@@ -72,9 +72,15 @@ Installation access is not source-user authorization.
 
 Validated `team_memory.wiki_repository` selects only the wiki capability's
 destination; it does not broaden source reads, other writes, or notifications.
-Do not publish private-source knowledge to a public wiki or read a private wiki
-for public-source context. Other mappings may share a privacy category without
-having identical ACLs or authorizing disclosure to another audience.
+Do not publish private/internal-source knowledge to a public wiki or read a
+private/internal wiki for public-source context. Cross-repository mappings
+between private/internal repositories are rejected for both reads and writes
+because their audience relationship cannot be verified; use the source
+project's own wiki. No audience or ACL matching mechanism is implemented.
+Same-repository access skips the cross-repository audience comparison and
+remains supported, as do public-to-public mappings. A private/internal source
+may read a public wiki, and a public source may write public information to a
+private/internal wiki, subject to job authorization and destination App access.
 
 Wiki reads use destination-scoped App access:
 

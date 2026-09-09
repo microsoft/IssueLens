@@ -47,9 +47,12 @@ reader/triage servers do not expose the writer. App installation and Contents
 read/write permission are required at the actual destination, not just the
 source; each token is scoped to that destination and the read or write operation.
 App access is separate from source-user authorization and does not grant it.
-Never publish private-source knowledge to a public wiki or read a private wiki
-for public-source context. Mappings within a privacy category do not imply
-identical ACLs or authorize disclosure to another audience.
+Never publish private/internal-source knowledge to a public wiki or read a
+private/internal wiki for public-source context. Cross-repository mappings
+between private/internal repositories are rejected for both reads and writes
+because their audience relationship cannot be verified; use the source
+project's own wiki. Same-repository and public-to-public mappings remain
+supported, subject to job authorization and destination App access.
 
 ## Maintain project knowledge
 

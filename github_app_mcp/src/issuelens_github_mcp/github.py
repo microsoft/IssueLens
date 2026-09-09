@@ -603,6 +603,11 @@ class GitHubClient:
             raise GitHubAppError("Team memory cannot write non-public project context to a public wiki")
         if not write and source_visibility == "public" and wiki_visibility != "public":
             raise GitHubAppError("Team memory cannot read a non-public wiki in a public project context")
+        if source_visibility != "public" and wiki_visibility != "public":
+            raise GitHubAppError(
+                "Team memory cannot access a different non-public repository's wiki "
+                "without a verified audience relationship; use the source project's own wiki"
+            )
         return wiki_repository
 
     async def _wiki_read(

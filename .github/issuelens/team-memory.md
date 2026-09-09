@@ -22,9 +22,13 @@ snapshot for each job. Invalid or inaccessible targets fail without silent
 source-wiki fallback. A write additionally
 requires an explicit current-user wiki-update request or an accepted trusted
 postmerge job authorizing `microsoft/IssueLens`; this policy is not authorization.
-Never publish private-source knowledge to this public wiki or read a private
-wiki for public-source context. Mappings within a privacy category do not imply
-identical ACLs. The validated mapping selects only the wiki destination, not
+Never publish private/internal-source knowledge to this public wiki or read a
+private/internal wiki for public-source context. Cross-repository mappings
+between private/internal repositories are rejected for both reads and writes
+because their audience relationship cannot be verified; use the source
+project's own wiki. Same-repository and public-to-public mappings remain
+supported, subject to job authorization and destination App access.
+The validated mapping selects only the wiki destination, not
 additional source repositories, other writes, or notifications.
 
 ## Structure
@@ -72,8 +76,12 @@ existing Markdown pages. No knowledge change means no write.
 
 Only the authorized maintenance job calls `write_wiki_pages` with the explicit
 source project as `repository`, changed pages mapped to full UTF-8 content, the
-full wiki SHA as `expected_base`, and a short summary including the full source
-commit SHA where relevant. No force option is exposed.
+snapshot destination as `expected_wiki_repository=read_snapshot.wiki_repository`,
+the full wiki SHA as `expected_base=read_snapshot.sha`, and a short summary
+including the full source commit SHA where relevant. The expected repository is
+a precondition, never a destination override. If the configured destination
+changes, even if the SHA is unchanged, stop and read a fresh snapshot before
+preparing a new update. No force option is exposed.
 The bundled MCP `.wiki` backend persists knowledge and history in an atomic Git
 commit. Create/update `.md` only, at most 20 pages, 64 KiB each, 256 KiB total;
 deletions and renames are deferred. Re-read and regenerate on conflicts; compare

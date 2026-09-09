@@ -86,9 +86,12 @@ transport to the destination. Misconfigured or inaccessible destinations fail
 without silent source-wiki fallback. The App must be installed at the actual
 destination with read/write permission for the operation; tokens are scoped
 there, not merely to the source. App access is separate from source-user
-authorization. Never publish private-source knowledge to a public wiki or read
-a private wiki for public-source context. Same-privacy-category mappings do not
-imply identical ACLs or authorize disclosure to another audience.
+authorization. Never publish private/internal-source knowledge to a public wiki
+or read a private/internal wiki for public-source context. Cross-repository
+mappings between private/internal repositories are rejected for both reads
+and writes because their audience relationship cannot be verified; use the
+source project's own wiki. Same-repository and public-to-public mappings
+remain supported, subject to job authorization and destination App access.
 
 Only the team-memory agent-local MCP server exposes `write_wiki_pages`. The
 parent automatically supplies its internal `--wiki-writer` mode; users need no

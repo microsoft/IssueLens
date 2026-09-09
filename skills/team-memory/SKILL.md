@@ -37,9 +37,12 @@ using cached policy from another project or previous conversation turn.
 	same mapping and resolves credentials and Git transport to the destination.
 	The App must be installed there with read permission; tokens are scoped to
 	that actual destination. Installation access does not establish source-user
-	authorization. Do not read a private wiki for public-source context or publish
-	private-source knowledge to a public wiki. Same-privacy-category mappings do
-	not imply identical ACLs or authorize unrelated sources or writes.
+	authorization. Do not read a private/internal wiki for public-source context
+	or publish private/internal-source knowledge to a public wiki. Cross-repository
+	mappings between private/internal repositories are rejected for both reads
+	and writes because their audience relationship cannot be verified; use the
+	source project's own wiki. Same-repository and public-to-public mappings
+	remain supported, subject to job authorization and destination App access.
 2. Call `get_wiki_snapshot`, then use `list_wiki_pages`, `search_wiki`, and
 	`get_wiki_page` at that same snapshot, pinned to the full wiki SHA. Use
 	`list_wiki_history` at that SHA and `get_wiki_diff` with explicit comparison

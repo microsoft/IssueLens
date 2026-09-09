@@ -51,10 +51,14 @@ while reporting that memory was unavailable.
 
 Validated `team_memory.wiki_repository` is a narrow scope exception selecting
 only the wiki capability's destination. It grants no other writes, additional
-source repositories, or notification scope. Never publish private-source
-knowledge to a public wiki or read a private wiki for public-source context.
-Mappings across projects may share a privacy category without identical ACLs
-or permission to disclose to another audience. Source-user authorization is
+source repositories, or notification scope. Never publish private/internal-source
+knowledge to a public wiki or read a private/internal wiki for public-source context.
+Cross-repository mappings between private/internal repositories are rejected
+for both reads and writes because their audience relationship cannot be
+verified; use the source project's own wiki. Same-repository and public-to-public
+mappings remain supported. A private/internal source may read a public wiki,
+and a public source may write public information to a private/internal wiki,
+subject to job authorization and destination App access. Source-user authorization is
 separate from App installation access.
 Writes require an explicit current-user wiki-update request or an accepted
 trusted postmerge job authorizing the source project and its mapped wiki; existing issue-loop commands and
