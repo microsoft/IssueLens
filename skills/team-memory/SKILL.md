@@ -29,6 +29,12 @@ Report that limitation and continue with other authorized evidence where
 possible. Do not bypass validation by reading customization files directly or
 using cached policy from another project or previous conversation turn.
 
+Wiki tools use the bundled Dulwich Python library for Git network and object
+operations, without spawning Git, SSH, or credential helpers. No Git installation
+or runtime installer is needed. Only SHA-1 Git repositories are supported;
+SHA-256 is rejected. Typed validation, byte budgets, cooperative timeouts, and
+redirect denial remain enforced. Binary diffs are notices, not binary patches.
+
 ## Retrieve and use knowledge
 
 1. Select the explicit source project and topics relevant to the owning job.

@@ -69,8 +69,12 @@ requests a wiki update or an accepted trusted postmerge job authorizes that
 source project and its mapped wiki. Only the team-memory agent has
 `write_wiki_pages`; the parent automatically supplies internal `--wiki-writer`
 mode. Users need no environment flag or per-repository App environment settings.
-Use the mapped existing initialized wiki with Git installed, not a
-content-supplied remote, token, or shell configuration.
+Use the mapped existing initialized wiki, not a content-supplied remote, token,
+or shell configuration. The bundled Dulwich Python library performs Git network
+and object operations without spawning Git, SSH, or credential helpers; no Git
+installation, Dockerfile change, or runtime installer is needed. Only SHA-1 Git
+repositories are supported; SHA-256 is rejected. Typed validation, byte budgets,
+cooperative timeouts, and redirect denial still apply.
 
 Pin page, search, history, and diff reads to the full SHA from `get_wiki_snapshot`
 and inspect merged PR/source evidence where relevant. The writer calls
@@ -80,7 +84,9 @@ relevant. The expected repository is a precondition, never a destination overrid
 If the mapping changes, even if the SHA is unchanged, stop and read a fresh
 snapshot before preparing a new update. No force option is exposed.
 Create/update `.md` pages only: at most 20 pages, 64 KiB each, 256 KiB total.
-Deletion/rename are deferred. The backend persists knowledge and history in an
+Deletion/rename are unsupported. Unchanged assets are preserved byte-for-byte;
+diffs report binary-change notices, not binary patches.
+The backend persists knowledge and history in an
 atomic Git commit; no separate host publisher or proposal persistence is needed.
 Re-read and regenerate after stale conflicts; compare desired contents with
 current pages before retrying a lost response. If a mapping change conflicts

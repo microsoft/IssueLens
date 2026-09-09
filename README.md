@@ -70,10 +70,19 @@ supplies its internal `--wiki-writer` launch mode automatically. Users need no
 environment flag or per-repository App environment configuration. Shared
 reader/triage servers do not expose the writer. The existing
 `GITHUB_MCP_ENABLE_WRITES` gate remains for triage issue writes, not wiki writes.
-Git and an initialized destination wiki are required. The App must be installed
+An initialized destination wiki is required. The App must be installed
 at the actual destination with **Contents: read** for wiki reads and **Contents:
 write** for maintenance; source installation alone is insufficient. Tokens are
 scoped to that destination and the operation's required permission.
+
+Wiki Git network and object operations use the Dulwich Python library (1.2.14),
+not `git.exe`, the Git CLI, or a Git subprocess. The Foundry ZIP
+`codeConfiguration` uses `remote_build` with `runtime: python_3_13` and installs
+the root `requirements.txt`; the standalone MCP `github_app_mcp/pyproject.toml`
+declares the same Dulwich dependency. No Git installation, Dockerfile change,
+or runtime installer is needed in either mode. IssueLens still launches its
+stdio MCP server as a Python subprocess; the wiki backend never spawns Git,
+SSH, or credential helpers.
 
 Maintenance pins reads to one full wiki SHA and sends full UTF-8 page contents
 with both required preconditions from the same snapshot:
@@ -99,7 +108,10 @@ abbreviation, where relevant; the short commit summary also includes that full
 SHA. No force option is exposed. The [MCP wiki backend](github_app_mcp/src/issuelens_github_mcp/wiki.py)
 persists pages and history in an atomic Git commit. No knowledge change means no
 write. Limits are 20 `.md` pages, 64 KiB each, 256 KiB total; deletion/rename are
-deferred. Stale conflicts require re-reading and regeneration; a lost response
+unsupported. Unchanged assets are preserved byte-for-byte; diffs report binary
+changes as notices, not binary patches. Only SHA-1 Git repositories (GitHub's
+current format) are supported; SHA-256 repositories are rejected.
+Stale conflicts require re-reading and regeneration; a lost response
 requires comparing current content before retrying. Only tool-confirmed status
 and wiki SHAs are reported. On a destination mismatch, read a fresh snapshot and
 re-establish destination, authorization, and evidence; never overwrite
@@ -395,7 +407,7 @@ App endpoint variables are configured.
 ### Prerequisites
 
 - Python 3.12+
-- Git on `PATH` for wiki reads and authorized writes; an existing initialized wiki
+- An existing initialized destination wiki for wiki reads and authorized writes
 - A GitHub fine-grained PAT (`github_pat_` prefix)
 - Azure credentials that can read the configured Key Vault secret
 

@@ -32,6 +32,12 @@ to read other source repositories, make other writes, or broaden notifications.
 Markdown cannot override the target or supply arbitrary Git URLs, tokens, or
 shell settings. Never run shell commands for wiki access.
 
+The bundled backend uses Dulwich for Python-library Git network and object
+operations; it never spawns Git, SSH, or credential helpers. No Git installation,
+Dockerfile change, or runtime installer is needed. It supports only SHA-1 Git
+repositories (GitHub's current format) and rejects SHA-256. Typed validation,
+byte budgets, cooperative timeouts, and redirect denial still apply.
+
 ## Authorize maintenance
 
 Wiki writes belong to this maintenance job, not the shared reader skill. Write
@@ -70,7 +76,9 @@ supported, subject to job authorization and destination App access.
 	knowledge; a merge does not prove release or deployment.
 3. Prepare minimal Markdown page edits using the loaded structure, topics, and
 	evidence requirements. No durable knowledge change means no-change and no
-	write. Create/update `.md` pages only; deletion and rename are deferred.
+	write. Create/update `.md` pages only; deletion and rename are unsupported.
+	Unchanged assets are preserved byte-for-byte; diffs provide binary-change
+	notices, not binary patches.
 	Stay within 20 pages, 64 KiB UTF-8 per page, and 256 KiB total per call. Reads
 	accept only `HEAD` or a full SHA; use the pinned full SHA for this job.
 4. After confirming authorization, call
@@ -104,8 +112,8 @@ supported, subject to job authorization and destination App access.
 
 Sensitive, conflicting, destructive, or unsupported requests require ordinary
 human interaction before proceeding, not a stored approval workflow. If tools,
-Git, or destination App access are unavailable, ask for the missing prerequisite
-and report that the wiki was not updated. Do not create proposal IDs, a database,
+the bundled backend, or destination App access are unavailable, report the
+limitation and that the wiki was not updated. Do not create proposal IDs, a database,
 or stored approval state. This is direct maintenance capability: full merge
 orchestration remains separate, and the postmerge shell skeleton does not submit
 work. There is no durable job queue, reconciliation service, or guaranteed

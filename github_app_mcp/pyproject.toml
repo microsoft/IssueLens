@@ -14,6 +14,8 @@ dependencies = [
     "mcp>=2.0.0,<3",
     "PyJWT[crypto]>=2.9.0",
     "PyYAML>=6.0",
+    "dulwich==1.2.14",
+    "urllib3>=2.2.2",
 ]
 
 [project.scripts]

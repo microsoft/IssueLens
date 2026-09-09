@@ -11,6 +11,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import httpx
+from dulwich.client import LocalGitClient
+from dulwich.config import ConfigDict, StackedConfig
+from dulwich.objects import Blob, Commit, Tree
+from dulwich.repo import Repo
 from mcp import Client
 
 
@@ -697,23 +701,36 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
 
 class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        for patcher in (
+            patch.object(subprocess, "Popen", side_effect=AssertionError("Subprocess execution is forbidden")),
+            patch.object(os, "system", side_effect=AssertionError("Shell execution is forbidden")),
+            patch("dulwich.config.StackedConfig.default", side_effect=AssertionError("Ambient Git config is forbidden")),
+            patch.dict(os.environ, {"PATH": ""}, clear=True),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         temporary = tempfile.TemporaryDirectory(prefix="wiki-mcp-tests-")
         self.addCleanup(temporary.cleanup)
         self.directory = pathlib.Path(temporary.name)
         self.remote = self.directory / "fixture.git"
         self.remote.mkdir()
-        self.environment = WikiRepository(REPOSITORY)._environment(self.directory)
-        self.environment.pop("GIT_INDEX_FILE")
-        self.environment.update({
-            "GIT_ALLOW_PROTOCOL": "file",
-            "GIT_AUTHOR_NAME": "Fixture", "GIT_AUTHOR_EMAIL": "fixture@example.test",
-            "GIT_COMMITTER_NAME": "Fixture", "GIT_COMMITTER_EMAIL": "fixture@example.test",
-        })
-        self.git("init", "--bare", "--initial-branch=docs/wiki")
-        blob = self.git("hash-object", "-w", "--stdin", input_bytes=b"# Home\nWelcome\n").strip()
-        tree = self.git("mktree", input_bytes=f"100644 blob {blob}\tHome.md\n".encode()).strip()
-        self.base = self.git("commit-tree", tree, input_bytes=b"Seed\n").strip()
-        self.git("update-ref", "refs/heads/docs/wiki", self.base)
+        self.repository = Repo.init_bare(self.remote, config=StackedConfig([]))
+        self.addCleanup(self.repository.close)
+        blob = Blob.from_string(b"# Home\nWelcome\n")
+        tree = Tree()
+        tree.add(b"Home.md", 0o100644, blob.id)
+        commit = Commit()
+        commit.tree = tree.id
+        commit.parents = []
+        commit.author = commit.committer = b"Fixture <fixture@example.test>"
+        commit.author_time = commit.commit_time = 1_700_000_000
+        commit.author_timezone = commit.commit_timezone = 0
+        commit.message = b"Seed\n"
+        for obj in (blob, tree, commit):
+            self.repository.object_store.add_object(obj)
+        self.repository.refs.set_symbolic_ref(b"HEAD", b"refs/heads/docs/wiki")
+        self.repository.refs[b"refs/heads/docs/wiki"] = commit.id
+        self.base = commit.id.decode("ascii")
         remote = self.remote
         self.opened_repositories = []
         opened_repositories = self.opened_repositories
@@ -725,14 +742,8 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                 opened_repositories.append(repository)
                 super().__init__(repository, **kwargs)
 
-            @property
-            def remote(self):
-                return str(remote)
-
-            def _environment(self, parent):
-                environment = super()._environment(parent)
-                environment["GIT_ALLOW_PROTOCOL"] = "file"
-                return environment
+            def _create_client(self):
+                return LocalGitClient(config=ConfigDict()), str(remote)
 
         self.local_wiki = LocalWiki
         self.requests = []
@@ -793,12 +804,18 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
             self.provider, wiki_writes_enabled=True, transport=self.transport,
         )
 
-    def git(self, *arguments, input_bytes=None):
-        return subprocess.run(
-            ["git", "-C", str(self.remote), *arguments], input=input_bytes,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True,
-            timeout=15, env=self.environment, shell=False,
-        ).stdout.decode("utf-8")
+    def tip(self):
+        return self.repository.refs[b"HEAD"].decode("ascii")
+
+    def parents(self):
+        commit = self.repository[self.repository.refs[b"HEAD"]]
+        self.assertIsInstance(commit, Commit)
+        return [parent.decode("ascii") for parent in commit.parents]
+
+    def commit_identity(self):
+        commit = self.repository[self.repository.refs[b"HEAD"]]
+        self.assertIsInstance(commit, Commit)
+        return commit.author.decode("utf-8"), commit.committer.decode("utf-8")
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
     async def test_installed_app_does_not_authorize_cross_private_wiki_audiences(self, _):
@@ -815,7 +832,7 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(result.is_error)
             self.assertIn("verified audience relationship", str(result.content))
         self.assertEqual(self.opened_repositories, [])
-        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        self.assertEqual(self.tip(), self.base)
         destination_tokens = [
             json.loads(request.content)["permissions"] for request in self.requests
             if request.url.path == "/app/installations/5678/access_tokens"
@@ -883,9 +900,9 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(updated["status"], "updated")
                 self.assertEqual(updated["branch"], "docs/wiki")
                 self.assertNotEqual(updated["sha"], before["sha"])
-                self.assertEqual(self.git("rev-parse", "HEAD").strip(), updated["sha"])
-                self.assertEqual(self.git("rev-parse", "HEAD^").strip(), self.base)
-                self.assertEqual(self.git("show", "-s", "--format=%an|%ae|%cn|%ce", "HEAD").strip(), "|".join(IDENTITY * 2))
+                self.assertEqual(self.tip(), updated["sha"])
+                self.assertEqual(self.parents(), [self.base])
+                self.assertEqual(self.commit_identity(), (f"{IDENTITY[0]} <{IDENTITY[1]}>",) * 2)
                 page = await call_json(client, "get_wiki_page", {"repository": REPOSITORY, "path": "Home.md"})
                 self.assertEqual(page["content"], write["pages"]["Home.md"])
                 old_page = await call_json(client, "get_wiki_page", {"repository": REPOSITORY, "path": "Home.md", "ref": self.base})
@@ -910,7 +927,7 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                     result = await client.call_tool("write_wiki_pages", invalid)
                     self.assertTrue(result.is_error)
                     self.assertNotIn(TOKEN, str(result.content))
-                    self.assertEqual(self.git("rev-parse", "HEAD").strip(), updated["sha"])
+                    self.assertEqual(self.tip(), updated["sha"])
                 opened_before_denial = len(self.opened_repositories)
                 denied = await client.call_tool("write_wiki_pages", {
                     **write, "repository": "microsoft/other", "expected_wiki_repository": "microsoft/other",
@@ -969,7 +986,7 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
             f"/repos/{REPOSITORY}/contents/{CONFIG_PATH}",
             f"/repos/{REPOSITORY}/contents/{INSTRUCTION_PATH}",
         ])
-        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        self.assertEqual(self.tip(), self.base)
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
     async def test_false_expected_destination_never_selects_an_authentication_target(self, _):
@@ -1010,7 +1027,7 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
         token_requests = [json.loads(request.content) for request in self.requests if request.url.path.endswith("/access_tokens")]
         self.assertEqual(token_requests, [{"repositories": ["IssueLens"], "permissions": {"contents": "read"}}])
         self.assertEqual(self.opened_repositories, [])
-        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+        self.assertEqual(self.tip(), self.base)
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
     async def test_invalid_source_config_never_requests_destination_token_or_opens_wiki(self, _):

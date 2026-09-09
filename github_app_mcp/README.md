@@ -6,6 +6,15 @@ team-memory agent-local server exposing only `write_wiki_pages` through the
 parent-supplied internal `--wiki-writer` mode.
 This mode is automatic; users need no environment flag.
 
+Wiki Git network and object operations use the Dulwich Python library (1.2.14),
+not `git.exe`, the Git CLI, or a Git subprocess. The Foundry ZIP
+`codeConfiguration` uses `remote_build` with `runtime: python_3_13` and installs
+the root `requirements.txt`; the standalone MCP `github_app_mcp/pyproject.toml`
+declares the same Dulwich dependency. No Git installation, Dockerfile change,
+or runtime installer is needed in either mode. IssueLens still launches its
+stdio MCP server as a Python subprocess; the wiki backend never spawns Git,
+SSH, or credential helpers.
+
 ## Security model
 
 - The GitHub App private key is loaded only from an Azure Key Vault secret URI
@@ -146,7 +155,7 @@ acknowledgement remains after processing finishes.
 
 `write_wiki_pages` is available only to the team-memory agent and requires an App
 token scoped to the mapped destination with **Contents: write**. It writes only
-an existing initialized wiki; Git must be installed. For source
+an existing initialized wiki. For source
 `microsoft/project` configured with `wiki_repository: microsoft/team-knowledge`,
 the tool still accepts the source project, not the destination:
 
@@ -170,10 +179,19 @@ scoped App credentials. A mismatch is rejected even if the SHA is unchanged.
 
 `read_snapshot.sha` is the full SHA returned by the snapshot read. Supply complete UTF-8
 contents for changed `.md` pages, not patches: at most 20 pages, 64 KiB per page,
-and 256 KiB total. Create/update only; deletion and rename are deferred. The
+and 256 KiB total. Create/update only; deletion and rename are unsupported. The
 pages cite evidence and include the full source commit SHA, not an abbreviation,
 where relevant; the short commit message also includes that full SHA. No generic URL,
 force, token, credential, or approval arguments are accepted.
+
+Typed validation, byte and cooperative time budgets, and redirect denial bound
+the internal HTTPS `x-access-token` transport. Only SHA-1 Git repositories
+(GitHub's current format) are supported; SHA-256 repositories are rejected.
+Operations use bounded temporary PACK storage and in-memory Git objects, without
+a full worktree checkout, hooks, filters, or Git config discovery. Timeouts are
+cooperative across socket, library, and DNS operations, not a hard CPU deadline.
+Diffs report binary-change notices, not binary patches; unchanged assets are
+preserved byte-for-byte and page deletion is unsupported.
 
 The backend in [src/issuelens_github_mcp/wiki.py](src/issuelens_github_mcp/wiki.py)
 owns snapshots and an atomic Git commit, persisting knowledge and history with

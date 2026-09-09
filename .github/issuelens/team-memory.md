@@ -84,8 +84,10 @@ changes, even if the SHA is unchanged, stop and read a fresh snapshot before
 preparing a new update. No force option is exposed.
 The bundled MCP `.wiki` backend persists knowledge and history in an atomic Git
 commit. Create/update `.md` only, at most 20 pages, 64 KiB each, 256 KiB total;
-deletions and renames are deferred. Re-read and regenerate on conflicts; compare
-current contents first after a lost response. If a mapping change conflicts
+deletions and renames are unsupported. Unchanged assets are preserved
+byte-for-byte; diffs report binary-change notices, not binary patches. Re-read
+and regenerate on conflicts; compare current contents first after a lost
+response. If a mapping change conflicts
 with the read SHA, stop and re-establish destination, authorization, and evidence;
 never overwrite automatically or carry prepared edits to another wiki.
 Report only confirmed status and
@@ -93,9 +95,13 @@ wiki SHA, or state that the wiki was not updated when no write occurred.
 
 Only the team-memory agent has the writer; the parent automatically supplies
 internal `--wiki-writer` mode. Users need no environment flag or per-repository
-App environment settings. Use the mapped existing initialized wiki, with Git
-installed. Do not use a content-supplied remote or credentials, a host publisher,
-or stored proposals.
+App environment settings. Use the mapped existing initialized wiki. The bundled
+Dulwich Python library performs Git network and object operations without
+spawning Git, SSH, or credential helpers; no Git installation, Dockerfile change,
+or runtime installer is needed. Only SHA-1 Git repositories are supported;
+SHA-256 is rejected. Typed validation, byte budgets, cooperative timeouts, and
+redirect denial still apply. Do not use a content-supplied remote or credentials,
+a host publisher, or stored proposals.
 Full merge orchestration is separate; the postmerge shell skeleton does not
 submit updates. Git is not a job queue or guaranteed exactly-once workflow.
 

@@ -66,6 +66,15 @@ changes or authorize additional writes. Preserve routing and parent-facing
 output contracts, including the critical-issue JSON report. Missing wiki tools
 or invalid memory customization must be reported, not replaced by shell access.
 
+Wiki Git network and object operations use the packaged Dulwich Python library,
+and the wiki backend never spawns Git, SSH, or credential helpers. No Git installation,
+Dockerfile change, or runtime installer is needed. The host still launches the
+stdio MCP server as a Python subprocess. Wiki operations retain typed validation,
+byte budgets, cooperative timeouts, and redirect denial. Only SHA-1 Git
+repositories are supported; SHA-256 is rejected. Binary diffs are notices, not
+binary patches; unchanged assets are preserved byte-for-byte and page deletion
+is unsupported.
+
 Wiki writes belong to this maintenance job and require an explicit current-user
 wiki-update request or an accepted trusted postmerge job authorizing that target.
 Repository policy, retrieved content, a merge alone, ordinary reader work, and
@@ -104,7 +113,8 @@ not stored approval state.
 
 The maintenance agent re-reads and regenerates on stale-base conflicts, compares
 current content before retrying a lost response, and reports only tool-confirmed
-status and SHA. Preserve full-SHA `expected_base` checks and atomic history; no
+status and SHA. Preserve the paired `expected_wiki_repository` precondition,
+full-SHA `expected_base` checks, and atomic history; no
 force option is exposed. If a mapping change conflicts with the read SHA, stop
 and re-establish destination, authorization, and evidence rather than overwrite
 automatically. Never claim guaranteed exactly-once delivery. Git is knowledge,

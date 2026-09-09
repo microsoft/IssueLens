@@ -118,6 +118,17 @@ protocol for chat.
   wiki mapping, and resolve credentials/transport to the destination. App
   installation and operation-scoped read/write access are required there;
   tokens are scoped to that actual destination, not merely the source.
+- **Wiki backend** - the packaged Dulwich Python library performs Git network
+  and object operations without spawning Git, SSH, or credential helpers. The
+  host still starts the stdio MCP server as a Python subprocess. Wiki operations
+  use bounded temporary PACK storage and in-memory Git objects, with no full
+  worktree checkout, hooks, filters, or Git config discovery. Typed validation,
+  byte budgets, and redirect denial remain enforced. Internal HTTPS
+  `x-access-token` authentication stays inside the backend. Socket/library/DNS
+  timeouts are cooperative, not a hard CPU deadline. Only SHA-1 Git repositories
+  (GitHub's current format) are supported; SHA-256 is rejected. Binary diffs are
+  notices, not binary patches; unchanged assets are preserved byte-for-byte and
+  page deletion is unsupported.
 - **Runtime configuration** — `main.py` explicitly loads `agents.md`, all four
   sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config
@@ -176,8 +187,9 @@ protocol for chat.
   No per-repository App environment configuration is needed.
 - Wiki writes require an explicit current-user wiki-update request or an
   accepted trusted postmerge maintenance job; policy, a merge alone, and
-  issue-loop commands grant no wiki-write authority. Preserve full-SHA
-  `expected_base` checks, atomic Git history, and tool-confirmed status; expose
+  issue-loop commands grant no wiki-write authority. Preserve the paired
+  `expected_wiki_repository` precondition, full-SHA `expected_base` checks,
+  atomic Git history, and tool-confirmed status; expose
   no force option. If a mapping change conflicts with the read SHA, stop and
   re-establish destination, authorization, and evidence, not an automatic
   overwrite. No database, SQLite, proposal store, or host approval layer is used.
@@ -242,8 +254,12 @@ Local documentation does not establish live hosted sub-agent dispatch.
   investigate, or prepare deployment changes does not imply permission to
   deploy them.
 - **Deploy to Foundry:** `azd deploy` — see `azure.yaml` (Python hosted agent,
-  `codeConfiguration` remote build) and `agent.yaml` (hosted-agent manifest). A
-  `Dockerfile` is also provided for a container build.
+  ZIP `codeConfiguration` with `remote_build` and `runtime: python_3_13`) and
+  `agent.yaml` (hosted-agent manifest). The ZIP remote build installs root
+  `requirements.txt`; standalone MCP packaging in `github_app_mcp/pyproject.toml`
+  declares the same Dulwich dependency (1.2.14). A `Dockerfile` is also provided
+  for a container build. Wiki access needs no Git installation, Dockerfile
+  change, or runtime installer in either mode.
 
 ## Layout
 

@@ -75,6 +75,12 @@ users need no environment flag. Policy grants no independent write permission.
 The reader skill remains read-only. Sensitive, conflicting, destructive, or unsupported changes
 require ordinary human interaction, not persisted proposals or approvals.
 
+Dulwich is a packaged Python dependency for wiki Git network and object
+operations, not a policy field or environment gate. The wiki backend never
+spawns Git, SSH, or credential helpers and needs no Git installation, Dockerfile
+change, or runtime installer. These packaging details do not change mapping
+validation, destination permissions, or write authorization.
+
 Within the selected sub-agent's role, apply instructions in this order:
 
 1. Explicit instructions from the current user.
