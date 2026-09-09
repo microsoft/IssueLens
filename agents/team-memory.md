@@ -53,10 +53,11 @@ identical ACLs or authorize disclosure to another audience.
 
 ## Maintain project knowledge
 
-1. Load the policy above, then use `get_wiki_snapshot(repository=source_project)`
+1. Load the policy above, then use `read_snapshot = get_wiki_snapshot(repository=source_project)`
 	for the mapped, existing initialized wiki. Pin `list_wiki_pages`,
 	`get_wiki_page`, `search_wiki`, `list_wiki_history`, and `get_wiki_diff` to
-	the same full wiki SHA, using explicit comparison SHAs for diffs. Apply the
+	the same full wiki SHA, using explicit comparison SHAs for diffs. Retain
+	this snapshot's `wiki_repository` and `sha` together for the write. Apply the
 	configured structure and topic map; read only the
 	pages needed for the change. Missing tools or an uninitialized wiki are
 	limitations, not permission to bootstrap another destination.
@@ -70,7 +71,12 @@ identical ACLs or authorize disclosure to another audience.
 	Stay within 20 pages, 64 KiB UTF-8 per page, and 256 KiB total per call. Reads
 	accept only `HEAD` or a full SHA; use the pinned full SHA for this job.
 4. After confirming authorization, call
-	`write_wiki_pages(repository=source_project, pages={path: full_utf8_content}, expected_base=full_sha, message=short_summary)`.
+	`write_wiki_pages(repository=source_project, pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot.wiki_repository, expected_base=read_snapshot.sha, message=short_summary)`.
+	Both expected values are required. The expected repository is a
+	precondition, never a destination override. The writer compares it
+	case-insensitively with the freshly resolved policy destination before any
+	destination metadata, token lookup, or wiki access. Policy alone selects the
+	actual destination and scoped App credentials.
 	Include the full PR/source SHA in the short commit summary where relevant. Supply
 	full UTF-8 contents for changed pages only, not patches. The bundled MCP
 	`.wiki` backend owns snapshots and an atomic Git commit that persists the
@@ -78,9 +84,10 @@ identical ACLs or authorize disclosure to another audience.
 	arguments and no separate host publisher or persistence workflow.
 5. On a stale-base conflict, re-read the current snapshot and affected pages,
 	then regenerate the minimal change against that SHA; never blindly retry or
-	overwrite concurrent human edits. If the mapping changed and conflicts with
-	the read SHA, stop and re-establish the destination, authorization, and cited
-	evidence; do not automatically overwrite or reuse edits for another wiki.
+	overwrite concurrent human edits. A destination mismatch is rejected even if
+	the SHA is unchanged. Read a fresh snapshot and re-establish the destination,
+	authorization, and cited evidence; do not automatically overwrite or reuse
+	edits for another wiki, or merely replace the expected repository to retry.
 	If a previous response was lost, compare
 	desired content with current pages before attempting another write. Matching
 	content needs no repeat write and does not prove who performed the update.

@@ -151,6 +151,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             "pages": {"Home.md": "Updated memory"},
             "expected_base": "a" * 40,
             "message": "Update memory",
+            "expected_wiki_repository": "microsoft/TeamMemory",
         }
 
         async with Client(server) as client:
@@ -164,9 +165,13 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(tool.input_schema["properties"]), set(parameters))
         self.assertEqual(set(tool.input_schema["required"]), set(parameters))
         self.assertEqual(tool.input_schema["properties"]["pages"]["additionalProperties"], {"type": "string"})
+        self.assertEqual(tool.input_schema["properties"]["expected_wiki_repository"]["type"], "string")
+        self.assertIn("precondition, never a destination override", tool.description)
         self.assertFalse(result.is_error)
         self.assertEqual(github.calls, [(
-            "write_wiki_pages", tuple(parameters.values()), {},
+            "write_wiki_pages",
+            (parameters["repository"], parameters["pages"], parameters["expected_base"], parameters["message"]),
+            {"expected_wiki_repository": parameters["expected_wiki_repository"]},
         )])
 
     async def test_history_supports_snapshot_ref_and_retains_defaults(self):
@@ -225,9 +230,17 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         valid = {
             "repository": "microsoft/IssueLens", "pages": {"Home.md": "text"},
             "expected_base": "a" * 40, "message": "Update",
+            "expected_wiki_repository": "microsoft/TeamMemory",
         }
-        invalid = [{key: value for key, value in valid.items() if key != "expected_base"}]
+        invalid = [
+            {key: value for key, value in valid.items() if key != missing}
+            for missing in ("expected_base", "expected_wiki_repository")
+        ]
         invalid.extend({**valid, "pages": value} for value in ([], {"Home.md": None}, "text"))
+        invalid.extend(
+            {**valid, "expected_wiki_repository": value}
+            for value in (None, 1, True, [], {})
+        )
         async with Client(create_server(cast(GitHubClient, github))) as client:
             for arguments in invalid:
                 with self.subTest(arguments=arguments):

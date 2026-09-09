@@ -72,16 +72,35 @@ write** for maintenance; source installation alone is insufficient. Tokens are
 scoped to that destination and the operation's required permission.
 
 Maintenance pins reads to one full wiki SHA and sends full UTF-8 page contents
-with `expected_base`. Pages cite evidence and the full source commit SHA, not an
+with both required preconditions from the same snapshot:
+
+```python
+read_snapshot = get_wiki_snapshot(repository="microsoft/project")
+write_wiki_pages(
+  repository="microsoft/project",
+  pages={"Architecture.md": full_utf8_content},
+  expected_wiki_repository=read_snapshot.wiki_repository,
+  expected_base=read_snapshot.sha,
+  message=short_summary,
+)
+```
+
+`expected_wiki_repository` is a precondition, never a destination override.
+The writer validates the identifier and compares it case-insensitively with the
+freshly resolved policy destination before destination metadata, token lookup,
+or wiki access. Policy still selects the actual destination and scoped App
+credentials; a mismatch is rejected even if the SHA is unchanged.
+Pages cite evidence and the full source commit SHA, not an
 abbreviation, where relevant; the short commit summary also includes that full
 SHA. No force option is exposed. The [MCP wiki backend](github_app_mcp/src/issuelens_github_mcp/wiki.py)
 persists pages and history in an atomic Git commit. No knowledge change means no
 write. Limits are 20 `.md` pages, 64 KiB each, 256 KiB total; deletion/rename are
 deferred. Stale conflicts require re-reading and regeneration; a lost response
 requires comparing current content before retrying. Only tool-confirmed status
-and wiki SHAs are reported. If a mapping change conflicts with the read SHA,
-stop and re-establish destination, authorization, and evidence; never overwrite
-automatically or reuse edits for another wiki. See [MCP details](github_app_mcp/README.md).
+and wiki SHAs are reported. On a destination mismatch, read a fresh snapshot and
+re-establish destination, authorization, and evidence; never overwrite
+automatically, reuse edits for another wiki, or merely replace the expected
+repository to retry. See [MCP details](github_app_mcp/README.md).
 
 **Integration scope:** this simplifies direct maintenance, without a standalone
 host publisher or database/proposal/approval persistence. Full merge

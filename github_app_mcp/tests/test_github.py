@@ -135,6 +135,38 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.provider.calls, [])
 
+    async def test_refs_cannot_inject_search_syntax_or_git_expressions(self):
+        invalid_refs = (
+            "main\nOR\nrepo:other", "main\tOR\trepo:other", "main\r", "main\x00",
+            "main\x1f", "main\x7f", "main\u0085", "main\u200b", "main\u2028",
+            "main:other", "HEAD~1", "HEAD^", "main*", "main[0]", "main?",
+            "main\\other", "main..other", "main@{1}", "@", "-main", "/main",
+            "main/", "main//topic", ".hidden/topic", "main/.hidden", "main.lock",
+            "branch.lock/topic", "main.", 'main"', "main'", "main%0aOR",
+        )
+        client = self.client()
+        for ref in invalid_refs:
+            with self.subTest(ref=repr(ref)):
+                with self.assertRaises(GitHubAppError):
+                    await client.list_merged_pull_requests("microsoft/IssueLens", base=ref)
+                with self.assertRaises(GitHubAppError):
+                    await client.list_repository_tree("microsoft/IssueLens", ref)
+                with self.assertRaises(GitHubAppError):
+                    await client.compare_commits("microsoft/IssueLens", ref, "main")
+                with self.assertRaises(GitHubAppError):
+                    await client.get_file("microsoft/IssueLens", "README.md", ref=ref)
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.requests, [])
+
+    async def test_valid_branch_names_remain_scoped_in_merged_pr_search(self):
+        for ref in ("main", "release/1.2", "refs/heads/feature/topic", "a" * 40):
+            with self.subTest(ref=ref):
+                await self.client().list_merged_pull_requests("microsoft/IssueLens", base=ref)
+                self.assertEqual(
+                    self.requests[-1].url.params["q"],
+                    f"repo:microsoft/IssueLens is:pr is:merged base:{ref}",
+                )
+
     async def test_reaction_write_gate_is_checked_before_token_minting(self):
         with self.assertRaisesRegex(GitHubAppError, "write tools are disabled"):
             await self.client().add_eyes_reaction(

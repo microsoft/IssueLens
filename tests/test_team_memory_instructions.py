@@ -115,6 +115,16 @@ class TeamMemoryInstructionTests(unittest.TestCase):
         self.assertIn("publication result confirms the wiki commit", prompt)
         self.assertIn("wiki was not updated", prompt)
 
+    def test_writer_docs_bind_both_preconditions_to_the_read_snapshot(self):
+        for path in ("agents/team-memory.md", "README.md", "github_app_mcp/README.md"):
+            with self.subTest(path=path):
+                text = " ".join((ROOT / path).read_text(encoding="utf-8").split())
+                self.assertIn("expected_wiki_repository=read_snapshot.wiki_repository", text)
+                self.assertIn("expected_base=read_snapshot.sha", text)
+                self.assertIn("precondition, never a destination override", text)
+                self.assertIn("even if the SHA is unchanged", text)
+                self.assertIn("read a fresh snapshot", text.lower())
+
     def test_reader_is_discoverable_and_read_only(self):
         prompt = (ROOT / "skills" / "team-memory" / "SKILL.md").read_text(
             encoding="utf-8"

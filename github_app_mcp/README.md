@@ -118,15 +118,24 @@ an existing initialized wiki; Git must be installed. For source
 the tool still accepts the source project, not the destination:
 
 ```python
+read_snapshot = get_wiki_snapshot(repository="microsoft/project")
 write_wiki_pages(
   repository="microsoft/project",
   pages={"Architecture.md": full_utf8_content},
-  expected_base=wiki_sha,
+  expected_wiki_repository=read_snapshot.wiki_repository,
+  expected_base=read_snapshot.sha,
   message=short_summary,
 )
 ```
 
-`wiki_sha` is the full SHA returned by the snapshot read. Supply complete UTF-8
+Both expected values are required and come from the same snapshot read.
+`expected_wiki_repository` is a precondition, never a destination override.
+It must be a valid GitHub `owner/repository` identifier and match the freshly
+resolved policy destination case-insensitively before any destination metadata,
+token lookup, or wiki access. Policy still selects the actual destination and
+scoped App credentials. A mismatch is rejected even if the SHA is unchanged.
+
+`read_snapshot.sha` is the full SHA returned by the snapshot read. Supply complete UTF-8
 contents for changed `.md` pages, not patches: at most 20 pages, 64 KiB per page,
 and 256 KiB total. Create/update only; deletion and rename are deferred. The
 pages cite evidence and include the full source commit SHA, not an abbreviation,
@@ -139,9 +148,10 @@ a non-force update against `expected_base`. No separate host publisher,
 database, or proposal/approval persistence is involved. If no knowledge changes,
 do not write. On a stale-base conflict, re-read and regenerate against the new
 snapshot; never blindly retry. If a response was lost, compare desired contents
-with current pages first. If a mapping change conflicts with the read SHA, stop
-and re-establish destination, authorization, and evidence; never automatically
-overwrite or reuse edits against another wiki. Report the new SHA and status only when confirmed by
+with current pages first. On a destination mismatch, read a fresh snapshot and
+re-establish destination, authorization, and evidence; never automatically
+overwrite or reuse edits against another wiki, or merely replace the expected
+repository to retry. Report the new SHA and status only when confirmed by
 the tool result, not merely because a write was attempted.
 
 Only an explicit current-user wiki-update request or an accepted trusted

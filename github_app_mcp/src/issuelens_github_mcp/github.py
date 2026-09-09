@@ -8,6 +8,7 @@ import html
 import json
 import pathlib
 import re
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal
@@ -16,7 +17,7 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 
 from .auth import GitHubAppError, GitHubAppTokenProvider, Permissions, validate_repository
-from .policy import resolve_wiki_repository
+from .policy import IssueLensConfigError, resolve_wiki_repository, validate_wiki_repository
 from .wiki import WikiError, WikiRepository
 
 
@@ -27,6 +28,11 @@ _MAX_WIKI_RESULT_BYTES = 6 * 64 * 1024 + 4096
 _MAX_HTTP_RESPONSE_BYTES = 128 * 1024
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_QUERY_CHARS = 512
+_MAX_SEARCH_FILES = 64
+_MAX_SEARCH_BYTES = 256 * 1024
+_MAX_SEARCH_MATCH_LINES = 3
+_MAX_SEARCH_EXCERPT_CHARS = 160
+_SEARCH_OID_PATTERN = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _MAX_ISSUE_IMAGES = 5
 _MAX_ISSUE_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_ISSUE_IMAGES_TOTAL_BYTES = 15 * 1024 * 1024
@@ -389,16 +395,114 @@ class GitHubClient:
         per_page: int = 30, page: int = 1,
     ) -> Any:
         repository = self._authorize(repository)
+        if not isinstance(query, str) or any(
+            unicodedata.category(char).startswith("C")
+            or (char.isspace() and char != " ") for char in query
+        ):
+            raise GitHubAppError("query must be single-line plain text")
         query = query.strip()
         if not query or len(query) > _MAX_QUERY_CHARS or _SEARCH_QUALIFIER.search(query):
             raise GitHubAppError("query must be plain text and within the bounded limit")
-        params = {"q": f"{query} repo:{repository}", **_pagination(per_page, page)}
-        if ref is not None:
-            params["q"] += f" ref:{_ref(ref)}"
-        return await self._request(
-            "GET", repository, absolute_url=f"{_API_ROOT}/search/code",
-            permissions={"contents": "read"}, params=params,
+        pagination = _pagination(per_page, page)
+        if ref is None:
+            return await self._request(
+                "GET", repository, absolute_url=f"{_API_ROOT}/search/code",
+                permissions={"contents": "read"},
+                params={"q": f"{query} repo:{repository}", **pagination},
+            )
+
+        ref = _ref(ref)
+        commit = await self._request(
+            "GET", repository, f"/commits/{quote(ref, safe='')}",
+            permissions={"contents": "read"},
         )
+        if (
+            not isinstance(commit, Mapping)
+            or not isinstance(commit.get("commit"), Mapping)
+            or not isinstance(commit["commit"].get("tree"), Mapping)
+        ):
+            raise GitHubAppError("GitHub returned an invalid search commit")
+        resolved_ref = _search_oid(commit.get("sha"))
+        tree_sha = _search_oid(commit["commit"]["tree"].get("sha"))
+        if _SEARCH_OID_PATTERN.fullmatch(ref) and ref.lower() != resolved_ref:
+            raise GitHubAppError("GitHub returned a different search commit")
+        tree = await self._request(
+            "GET", repository, f"/git/trees/{tree_sha}",
+            permissions={"contents": "read"}, params={"recursive": "1"},
+        )
+        if (
+            not isinstance(tree, Mapping)
+            or not isinstance(tree.get("tree"), list)
+            or type(tree.get("truncated")) is not bool
+            or _search_oid(tree.get("sha")) != tree_sha
+        ):
+            raise GitHubAppError("GitHub returned an invalid search tree")
+        if tree["truncated"]:
+            raise GitHubAppError("Repository search tree is truncated; scan cannot be complete")
+
+        files = []
+        seen_paths = set()
+        skipped_reasons: dict[str, int] = {}
+        for entry in tree["tree"]:
+            if not isinstance(entry, Mapping):
+                raise GitHubAppError("GitHub returned an invalid search tree entry")
+            path = _repository_path(entry.get("path"))
+            if (
+                path in seen_paths
+                or path != "/".join(pathlib.PurePosixPath(path).parts)
+                or any(unicodedata.category(char).startswith("C") for char in path)
+            ):
+                raise GitHubAppError("GitHub returned an invalid search tree path")
+            seen_paths.add(path)
+            blob_sha = _search_oid(entry.get("sha"))
+            kind, mode = entry.get("type"), entry.get("mode")
+            if kind == "tree" and mode == "040000":
+                continue
+            if (kind == "blob" and mode == "120000") or (kind == "commit" and mode == "160000"):
+                reason = "symlink" if kind == "blob" else "submodule"
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                continue
+            if kind != "blob" or mode not in ("100644", "100755"):
+                raise GitHubAppError("GitHub returned an unsupported search tree mode")
+            size = entry.get("size")
+            if type(size) is not int or size < 0:
+                raise GitHubAppError("GitHub returned an invalid search file size")
+            files.append((path, blob_sha, size))
+        if len(files) > _MAX_SEARCH_FILES:
+            raise GitHubAppError(f"Repository search exceeds {_MAX_SEARCH_FILES} regular files")
+        if sum(size for _, _, size in files if size <= _MAX_FILE_BYTES) > _MAX_SEARCH_BYTES:
+            raise GitHubAppError(f"Repository search exceeds {_MAX_SEARCH_BYTES} content bytes")
+
+        items = []
+        for path, blob_sha, size in sorted(files):
+            if size > _MAX_FILE_BYTES:
+                skipped_reasons["file_too_large"] = skipped_reasons.get("file_too_large", 0) + 1
+                continue
+            blob = await self._request(
+                "GET", repository, f"/git/blobs/{blob_sha}",
+                permissions={"contents": "read"},
+            )
+            text, reason = _search_blob_text(blob, blob_sha, size)
+            if reason is not None:
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                continue
+            matches = _search_line_matches(text, query)
+            if matches:
+                items.append({
+                    "path": path, "name": path.rsplit("/", 1)[-1], "sha": blob_sha,
+                    "repository": {"full_name": repository},
+                    "html_url": f"https://github.com/{repository}/blob/{resolved_ref}/{quote(path, safe='/')}",
+                    "matches": matches,
+                })
+        start = (page - 1) * per_page
+        result = {
+            "items": items[start:start + per_page], "total_count": len(items),
+            "incomplete_results": bool(skipped_reasons), "resolved_ref": resolved_ref,
+            "skipped_files": sum(skipped_reasons.values()), "skipped_reasons": skipped_reasons,
+        }
+        if len(json.dumps(result, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
+            raise GitHubAppError("GitHub search result is too large; reduce per_page")
+        return result
 
     async def list_merged_pull_requests(
         self, repository: str, *, base: str, since: str | None = None,
@@ -437,13 +541,23 @@ class GitHubClient:
         return await self._wiki_read(repository, lambda wiki: wiki.diff(base, head))
 
     async def write_wiki_pages(
-        self, repository: str, pages: dict[str, str], expected_base: str, message: str
+        self, repository: str, pages: dict[str, str], expected_base: str, message: str,
+        *, expected_wiki_repository: str,
     ) -> Any:
         """Publish source-project memory to its configured wiki as the App Bot."""
         repository = validate_repository(repository)
         if not self.wiki_writes_enabled:
             raise GitHubAppError("Wiki writes are not enabled")
-        wiki_repository = await self._resolve_wiki_repository(repository, write=True)
+        try:
+            expected_wiki_repository = validate_wiki_repository(expected_wiki_repository)
+        except IssueLensConfigError:
+            raise GitHubAppError(
+                "expected_wiki_repository must be a GitHub owner/repository identifier; "
+                "read a fresh snapshot before writing"
+            ) from None
+        wiki_repository = await self._resolve_wiki_repository(
+            repository, write=True, expected_wiki_repository=expected_wiki_repository,
+        )
         try:
             credential = await self._token_provider.get_token(
                 wiki_repository, {"contents": "write"}
@@ -459,11 +573,18 @@ class GitHubClient:
             ),
         )
 
-    async def _resolve_wiki_repository(self, repository: str, *, write: bool) -> str:
+    async def _resolve_wiki_repository(
+        self, repository: str, *, write: bool, expected_wiki_repository: str | None = None,
+    ) -> str:
         try:
             wiki_repository = await resolve_wiki_repository(self, repository)
         except Exception:
             raise GitHubAppError("Team memory customization could not be loaded") from None
+        if (
+            expected_wiki_repository is not None
+            and expected_wiki_repository.casefold() != wiki_repository.casefold()
+        ):
+            raise GitHubAppError("Wiki destination changed; read a fresh snapshot before writing")
         if repository.casefold() == wiki_repository.casefold():
             return wiki_repository
         try:
@@ -829,6 +950,57 @@ class GitHubClient:
         return payload
 
 
+def _search_oid(value: Any) -> str:
+    if not isinstance(value, str) or not _SEARCH_OID_PATTERN.fullmatch(value):
+        raise GitHubAppError("GitHub returned an invalid search object SHA")
+    return value.lower()
+
+
+def _search_blob_text(payload: Any, blob_sha: str, size: int) -> tuple[str, str | None]:
+    if (
+        not isinstance(payload, Mapping)
+        or _search_oid(payload.get("sha")) != blob_sha
+        or type(payload.get("size")) is not int
+        or payload["size"] != size
+        or not isinstance(payload.get("content"), str)
+        or not isinstance(payload.get("encoding"), str)
+    ):
+        raise GitHubAppError("GitHub returned an invalid search blob")
+    if payload["encoding"] != "base64":
+        return "", "unsupported_encoding"
+    compact = "".join(payload["content"].split())
+    if len(compact) > 4 * ((size + 2) // 3):
+        raise GitHubAppError("GitHub search blob exceeds its declared size")
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except ValueError:
+        raise GitHubAppError("GitHub returned invalid search blob base64") from None
+    if len(decoded) != size:
+        raise GitHubAppError("GitHub search blob differs from its declared size")
+    if any(byte < 32 and byte not in (9, 10, 12, 13) or byte == 127 for byte in decoded):
+        return "", "binary"
+    try:
+        return decoded.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return "", "non_utf8"
+
+
+def _search_line_matches(text: str, query: str) -> list[dict[str, Any]]:
+    matches = []
+    folded_query = query.casefold()
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        line = line.removesuffix("\r")
+        if folded_query in line.casefold():
+            matches.append({
+                "line_number": line_number,
+                "excerpt": line[:_MAX_SEARCH_EXCERPT_CHARS],
+                "truncated": len(line) > _MAX_SEARCH_EXCERPT_CHARS,
+            })
+            if len(matches) == _MAX_SEARCH_MATCH_LINES:
+                break
+    return matches
+
+
 def _pagination(per_page: int, page: int) -> dict[str, int]:
     if type(per_page) is not int or not 1 <= per_page <= 100:
         raise GitHubAppError("per_page must be an integer from 1 to 100")
@@ -856,7 +1028,13 @@ def _timestamp(value: str) -> str:
 def _ref(value: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 200:
         raise GitHubAppError("ref must be a bounded non-empty string")
-    if any(part in value for part in ("\x00", "..", "\\", "?", "#", " ")):
+    if (
+        any(char.isspace() or unicodedata.category(char).startswith("C") for char in value)
+        or any(char in value for char in '\\~^:?*[#%"\'')
+        or ".." in value or "@{" in value or value == "@"
+        or value.startswith(("-", "/")) or value.endswith(("/", "."))
+        or any(not part or part.startswith(".") or part.endswith(".lock") for part in value.split("/"))
+    ):
         raise GitHubAppError("ref contains unsupported characters")
     return value
 

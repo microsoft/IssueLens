@@ -176,6 +176,27 @@ def create_server(
 
     @server.tool()
     async def search_repository_content(repository: str, query: str, ref: str | None = None, per_page: int = 30, page: int = 1) -> Any:
+        """Search content in one explicit repository; query cannot contain qualifiers.
+
+        With ref, resolve a branch, tag, or commit to one immutable commit and
+        search its regular UTF-8 files for the trimmed, case-insensitive literal
+        query within each line, not in paths. No regex or search operators apply.
+        At most 64 regular files, 256 KiB eligible content, and 66 API requests
+        are allowed; files over 64 KiB, binary/non-UTF-8 content, unsupported
+        encodings, symlinks, and submodules are skipped explicitly. Truncated
+        trees, exhausted scan limits, and malformed responses fail without an
+        indexed fallback. API responses and returned results are capped at 100 KB.
+        Items are sorted by path then paginated; total_count counts matching
+        files in the scanned subset. Check incomplete_results and skipped_reasons
+        before treating zero matches as exhaustive. Each item has a blob SHA,
+        commit-pinned URL, and at most three matching line numbers with excerpts
+        capped at the first 160 characters. Reuse resolved_ref for later pages
+        to avoid a moving branch changing the snapshot; reduce per_page if the
+        result exceeds the response limit.
+
+        Without ref, use GitHub's indexed default-branch code search and return
+        its native result/pagination semantics, not immutable source evidence.
+        """
         return await github.search_repository_content(repository, query, ref=ref, per_page=per_page, page=page)
 
     @server.tool()
@@ -222,19 +243,26 @@ def create_server(
             pages: dict[str, str],
             expected_base: str,
             message: str,
+            expected_wiki_repository: str,
         ) -> Any:
             """Write source-project memory to its configured wiki using App access.
 
             repository is the source project, never a raw wiki destination or
             remote. Validated team-memory customization resolves the destination;
             its App installation and contents-write token authorize access.
-            Read a new wiki snapshot first and pass its full SHA as expected_base.
+            Read a new wiki snapshot first and pass its wiki_repository as
+            expected_wiki_repository and its full SHA as expected_base. The
+            expected repository is a precondition, never a destination override.
+            If the destination changes, read a fresh snapshot before writing.
             Paths must be relative Markdown pages: 1-20 pages, at most 64 KiB per
             page and 256 KiB per batch. The single-line message is at most 512
             bytes. The backend validates all paths, refs, and limits and rejects
             conflicting snapshots. Commits use the verified App Bot identity.
             """
-            return await github.write_wiki_pages(repository, pages, expected_base, message)
+            return await github.write_wiki_pages(
+                repository, pages, expected_base, message,
+                expected_wiki_repository=expected_wiki_repository,
+            )
 
     if github.writes_enabled:
 

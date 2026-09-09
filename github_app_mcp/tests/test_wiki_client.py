@@ -26,6 +26,7 @@ from issuelens_github_mcp.wiki import WikiError, WikiRepository  # noqa: E402
 
 REPOSITORY = "microsoft/IssueLens"
 WIKI_REPOSITORY = "microsoft/TeamMemory"
+OTHER_WIKI_REPOSITORY = "microsoft/OtherMemory"
 CONFIG_PATH = ".github/issuelens.yml"
 INSTRUCTION_PATH = ".github/issuelens/team-memory.md"
 CONFIG = (
@@ -122,7 +123,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
             client = GitHubClient(self.provider, writes_enabled=issue_writes)
             self.assertFalse(client.wiki_writes_enabled)
             with self.assertRaisesRegex(GitHubAppError, "not enabled"):
-                await client.write_wiki_pages(REPOSITORY, {"Home.md": "text"}, BASE, "Update")
+                await client.write_wiki_pages(
+                    REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
+                )
         self.provider.get_token.assert_not_awaited()
         self.provider.get_bot_identity.assert_not_awaited()
         self.get_file.assert_not_awaited()
@@ -165,7 +168,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
         with patch("issuelens_github_mcp.github.WikiRepository") as backend:
             wiki = backend.return_value.__enter__.return_value
             wiki.write.return_value = {"repository": WIKI_REPOSITORY, "sha": HEAD, "status": "updated"}
-            result = await self.writer().write_wiki_pages(REPOSITORY, *WRITE_ARGUMENTS)
+            result = await self.writer().write_wiki_pages(
+                REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=WIKI_REPOSITORY,
+            )
         self.assertEqual(result, {
             "repository": WIKI_REPOSITORY, "sha": HEAD, "status": "updated",
             "source_repository": REPOSITORY, "wiki_repository": WIKI_REPOSITORY,
@@ -181,6 +186,45 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
         wiki.write.assert_called_once_with(
             *WRITE_ARGUMENTS, author_name=IDENTITY[0], author_email=IDENTITY[1],
         )
+
+    async def test_expected_destination_case_does_not_change_policy_authentication_target(self):
+        self.configure_memory()
+        for expected in (WIKI_REPOSITORY.lower(), WIKI_REPOSITORY.upper()):
+            with self.subTest(expected=expected):
+                self.provider.get_token.reset_mock()
+                with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+                    wiki = backend.return_value.__enter__.return_value
+                    wiki.write.return_value = {"sha": HEAD}
+                    result = await self.writer().write_wiki_pages(
+                        REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=expected,
+                    )
+                    backend.assert_called_once_with(WIKI_REPOSITORY, token=TOKEN)
+                    wiki.write.assert_called_once_with(
+                        *WRITE_ARGUMENTS, author_name=IDENTITY[0], author_email=IDENTITY[1],
+                    )
+                self.assertEqual(result["wiki_repository"], WIKI_REPOSITORY)
+                self.provider.get_token.assert_awaited_once_with(WIKI_REPOSITORY, {"contents": "write"})
+
+    async def test_invalid_expected_destination_fails_before_policy_or_authentication(self):
+        invalid = (
+            None, 1, True, [], {}, "", "attacker", "attacker/..", "attacker/.",
+            "https://github.com/attacker/repo", "attacker/repo.git", "attacker/repo.wiki.git",
+            "attacker//repo", "attacker/repo ", "attacker/repo\n", "attacker\\repo",
+            "a" * 40 + "/repo", "attacker/" + "a" * 101,
+        )
+        for expected in invalid:
+            with self.subTest(expected=expected):
+                with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+                    with self.assertRaisesRegex(GitHubAppError, "expected_wiki_repository.*fresh snapshot") as caught:
+                        await self.writer().write_wiki_pages(
+                            REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=expected,
+                        )
+                    self.assertIsNone(caught.exception.__cause__)
+                    backend.assert_not_called()
+        self.get_file.assert_not_awaited()
+        self.get_repository.assert_not_awaited()
+        self.provider.get_token.assert_not_awaited()
+        self.provider.get_bot_identity.assert_not_awaited()
 
     async def test_cross_repository_visibility_matrix_is_directional(self):
         for source in ("public", "private", "internal"):
@@ -201,7 +245,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                             wiki = backend.return_value.__enter__.return_value
                             wiki.snapshot.return_value = wiki.write.return_value = {}
                             operation = (
-                                self.writer().write_wiki_pages(REPOSITORY, *WRITE_ARGUMENTS)
+                                self.writer().write_wiki_pages(
+                                    REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=WIKI_REPOSITORY,
+                                )
                                 if write else self.github.get_wiki_snapshot(REPOSITORY)
                             )
                             if blocked:
@@ -240,7 +286,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                         with patch("issuelens_github_mcp.github.WikiRepository") as backend:
                             with self.assertRaisesRegex(GitHubAppError, "visibility could not be verified") as caught:
                                 if write:
-                                    await self.writer().write_wiki_pages(REPOSITORY, *WRITE_ARGUMENTS)
+                                    await self.writer().write_wiki_pages(
+                                        REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=WIKI_REPOSITORY,
+                                    )
                                 else:
                                     await self.github.get_wiki_snapshot(REPOSITORY)
                             backend.assert_not_called()
@@ -258,7 +306,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                     wiki = backend.return_value.__enter__.return_value
                     wiki.snapshot.return_value = wiki.write.return_value = {}
                     if write:
-                        await self.writer().write_wiki_pages(REPOSITORY, *WRITE_ARGUMENTS)
+                        await self.writer().write_wiki_pages(
+                            REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
+                        )
                     else:
                         await self.github.get_wiki_snapshot(REPOSITORY)
                     backend.assert_called_once_with(REPOSITORY.upper(), token=TOKEN)
@@ -279,7 +329,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                         wiki = backend.return_value.__enter__.return_value
                         wiki.snapshot.return_value = wiki.write.return_value = {}
                         if write:
-                            result = await self.writer().write_wiki_pages(REPOSITORY, *WRITE_ARGUMENTS)
+                            result = await self.writer().write_wiki_pages(
+                                REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
+                            )
                         else:
                             result = await self.github.get_wiki_snapshot(REPOSITORY)
                         backend.assert_called_once_with(REPOSITORY, token=TOKEN)
@@ -302,7 +354,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                         wiki = backend.return_value.__enter__.return_value
                         wiki.snapshot.return_value = wiki.write.return_value = {}
                         if write:
-                            result = await self.writer().write_wiki_pages(REPOSITORY, *WRITE_ARGUMENTS)
+                            result = await self.writer().write_wiki_pages(
+                                REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=destination,
+                            )
                         else:
                             result = await self.github.get_wiki_snapshot(REPOSITORY)
                         backend.assert_called_once_with(destination, token=TOKEN)
@@ -343,7 +397,8 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                     self.configure_memory().update(changes)
                     with patch("issuelens_github_mcp.github.WikiRepository") as backend:
                         with self.assertRaises(GitHubAppError) as caught:
-                            await getattr(self.writer(), method)(REPOSITORY, *arguments)
+                            kwargs = {"expected_wiki_repository": WIKI_REPOSITORY} if method == "write_wiki_pages" else {}
+                            await getattr(self.writer(), method)(REPOSITORY, *arguments, **kwargs)
                         backend.assert_not_called()
                     self.assertEqual(str(caught.exception), "Team memory customization could not be loaded")
                     self.assertIsNone(caught.exception.__cause__)
@@ -360,7 +415,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                 with patch("issuelens_github_mcp.github.WikiRepository") as backend:
                     with self.assertRaisesRegex(GitHubAppError, "authentication failed") as caught:
                         if write:
-                            await self.writer().write_wiki_pages(REPOSITORY, *WRITE_ARGUMENTS)
+                            await self.writer().write_wiki_pages(
+                                REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=WIKI_REPOSITORY,
+                            )
                         else:
                             await self.github.get_wiki_snapshot(REPOSITORY)
                     backend.assert_not_called()
@@ -401,7 +458,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                         wiki = backend.return_value.__enter__.return_value
                         wiki.snapshot.return_value = wiki.write.return_value = payload
                         operation = (
-                            self.writer().write_wiki_pages(REPOSITORY, *WRITE_ARGUMENTS)
+                            self.writer().write_wiki_pages(
+                                REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=WIKI_REPOSITORY,
+                            )
                             if write else self.github.get_wiki_snapshot(REPOSITORY)
                         )
                         if budget == size:
@@ -427,7 +486,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(repository=repository):
                 with patch("issuelens_github_mcp.github.WikiRepository") as backend:
                     backend.return_value.__enter__.return_value.write.return_value = {"repository": repository}
-                    result = await writer.write_wiki_pages(repository, {"Home.md": "text"}, BASE, "Update")
+                    result = await writer.write_wiki_pages(
+                        repository, *WRITE_ARGUMENTS, expected_wiki_repository=repository,
+                    )
                 self.assertEqual(result, {
                     "repository": repository, "source_repository": repository,
                     "wiki_repository": repository,
@@ -460,7 +521,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
         wiki.__exit__.side_effect = lambda *args: threads.append(threading.get_ident())
         wiki.write.side_effect = lambda *args, **kwargs: threads.append(threading.get_ident()) or expected
         with patch("issuelens_github_mcp.github.WikiRepository", return_value=wiki) as backend:
-            result = await writer.write_wiki_pages(REPOSITORY.upper(), {"Home.md": "text"}, BASE, "Update")
+            result = await writer.write_wiki_pages(
+                REPOSITORY.upper(), *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
+            )
         self.assertEqual(result, {
             **expected, "source_repository": REPOSITORY.upper(),
             "wiki_repository": REPOSITORY.upper(),
@@ -483,7 +546,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                 failing.side_effect = RuntimeError(TOKEN)
                 with patch("issuelens_github_mcp.github.WikiRepository") as backend:
                     with self.assertRaisesRegex(GitHubAppError, "authentication failed") as caught:
-                        await self.writer().write_wiki_pages(REPOSITORY, {"Home.md": "text"}, BASE, "Update")
+                        await self.writer().write_wiki_pages(
+                            REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
+                        )
                     backend.assert_not_called()
                 self.assertNotIn(TOKEN, str(caught.exception))
                 self.assertIsNone(caught.exception.__cause__)
@@ -508,7 +573,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                             if operation == "snapshot":
                                 await self.github.get_wiki_snapshot(REPOSITORY)
                             else:
-                                await self.writer().write_wiki_pages(REPOSITORY, {"Home.md": "text"}, BASE, "Update")
+                                await self.writer().write_wiki_pages(
+                                    REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
+                                )
                     self.assertNotIn(TOKEN, str(caught.exception))
                     self.assertIsNone(caught.exception.__cause__)
                     if operation != "__enter__":
@@ -524,7 +591,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                     with patch("issuelens_github_mcp.github.WikiRepository", return_value=wiki):
                         with self.assertRaises(GitHubAppError) as caught:
                             if write:
-                                await self.writer().write_wiki_pages(REPOSITORY, {"Home.md": "text"}, BASE, "Update")
+                                await self.writer().write_wiki_pages(
+                                    REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
+                                )
                             else:
                                 await self.github.get_wiki_snapshot(REPOSITORY)
                     self.assertNotIn(TOKEN, str(caught.exception))
@@ -550,7 +619,9 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                     patch.object(WikiRepository, "_refresh") as refresh,
                 ):
                     with self.assertRaises(GitHubAppError):
-                        await self.writer().write_wiki_pages(REPOSITORY, pages, base, message)
+                        await self.writer().write_wiki_pages(
+                            REPOSITORY, pages, base, message, expected_wiki_repository=REPOSITORY,
+                        )
                     refresh.assert_not_called()
 
 
@@ -579,8 +650,8 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
 
         class LocalWiki(WikiRepository):
             def __init__(self, repository, **kwargs):
-                if repository != WIKI_REPOSITORY:
-                    raise AssertionError("Wiki backend received the source instead of its destination")
+                if repository not in (WIKI_REPOSITORY, OTHER_WIKI_REPOSITORY):
+                    raise AssertionError("Wiki backend received an unexpected destination")
                 opened_repositories.append(repository)
                 super().__init__(repository, **kwargs)
 
@@ -611,8 +682,11 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                 if not self.destination_app_available:
                     return httpx.Response(404, json={"message": "Not Found"})
                 return httpx.Response(200, json={"id": 5678})
+            if request.url.path == f"/repos/{OTHER_WIKI_REPOSITORY}/installation":
+                return httpx.Response(200, json={"id": 9012})
             if request.url.path in (
                 "/app/installations/1234/access_tokens", "/app/installations/5678/access_tokens",
+                "/app/installations/9012/access_tokens",
             ):
                 return httpx.Response(201, json={"token": TOKEN, "expires_at": "2030-01-01T01:00:00Z"})
             if request.url.path == f"/repos/{REPOSITORY}/contents/.github":
@@ -666,6 +740,7 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                     "repository": REPOSITORY,
                     "pages": {"Unicode.md": content},
                     "expected_base": self.base,
+                    "expected_wiki_repository": WIKI_REPOSITORY,
                     "message": "Document Unicode content",
                 })
                 self.assertFalse(written.is_error, written.content)
@@ -702,6 +777,8 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(before["repository"], WIKI_REPOSITORY)
                 self.assertEqual(before["source_repository"], REPOSITORY)
                 self.assertEqual(before["wiki_repository"], WIKI_REPOSITORY)
+                write["expected_wiki_repository"] = before["wiki_repository"]
+                write["expected_base"] = before["sha"]
                 updated = await call_json(client, "write_wiki_pages", write)
                 self.assertEqual(set(updated), {
                     "status", "sha", "branch", "pages", "repository",
@@ -742,7 +819,9 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn(TOKEN, str(result.content))
                     self.assertEqual(self.git("rev-parse", "HEAD").strip(), updated["sha"])
                 opened_before_denial = len(self.opened_repositories)
-                denied = await client.call_tool("write_wiki_pages", {**write, "repository": "microsoft/other"})
+                denied = await client.call_tool("write_wiki_pages", {
+                    **write, "repository": "microsoft/other", "expected_wiki_repository": "microsoft/other",
+                })
                 self.assertTrue(denied.is_error)
                 self.assertEqual(len(self.opened_repositories), opened_before_denial)
                 self.assertIn("Wiki write authentication failed", str(denied.content))
@@ -765,13 +844,92 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(request.url.path == "/users/issuelens[bot]" for request in self.requests), 1)
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
+    async def test_remapped_write_rejects_snapshot_before_destination_access(self, _):
+        github = self.github_client()
+        with patch("issuelens_github_mcp.github.WikiRepository", self.local_wiki):
+            snapshot = await github.get_wiki_snapshot(REPOSITORY)
+        self.assertEqual(snapshot["sha"], self.base)
+        self.config = CONFIG.replace(WIKI_REPOSITORY, OTHER_WIKI_REPOSITORY)
+        self.visibilities[OTHER_WIKI_REPOSITORY] = "private"
+        with patch("issuelens_github_mcp.github.WikiRepository", self.local_wiki):
+            remapped_snapshot = await github.get_wiki_snapshot(REPOSITORY)
+        self.assertEqual(remapped_snapshot["sha"], snapshot["sha"])
+        self.assertEqual(remapped_snapshot["wiki_repository"], OTHER_WIKI_REPOSITORY)
+        self.requests.clear()
+        with (
+            patch("issuelens_github_mcp.github.WikiRepository") as backend,
+            patch.object(self.provider, "get_token", wraps=self.provider.get_token) as get_token,
+        ):
+            with self.assertRaisesRegex(GitHubAppError, "destination.*fresh snapshot"):
+                await github.write_wiki_pages(
+                    REPOSITORY, {"Home.md": "Old destination intent"}, snapshot["sha"], "Update",
+                    expected_wiki_repository=snapshot["wiki_repository"],
+                )
+            backend.assert_not_called()
+            self.assertEqual(get_token.await_args_list, [
+                call(REPOSITORY, {"contents": "read"}),
+                call(REPOSITORY, {"contents": "read"}),
+                call(REPOSITORY, {"contents": "read"}),
+            ])
+        self.assertEqual([request.url.path for request in self.requests], [
+            f"/repos/{REPOSITORY}/contents/.github",
+            f"/repos/{REPOSITORY}/contents/{CONFIG_PATH}",
+            f"/repos/{REPOSITORY}/contents/{INSTRUCTION_PATH}",
+        ])
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
+    async def test_false_expected_destination_never_selects_an_authentication_target(self, _):
+        configs = (CONFIG, CONFIG.replace(f"    wiki_repository: {WIKI_REPOSITORY}\n", ""))
+        with (
+            patch("issuelens_github_mcp.github.WikiRepository") as backend,
+            patch.object(self.provider, "get_token", wraps=self.provider.get_token) as get_token,
+            patch.object(self.provider, "get_bot_identity", wraps=self.provider.get_bot_identity) as get_identity,
+        ):
+            async with Client(create_server(self.github_client())) as client:
+                for config in configs:
+                    with self.subTest(config=config):
+                        self.config = config
+                        get_token.reset_mock()
+                        result = await client.call_tool("write_wiki_pages", {
+                            "repository": REPOSITORY, "pages": {"Home.md": "Old intent"},
+                            "expected_base": self.base, "message": "Update",
+                            "expected_wiki_repository": "attacker/OtherMemory",
+                        })
+                        self.assertTrue(result.is_error)
+                        self.assertIn("Wiki destination changed; read a fresh snapshot", str(result.content))
+                        self.assertNotIn("attacker", str(result.content))
+                        self.assertEqual(get_token.await_args_list, [
+                            call(REPOSITORY, {"contents": "read"}),
+                            call(REPOSITORY, {"contents": "read"}),
+                            call(REPOSITORY, {"contents": "read"}),
+                        ])
+            backend.assert_not_called()
+            get_identity.assert_not_awaited()
+        self.assertTrue(all(
+            request.url.path in (
+                f"/repos/{REPOSITORY}/installation", "/app/installations/1234/access_tokens",
+                f"/repos/{REPOSITORY}/contents/.github", f"/repos/{REPOSITORY}/contents/{CONFIG_PATH}",
+                f"/repos/{REPOSITORY}/contents/{INSTRUCTION_PATH}",
+            )
+            for request in self.requests
+        ))
+        token_requests = [json.loads(request.content) for request in self.requests if request.url.path.endswith("/access_tokens")]
+        self.assertEqual(token_requests, [{"repositories": ["IssueLens"], "permissions": {"contents": "read"}}])
+        self.assertEqual(self.opened_repositories, [])
+        self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.base)
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
     async def test_invalid_source_config_never_requests_destination_token_or_opens_wiki(self, _):
         self.config = CONFIG + f"    {TOKEN}: forbidden\n"
         with patch("issuelens_github_mcp.github.WikiRepository", self.local_wiki):
             async with Client(create_server(self.github_client())) as client:
                 for tool, arguments in (
                     ("get_wiki_snapshot", {}),
-                    ("write_wiki_pages", {"pages": {"Home.md": "text"}, "expected_base": self.base, "message": "Update"}),
+                    ("write_wiki_pages", {
+                        "pages": {"Home.md": "text"}, "expected_base": self.base, "message": "Update",
+                        "expected_wiki_repository": WIKI_REPOSITORY,
+                    }),
                 ):
                     result = await client.call_tool(tool, {"repository": REPOSITORY, **arguments})
                     self.assertTrue(result.is_error)
@@ -814,7 +972,10 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
             async with Client(create_server(self.github_client())) as client:
                 for tool, arguments in (
                     ("get_wiki_snapshot", {}),
-                    ("write_wiki_pages", {"pages": {"Home.md": "text"}, "expected_base": self.base, "message": "Update"}),
+                    ("write_wiki_pages", {
+                        "pages": {"Home.md": "text"}, "expected_base": self.base, "message": "Update",
+                        "expected_wiki_repository": WIKI_REPOSITORY,
+                    }),
                 ):
                     result = await client.call_tool(tool, {"repository": REPOSITORY, **arguments})
                     self.assertTrue(result.is_error)
