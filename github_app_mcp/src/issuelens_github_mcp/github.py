@@ -8,15 +8,17 @@ import html
 import json
 import pathlib
 import re
+import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
-from .auth import GitHubAppError, GitHubAppTokenProvider, Permissions, validate_repository
+from .auth import GitHubAppError, GitHubAppTokenProvider, InstallationCredential, Permissions, validate_repository
 from .policy import IssueLensConfigError, resolve_wiki_repository, validate_wiki_repository
 from .wiki import WikiError, WikiRepository
 
@@ -70,6 +72,14 @@ _REACTION_TARGETS: dict[ReactionTarget, tuple[str, str]] = {
         "pull_requests",
     ),
 }
+
+
+@dataclass(frozen=True)
+class _ContentReadAuth:
+    """Authentication resolved for one repository's contents-read scan."""
+
+    repository: str
+    credential: InstallationCredential | None = field(repr=False)
 
 
 class GitHubClient:
@@ -378,13 +388,13 @@ class GitHubClient:
     async def compare_commits(self, repository: str, base: str, head: str) -> Any:
         return await self._request(
             "GET", repository,
-            f"/compare/{_ref(base)}...{_ref(head)}",
+            f"/compare/{quote(_ref(base), safe='')}...{quote(_ref(head), safe='')}",
             permissions={"contents": "read"},
         )
 
     async def list_repository_tree(self, repository: str, ref: str, *, recursive: bool = True) -> Any:
         commit = await self._request(
-            "GET", repository, f"/git/trees/{_ref(ref)}",
+            "GET", repository, f"/git/trees/{quote(_ref(ref), safe='')}",
             permissions={"contents": "read"},
             params={"recursive": "1"} if recursive else None,
         )
@@ -412,9 +422,16 @@ class GitHubClient:
             )
 
         ref = _ref(ref)
+        try:
+            credential = await self._token_provider.get_token(
+                repository, {"contents": "read"}
+            )
+        except GitHubAppError:
+            credential = None
+        content_read_auth = _ContentReadAuth(repository, credential)
         commit = await self._request(
             "GET", repository, f"/commits/{quote(ref, safe='')}",
-            permissions={"contents": "read"},
+            permissions={"contents": "read"}, content_read_auth=content_read_auth,
         )
         if (
             not isinstance(commit, Mapping)
@@ -429,6 +446,7 @@ class GitHubClient:
         tree = await self._request(
             "GET", repository, f"/git/trees/{tree_sha}",
             permissions={"contents": "read"}, params={"recursive": "1"},
+            content_read_auth=content_read_auth,
         )
         if (
             not isinstance(tree, Mapping)
@@ -480,7 +498,7 @@ class GitHubClient:
                 continue
             blob = await self._request(
                 "GET", repository, f"/git/blobs/{blob_sha}",
-                permissions={"contents": "read"},
+                permissions={"contents": "read"}, content_read_auth=content_read_auth,
             )
             text, reason = _search_blob_text(blob, blob_sha, size)
             if reason is not None:
@@ -890,6 +908,7 @@ class GitHubClient:
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
         write: bool = False,
+        content_read_auth: _ContentReadAuth | None = None,
     ) -> Any:
         repository = self._authorize(repository, write=write)
         headers = {
@@ -898,16 +917,36 @@ class GitHubClient:
             "X-GitHub-Api-Version": _API_VERSION,
         }
         anonymous_fallback = False
-        try:
-            credential = await self._token_provider.get_token(
-                repository,
-                permissions,
-            )
+        if content_read_auth is not None:
+            if (
+                method != "GET" or write or absolute_url is not None
+                or repository.casefold() != content_read_auth.repository.casefold()
+                or permissions != {"contents": "read"}
+            ):
+                raise GitHubAppError("Repository content authentication scope mismatch")
+            credential = content_read_auth.credential
+            if credential is not None:
+                if (
+                    credential.repository.casefold() != repository.casefold()
+                    or credential.permissions != (("contents", "read"),)
+                ):
+                    raise GitHubAppError("Repository content authentication scope mismatch")
+                if credential.expires_at <= time.time():
+                    raise GitHubAppError("GitHub App scan credential expired; retry the search")
+            anonymous_fallback = credential is None
+        else:
+            try:
+                credential = await self._token_provider.get_token(
+                    repository,
+                    permissions,
+                )
+            except GitHubAppError:
+                if write or method != "GET":
+                    raise
+                credential = None
+                anonymous_fallback = True
+        if credential is not None:
             headers["Authorization"] = f"Bearer {credential.token}"
-        except GitHubAppError:
-            if write or method != "GET":
-                raise
-            anonymous_fallback = True
         url = absolute_url or f"{_API_ROOT}/repos/{repository}{path}"
         try:
             async with httpx.AsyncClient(

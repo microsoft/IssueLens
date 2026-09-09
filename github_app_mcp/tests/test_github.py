@@ -127,6 +127,35 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.provider.calls, [])
         self.assertEqual(self.requests, [])
 
+    async def test_compare_encodes_each_ref_as_a_path_component(self):
+        for base, head in (
+            ("release/1.2", "feature/topic"),
+            ("release/1.2", "main"),
+            ("refs/tags/v1.0", "a" * 40),
+        ):
+            with self.subTest(base=base, head=head):
+                await self.client().compare_commits("microsoft/IssueLens", base, head)
+                encoded_base = base.replace("/", "%2F")
+                encoded_head = head.replace("/", "%2F")
+                self.assertEqual(
+                    self.requests[-1].url.raw_path,
+                    f"/repos/microsoft/IssueLens/compare/{encoded_base}...{encoded_head}".encode(),
+                )
+                self.assertEqual(self.provider.calls[-1], ("microsoft/IssueLens", {"contents": "read"}))
+
+    async def test_tree_ref_is_one_encoded_path_component(self):
+        for recursive in (False, True):
+            with self.subTest(recursive=recursive):
+                await self.client().list_repository_tree(
+                    "microsoft/IssueLens", "release/1.2", recursive=recursive,
+                )
+                self.assertEqual(
+                    self.requests[-1].url.raw_path.split(b"?", 1)[0],
+                    b"/repos/microsoft/IssueLens/git/trees/release%2F1.2",
+                )
+                self.assertEqual(dict(self.requests[-1].url.params), {"recursive": "1"} if recursive else {})
+                self.assertEqual(self.provider.calls[-1], ("microsoft/IssueLens", {"contents": "read"}))
+
     async def test_write_gate_is_checked_before_token_minting(self):
         with self.assertRaisesRegex(GitHubAppError, "write tools are disabled"):
             await self.client().add_labels(

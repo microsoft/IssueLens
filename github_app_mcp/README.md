@@ -52,6 +52,26 @@ access:
 | `search_issues` | Issues: read |
 | `list_labels` | Issues: read |
 | `get_file` | Contents: read |
+| `get_pull_request` | Pull requests: read |
+| `list_pull_request_files` | Pull requests: read |
+| `list_pull_request_commits` | Pull requests: read |
+| `list_pull_request_reviews` | Pull requests: read |
+| `list_pull_request_review_comments` | Pull requests: read |
+| `get_commit` | Contents: read |
+| `compare_commits` | Contents: read |
+| `list_repository_tree` | Contents: read |
+| `search_repository_content` | Contents: read |
+| `list_merged_pull_requests` | Pull requests: read |
+
+With a supplied `ref`, `search_repository_content` scans an immutable snapshot:
+at most 64 regular files, 256 KiB of eligible content (64 KiB per file), and
+66 content API requests (one commit, one tree, and up to 64 blobs). App
+authentication lookup/minting is performed once per scan; initial authentication
+overhead is additional and is not counted in those 66 content requests. A
+missing-installation result is retained only for that scan; no negative
+authentication cache survives the scan. Anonymous fallback remains read-only
+and never authorizes writes. Without `ref`, search uses GitHub's indexed
+default-branch code search.
 
 Wiki tools always take `repository` as the **source project**, even when its
 memory is stored in another repository's wiki. The shared package policy parser
@@ -82,7 +102,8 @@ remains supported, as do public-to-public mappings. A private/internal source
 may read a public wiki, and a public source may write public information to a
 private/internal wiki, subject to job authorization and destination App access.
 
-Wiki reads use destination-scoped App access:
+The shared read-only server also registers these wiki read tools, which use
+destination-scoped App access:
 
 | Tool | Purpose | Required App permission |
 |---|---|---|
