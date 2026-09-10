@@ -14,3 +14,6 @@ instructions:
     path: .github/issuelens/notifications.md
   planning:
     path: .github/issuelens/planning.md
+  team_memory:
+    path: .github/issuelens/team-memory.md
+    wiki_repository: owner/project-knowledge

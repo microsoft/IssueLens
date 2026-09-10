@@ -1,6 +1,8 @@
 import os
 import pathlib
+import subprocess
 import sys
+import tempfile
 import unittest
 
 from mcp import Client
@@ -17,31 +19,89 @@ READ_TOOLS = {
     "search_issues",
     "list_labels",
     "get_file",
+    "get_pull_request",
+    "list_pull_request_files",
+    "list_pull_request_commits",
+    "list_pull_request_reviews",
+    "list_pull_request_review_comments",
+    "get_commit",
+    "compare_commits",
+    "list_repository_tree",
+    "search_repository_content",
+    "list_merged_pull_requests",
+    "get_wiki_snapshot",
+    "list_wiki_pages",
+    "get_wiki_page",
+    "search_wiki",
+    "list_wiki_history",
+    "get_wiki_diff",
 }
 
 
 class StdioServerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_console_module_completes_stdio_handshake_without_secret_access(self):
-        root = pathlib.Path(__file__).parents[2]
-        environment = {
+    def environment(self, **overrides):
+        return {
             **os.environ,
+            "PYTHONPATH": str(pathlib.Path(__file__).resolve().parents[1] / "src"),
+            "PYTHONDONTWRITEBYTECODE": "1",
             "GITHUB_APP_ID": "1816975",
             "GITHUB_APP_PRIVATE_KEY_SECRET_URI": (
                 "https://issuelens.vault.azure.net/secrets/not-read-at-startup"
             ),
             "GITHUB_MCP_ENABLE_WRITES": "false",
+            **overrides,
         }
-        parameters = StdioServerParameters(
-            command=sys.executable,
-            args=["-m", "issuelens_github_mcp.server"],
-            env=environment,
-            cwd=root,
+
+    def test_package_imports_without_repository_root_on_pythonpath(self):
+        source = self.environment()["PYTHONPATH"]
+        code = (
+            "import pathlib, sys; "
+            "from issuelens_github_mcp import auth, github, policy, server, wiki; "
+            "source = pathlib.Path(sys.argv[1]).resolve(); "
+            "assert all(pathlib.Path(module.__file__).resolve().is_relative_to(source) "
+            "for module in (auth, github, policy, server, wiki)); "
+            "assert 'wiki' not in sys.modules; "
+            "assert 'issuelens_config' not in sys.modules; "
+            "assert str(source.parent.parent) not in sys.path; "
+            "print('package-only imports verified')"
+        )
+        with tempfile.TemporaryDirectory(prefix="wiki-stdio-import-") as directory:
+            result = subprocess.run(
+                [sys.executable, "-B", "-P", "-c", code, source],
+                cwd=directory, env=self.environment(), capture_output=True,
+                text=True, timeout=30, check=True,
+            )
+        self.assertEqual(result.stdout.strip(), "package-only imports verified")
+
+    async def assert_discovery(self, overrides, expected, *, wiki_writer=False):
+        with tempfile.TemporaryDirectory(prefix="wiki-stdio-") as directory:
+            parameters = StdioServerParameters(
+                command=sys.executable,
+                args=[
+                    "-B", "-P", "-m", "issuelens_github_mcp.server",
+                    *(["--wiki-writer"] if wiki_writer else []),
+                ],
+                env=self.environment(**overrides), cwd=pathlib.Path(directory),
+            )
+            async with Client(stdio_client(parameters), mode="legacy") as client:
+                tools = await client.list_tools()
+        self.assertEqual({tool.name for tool in tools.tools}, expected)
+
+    async def test_read_only_stdio_discovery_without_secret_access(self):
+        await self.assert_discovery({}, READ_TOOLS)
+
+    async def test_triage_stdio_discovery_excludes_wiki_writes(self):
+        await self.assert_discovery(
+            {"GITHUB_MCP_ENABLE_WRITES": "true"},
+            READ_TOOLS | {"add_labels", "set_assignees", "add_issue_comment", "add_eyes_reaction"},
         )
 
-        async with Client(stdio_client(parameters), mode="legacy") as client:
-            tools = await client.list_tools()
-
-        self.assertEqual({tool.name for tool in tools.tools}, READ_TOOLS)
+    async def test_wiki_writer_stdio_discovery_excludes_triage_writes(self):
+        await self.assert_discovery(
+            {"GITHUB_MCP_ENABLE_WRITES": "true"},
+            READ_TOOLS | {"write_wiki_pages"},
+            wiki_writer=True,
+        )
 
 
 if __name__ == "__main__":

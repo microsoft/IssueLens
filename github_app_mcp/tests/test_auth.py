@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import pathlib
@@ -162,14 +163,14 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotEqual(read.token, write.token)
 
-    async def test_repository_and_permissions_are_validated_before_network(self):
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
+    async def test_repository_and_permissions_are_validated_before_network(self, _):
         with self.assertRaisesRegex(GitHubAppError, "owner/repository"):
             await self.provider.get_token("IssueLens", {"issues": "read"})
-        with self.assertRaisesRegex(GitHubAppError, "Unsupported"):
-            await self.provider.get_token(
-                "microsoft/IssueLens", {"contents": "write"}
-            )
-        self.assertEqual(self.calls, [])
+        credential = await self.provider.get_token(
+            "microsoft/IssueLens", {"contents": "write"}
+        )
+        self.assertEqual(credential.permissions, (("contents", "write"),))
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
     async def test_stale_installation_is_rediscovered_once(self, _):
@@ -227,6 +228,116 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
             await provider.get_token(
                 "microsoft/IssueLens", {"issues": "read"}
             )
+
+
+class BotIdentityTests(unittest.IsolatedAsyncioTestCase):
+    def provider(self, handler, loader=None):
+        async def load_key():
+            return "test-key"
+
+        return GitHubAppTokenProvider(
+            GitHubAppConfig(
+                app_id="1816975",
+                private_key_secret_uri=(
+                    "https://issuelens.vault.azure.net/secrets/github-app-key"
+                ),
+            ),
+            private_key_loader=loader or load_key,
+            transport=httpx.MockTransport(handler),
+        )
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
+    async def test_identity_is_verified_and_cached_for_concurrent_writes(self, encode):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            self.assertEqual(request.url.host, "api.github.com")
+            if request.url.path == "/app":
+                self.assertEqual(request.headers["Authorization"], "Bearer app-jwt")
+                return httpx.Response(200, json={"id": 1816975, "slug": "issuelens"})
+            self.assertEqual(request.url.path, "/users/issuelens[bot]")
+            self.assertNotIn("Authorization", request.headers)
+            return httpx.Response(200, json={
+                "id": 7654321, "login": "issuelens[bot]", "type": "Bot",
+            })
+
+        provider = self.provider(handler)
+        self.assertEqual(calls, [])
+        identities = await asyncio.gather(
+            provider.get_bot_identity(), provider.get_bot_identity()
+        )
+        self.assertEqual(identities, [(
+            "issuelens[bot]", "7654321+issuelens[bot]@users.noreply.github.com",
+        )] * 2)
+        self.assertEqual(len(calls), 2)
+        encode.assert_called_once()
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
+    async def test_invalid_app_cannot_choose_a_user_endpoint(self, _):
+        for payload in (
+            [], {}, {"id": True, "slug": "issuelens"},
+            {"id": 111, "slug": "issuelens"},
+            {"id": 1816975, "slug": ""},
+            {"id": 1816975, "slug": "../other?token=secret"},
+            {"id": 1816975, "slug": "a" * 101},
+        ):
+            with self.subTest(payload=payload):
+                calls = []
+
+                def handler(request):
+                    calls.append(request)
+                    return httpx.Response(200, json=payload)
+
+                with self.assertRaisesRegex(GitHubAppError, "verify.*bot identity"):
+                    await self.provider(handler).get_bot_identity()
+                self.assertEqual(len(calls), 1)
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
+    async def test_bot_requires_exact_login_type_and_positive_user_id(self, _):
+        valid = {"id": 7654321, "login": "issuelens[bot]", "type": "Bot"}
+        for payload in (
+            [], {}, {**valid, "login": "other[bot]"},
+            {**valid, "type": "User"}, {**valid, "id": True},
+            {**valid, "id": 0}, {**valid, "id": "7654321"},
+        ):
+            with self.subTest(payload=payload):
+                def handler(request):
+                    if request.url.path == "/app":
+                        return httpx.Response(200, json={
+                            "id": 1816975, "slug": "issuelens",
+                        })
+                    return httpx.Response(200, json=payload)
+
+                with self.assertRaisesRegex(GitHubAppError, "verify.*bot identity"):
+                    await self.provider(handler).get_bot_identity()
+
+    @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
+    async def test_api_errors_are_sanitized_and_failures_not_cached(self, _):
+        calls = []
+
+        def handler(request):
+            calls.append(request)
+            return httpx.Response(401, text="private-key app-jwt installation-token")
+
+        provider = self.provider(handler)
+        for attempt in range(2):
+            with self.assertRaises(GitHubAppError) as caught:
+                await provider.get_bot_identity()
+            self.assertEqual(str(caught.exception), "Could not verify the GitHub App bot identity")
+            self.assertIsNone(caught.exception.__cause__)
+        self.assertEqual(len(calls), 2)
+
+    async def test_key_loader_errors_are_sanitized(self):
+        async def loader():
+            raise RuntimeError("private-key-secret")
+
+        def handler(request):
+            self.fail("Key loading failure must not make HTTP requests")
+
+        with self.assertRaisesRegex(GitHubAppError, "verify.*bot identity") as caught:
+            await self.provider(handler, loader).get_bot_identity()
+        self.assertNotIn("private-key-secret", str(caught.exception))
 
 
 class ConfigurationTests(unittest.TestCase):
