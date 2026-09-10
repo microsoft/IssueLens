@@ -4,6 +4,7 @@ import pathlib
 import unittest
 
 import yaml
+from copilot import CopilotClient
 from copilot.tools import ToolInvocation
 
 from issuelens_config_tool import create_tool
@@ -172,15 +173,18 @@ class TeamMemoryAccessTests(unittest.TestCase):
         module = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
         selected = [
             node for node in module.body
-            if isinstance(node, ast.FunctionDef) and node.name in {
+            if (isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "_TEAM_MEMORY_AGENT")
+            or (isinstance(node, ast.FunctionDef) and node.name in {
                 "_configured_team_memory_agent", "_session_options",
-            }
+            })
         ]
-        self.agent = {"name": "team-memory", "skills": ["issuelens-config", "team-memory"]}
         self.namespace = {
             "CustomAgentConfig": dict,
             "Tool": object,
-            "_TEAM_MEMORY_AGENT": self.agent,
+            "_agents_dir": ROOT / "agents",
+            "_load_prompt": lambda path: path.read_text(encoding="utf-8"),
             "_ISSUELENS_AGENT": {"name": "issuelens"},
             "_TRIAGE_AGENT": {"name": "triage"},
             "_FIND_CRITICALS_AGENT": {"name": "find-criticals"},
@@ -192,11 +196,57 @@ class TeamMemoryAccessTests(unittest.TestCase):
             "PermissionHandler": type("PermissionHandler", (), {"approve_all": None}),
         }
         exec(compile(ast.Module(body=selected, type_ignores=[]), "main.py", "exec"), self.namespace)
+        self.agent = self.namespace["_TEAM_MEMORY_AGENT"]
         self.servers = {"github": {
             "type": "stdio", "command": "python", "args": ["-m", "issuelens_github_mcp.server"],
             "tools": ["*"],
             "env": {"GITHUB_MCP_ENABLE_WRITES": "true"},
         }}
+
+    def test_maintenance_allowlist_is_explicit_on_sdk_wire(self):
+        expected = {
+            "issuelens-config",
+            "github-get_repository", "github-list_issues", "github-get_issue",
+            "github-list_issue_comments", "github-get_issue_comment", "github-search_issues",
+            "github-get_file", "github-get_pull_request", "github-list_pull_request_files",
+            "github-list_pull_request_commits", "github-list_pull_request_reviews",
+            "github-list_pull_request_review_comments", "github-get_commit",
+            "github-compare_commits", "github-list_repository_tree",
+            "github-search_repository_content", "github-list_merged_pull_requests",
+            "github-get_wiki_snapshot", "github-list_wiki_pages", "github-get_wiki_page",
+            "github-search_wiki", "github-list_wiki_history", "github-get_wiki_diff",
+            "wiki-writer-write_wiki_pages",
+        }
+        client = CopilotClient.__new__(CopilotClient)
+        for servers in (self.servers, {}):
+            with self.subTest(github_configured=bool(servers)):
+                options = self.namespace["_session_options"](servers)
+                agent = next(agent for agent in options["custom_agents"] if agent["name"] == "team-memory")
+                self.assertIn("tools", agent)
+                self.assertEqual(set(agent["tools"]), expected)
+                self.assertEqual(len(agent["tools"]), len(expected))
+                wire = client._convert_custom_agent_to_wire_format(agent)
+                self.assertEqual(set(wire["tools"]), expected)
+                for other in options["custom_agents"]:
+                    if other["name"] != "team-memory":
+                        self.assertNotIn("tools", other)
+
+    def test_maintenance_allowlist_uses_registered_reads_and_only_wiki_write(self):
+        module = ast.parse((ROOT / "github_app_mcp" / "src" / "issuelens_github_mcp" / "server.py").read_text(encoding="utf-8"))
+        factory = next(node for node in module.body if isinstance(node, ast.FunctionDef) and node.name == "create_server")
+        reads = {node.name for node in factory.body if isinstance(node, ast.AsyncFunctionDef)}
+        allowed = self.agent.get("tools", [])
+        self.assertTrue(allowed)
+        for name in allowed:
+            if name.startswith("github-"):
+                self.assertIn(name.removeprefix("github-"), reads)
+            else:
+                self.assertIn(name, {"issuelens-config", "wiki-writer-write_wiki_pages"})
+        self.assertTrue(set(allowed).isdisjoint({
+            "*", "github-*", "wiki-writer-*", "send-email", "send-teams-notification",
+            "github-add_labels", "github-set_assignees", "github-add_issue_comment",
+            "github-add_eyes_reaction", "github-write_wiki_pages",
+        }))
 
     def test_writer_is_agent_local_without_mutating_shared_server(self):
         options = self.namespace["_session_options"](self.servers)

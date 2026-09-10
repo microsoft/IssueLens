@@ -183,9 +183,13 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn('"name": "triage"', main_source)
         self.assertIn('"name": "find-criticals"', main_source)
         self.assertIn('"name": "plan"', main_source)
-        plan_agent_source = main_source.split(
-            "_PLAN_AGENT:", 1
-        )[1].split("# ── BYOK helpers", 1)[0]
+        plan_agent_node = next(
+            node for node in ast.parse(main_source).body
+            if isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_PLAN_AGENT"
+        )
+        plan_agent_source = ast.get_source_segment(main_source, plan_agent_node) or ""
         self.assertIn('"issuelens-config"', plan_agent_source)
         self.assertIn('"label-issue"', plan_agent_source)
         self.assertIn('"assign-issue"', plan_agent_source)

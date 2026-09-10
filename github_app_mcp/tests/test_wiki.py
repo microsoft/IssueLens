@@ -4,6 +4,7 @@ import os
 import stat
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from dulwich.client import LocalGitClient
@@ -290,6 +291,60 @@ class WikiTests(WikiFixture, unittest.TestCase):
                 self.write(wiki, {"New.md": "Published but unconfirmed"})
             self.assertNotEqual(self.tip(), self.base)
             self.assertEqual(wiki.snapshot()["sha"], self.base)
+
+    def test_post_push_default_branch_switch_is_not_confirmed(self) -> None:
+        alternate = b"refs/heads/new-default"
+        for same_commit in (False, True):
+            with self.subTest(same_commit=same_commit):
+                base = self.tip()
+                self.remote_repo.refs[alternate] = base.encode("ascii")
+                with self.local_wiki("example/repository") as wiki:
+                    send_pack = wiki._transport.send_pack
+
+                    def switch_default(*arguments, **keywords):
+                        result = send_pack(*arguments, **keywords)
+                        if same_commit:
+                            self.remote_repo.refs[alternate] = self.remote_repo.refs[self.branch]
+                        self.remote_repo.refs.set_symbolic_ref(b"HEAD", alternate)
+                        return result
+
+                    try:
+                        with patch.object(wiki._transport, "send_pack", side_effect=switch_default):
+                            with self.assertRaisesRegex(WikiError, "outcome unknown; re-read"):
+                                self.write(wiki, {"New.md": f"Unconfirmed {same_commit}"}, base)
+                        self.assertNotEqual(self.tip(), base)
+                        self.assertEqual(wiki.snapshot()["sha"], base)
+                        self.assertEqual(self.remote_repo.refs.read_ref(b"HEAD"), b"ref: " + alternate)
+                        self.assertEqual(self.tip(alternate), self.tip() if same_commit else base)
+                    finally:
+                        self.remote_repo.refs.set_symbolic_ref(b"HEAD", self.branch)
+
+    def test_remote_tip_rejects_missing_or_inconsistent_head_advertisement(self) -> None:
+        with self.local_wiki("example/repository") as wiki:
+            original = wiki._transport.get_refs(wiki._transport_path, protocol_version=2)
+            for invalid in (
+                "missing_symrefs", "missing_head_symref", "different_head_symref",
+                "missing_head_sha", "different_head_sha", "missing_branch", "invalid_branch_sha",
+            ):
+                with self.subTest(advertisement=invalid):
+                    advertised = SimpleNamespace(refs=dict(original.refs), symrefs=dict(original.symrefs))
+                    if invalid == "missing_symrefs":
+                        advertised.symrefs = None
+                    elif invalid == "missing_head_symref":
+                        del advertised.symrefs[b"HEAD"]
+                    elif invalid == "different_head_symref":
+                        advertised.symrefs[b"HEAD"] = b"refs/heads/another"
+                    elif invalid == "missing_head_sha":
+                        del advertised.refs[b"HEAD"]
+                    elif invalid == "different_head_sha":
+                        advertised.refs[b"HEAD"] = b"0" * 40
+                    elif invalid == "missing_branch":
+                        del advertised.refs[self.branch]
+                    else:
+                        advertised.refs[self.branch] = advertised.refs[b"HEAD"] = b"invalid"
+                    with patch.object(wiki._transport, "get_refs", return_value=advertised):
+                        with self.assertRaisesRegex(WikiError, "could not be verified"):
+                            wiki._remote_tip()
 
     def test_noop_rejects_changed_mode(self) -> None:
         newer = self.seed_entries({"Home.md": ("100755", b"# Home\nWelcome\n")})

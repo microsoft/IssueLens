@@ -969,9 +969,16 @@ class WikiRepository:
     def _remote_tip(self) -> str:
         self._request()
         result = self._transport.get_refs(self._transport_path, protocol_version=2)
-        current = result.refs.get(Ref(("refs/heads/" + self._branch).encode("utf-8")))
-        if current is None or not re.fullmatch(b"[0-9a-f]{40}", current):
-            raise WikiError("wiki remote branch could not be verified")
+        branch_ref = Ref(("refs/heads/" + self._branch).encode("utf-8"))
+        current = result.refs.get(branch_ref)
+        if (
+            current is None
+            or not re.fullmatch(b"[0-9a-f]{40}", current)
+            or result.symrefs is None
+            or result.symrefs.get(Ref(b"HEAD")) != branch_ref
+            or result.refs.get(Ref(b"HEAD")) != current
+        ):
+            raise WikiError("wiki default branch could not be verified")
         return current.decode("ascii")
 
     def _updated_tree(self, tree_id: APIObjectID | None, updates: dict[bytes, tuple[int, APIObjectID]]) -> APIObjectID:
