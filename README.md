@@ -7,7 +7,124 @@ A GitHub issue-triage and planning agent built on the [GitHub Copilot SDK](https
 ## How It Works
 
 Both protocols run in the same process and share the same orchestrator, skills,
-three sub-agents, and bundled GitHub App stdio MCP server.
+four sub-agents, and bundled GitHub App MCP reads. Wiki writes use a separate,
+parent-configured MCP server local to the maintenance agent.
+
+### Team memory
+
+The `team-memory` agent makes minimal, evidence-backed Markdown wiki updates
+through `write_wiki_pages`. The shared `team-memory` skill remains read-only and
+is preloaded on every agent, including the orchestrator. Agents retrieve relevant
+knowledge directly without delegating ordinary reads to the maintenance agent.
+
+Both paths first call `issuelens-config` with the explicit source project and
+`domain="team_memory"`. Read its returned `wiki_repository` for the validated
+destination and `content` for organization and topics. For example, to store
+`microsoft/project` memory in `microsoft/team-knowledge.wiki.git`, configure the
+source project's `.github/issuelens.yml`:
+
+```yaml
+version: 1
+instructions:
+  team_memory:
+    path: .github/issuelens/team-memory.md
+    wiki_repository: microsoft/team-knowledge
+```
+
+The policy `path` remains required when the domain is present. Optional
+`wiki_repository` must pass GitHub parent repository identifier validation as
+`owner/repository`; it is not a wiki UI name, `.wiki.git` URL, or arbitrary Git
+remote. The shared package policy parser returns its resolved value alongside
+`content` in the config-tool response. Markdown supplies only organization,
+navigation, topics, inclusion/exclusion, and evidence guidance; it cannot override
+the target or supply arbitrary Git URLs, tokens, or shell settings.
+
+All wiki read/write MCP calls in this example still use
+`repository="microsoft/project"`, **not** `microsoft/team-knowledge`. Every tool
+independently re-reads and validates the same mapping, then resolves credentials
+and Git transport to the destination. See [the policy example](examples/team-memory.md) and
+[IssueLens's own customization](.github/issuelens/team-memory.md). An absent
+field, config, or domain defaults to the source project's own wiki. Invalid
+configuration or an inaccessible target stops memory access without silent
+source-wiki fallback. Other work may continue with authorized source evidence
+while reporting that memory was unavailable.
+
+Validated `team_memory.wiki_repository` is a narrow scope exception selecting
+only the wiki capability's destination. It grants no other writes, additional
+source repositories, or notification scope. Never publish private/internal-source
+knowledge to a public wiki or read a private/internal wiki for public-source context.
+Cross-repository mappings between private/internal repositories are rejected
+for both reads and writes because their audience relationship cannot be
+verified; use the source project's own wiki. Same-repository and public-to-public
+mappings remain supported. A private/internal source may read a public wiki,
+and a public source may write public information to a private/internal wiki,
+subject to job authorization and destination App access. Source-user authorization is
+separate from App installation access.
+Writes require an explicit current-user wiki-update request or an accepted
+trusted postmerge job authorizing the source project and its mapped wiki; existing issue-loop commands and
+repository policy alone do not authorize them. Sensitive, conflicting,
+destructive, or unsupported changes need ordinary human interaction.
+
+Only the team-memory agent-local server exposes `write_wiki_pages`; the parent
+supplies its internal `--wiki-writer` launch mode automatically. Users need no
+environment flag or per-repository App environment configuration. Shared
+reader/triage servers do not expose the writer. The existing
+`GITHUB_MCP_ENABLE_WRITES` gate remains for triage issue writes, not wiki writes.
+An initialized destination wiki is required. The App must be installed
+at the actual destination with **Contents: read** for wiki reads and **Contents:
+write** for maintenance; source installation alone is insufficient. Tokens are
+scoped to that destination and the operation's required permission.
+
+Wiki Git network and object operations use the Dulwich Python library (1.2.14),
+not `git.exe`, the Git CLI, or a Git subprocess. The Foundry ZIP
+`codeConfiguration` uses `remote_build` with `runtime: python_3_13` and installs
+the root `requirements.txt`; the standalone MCP `github_app_mcp/pyproject.toml`
+declares the same Dulwich dependency. No Git installation, Dockerfile change,
+or runtime installer is needed in either mode. IssueLens still launches its
+stdio MCP server as a Python subprocess; the wiki backend never spawns Git,
+SSH, or credential helpers.
+
+Maintenance pins reads to one full wiki SHA and sends full UTF-8 page contents
+with both required preconditions from the same snapshot:
+
+```python
+read_snapshot = get_wiki_snapshot(repository="microsoft/project")
+write_wiki_pages(
+  repository="microsoft/project",
+  pages={"Architecture.md": full_utf8_content},
+  expected_wiki_repository=read_snapshot.wiki_repository,
+  expected_base=read_snapshot.sha,
+  message=short_summary,
+)
+```
+
+`expected_wiki_repository` is a precondition, never a destination override.
+The writer validates the identifier and compares it case-insensitively with the
+freshly resolved policy destination before destination metadata, token lookup,
+or wiki access. Policy still selects the actual destination and scoped App
+credentials; a mismatch is rejected even if the SHA is unchanged.
+Pages cite evidence and the full source commit SHA, not an
+abbreviation, where relevant; the short commit summary also includes that full
+SHA. No force option is exposed. The [MCP wiki backend](github_app_mcp/src/issuelens_github_mcp/wiki.py)
+persists pages and history in an atomic Git commit. No knowledge change means no
+write. Limits are 20 `.md` pages, 64 KiB each, 256 KiB total; deletion/rename are
+unsupported. Unchanged assets are preserved byte-for-byte; diffs report binary
+changes as notices, not binary patches. Only SHA-1 Git repositories (GitHub's
+current format) are supported; SHA-256 repositories are rejected.
+Stale conflicts require re-reading and regeneration; a lost response
+requires comparing current content before retrying. Only tool-confirmed status
+and wiki SHAs are reported. On a destination mismatch, read a fresh snapshot and
+re-establish destination, authorization, and evidence; never overwrite
+automatically, reuse edits for another wiki, or merely replace the expected
+repository to retry. See [MCP details](github_app_mcp/README.md).
+
+**Integration scope:** this simplifies direct maintenance, without a standalone
+host publisher or database/proposal/approval persistence. Full merge
+orchestration remains separate: the postmerge shell skeleton is not functional
+and does not submit automatic updates. There is no durable job queue,
+reconciliation service, or guaranteed exactly-once delivery. Git is knowledge,
+history, and conflict detection, not an external workflow scheduler. These local
+contracts do not establish live hosted sub-agent dispatch or deployment.
 
 ### Automation — `POST /invocations`
 
@@ -37,6 +154,8 @@ three sub-agents, and bundled GitHub App stdio MCP server.
 5. Performs only the bundled issue-triage operations: repository/file reads,
    issue and comment reads/searches, fixed-eyes activity acknowledgements, label
    reads/additions, assignee updates, and explicitly requested issue comments.
+  Wiki retrieval is read-only; separately authorized maintenance uses only the
+  `team-memory` agent-local writer.
 6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
 
 ## Environment Variables
@@ -77,14 +196,16 @@ azd env set GITHUB_APP_PRIVATE_KEY_SECRET_URI `
 ```
 
 Target repositories and all repositories receiving writes must be included in
-an installation of the App. Bounded reads prefer App authentication but fall
+an installation of the App. Bounded REST reads prefer App authentication but fall
 back to anonymous access for public repositories when no installation is
 available. Private repository reads still require an installation. Each Copilot
-session owns one stdio MCP process. That process caches tokens only in memory by
+session owns its stdio MCP processes. Each process caches tokens only in memory by
 repository and permission set, refreshes them five minutes before expiry, and
 discards them when the process exits. Configure the App with **Metadata: Read**,
 **Issues: Read and write**, **Pull requests: Read and write**, and **Contents:
-Read**. Tokens and the private key never enter model context.
+Read**. Wiki reads require destination App access; maintenance additionally
+requires **Contents: Write** for that actual destination. Tokens and the private
+key never enter model context.
 
 ## Target Repository Configuration
 
@@ -109,6 +230,9 @@ instructions:
     path: .github/issuelens/notifications.md
   planning:
     path: .github/issuelens/planning.md
+  team_memory:
+    path: .github/issuelens/team-memory.md
+    wiki_repository: owner/project-knowledge
 ```
 
 Every instruction domain is optional:
@@ -121,6 +245,7 @@ Every instruction domain is optional:
 | `assignment` | Area owners, keyword/path mappings, routing rules, and default owners |
 | `notification_content` | Report title, grouping, emphasis, and presentation only |
 | `planning` | Required planning sections, repository design expectations, readiness statuses, and human signals |
+| `team_memory` | Required policy `path` for organization, topics, and evidence guidance; optional structured `wiki_repository` selects the GitHub wiki destination, never write authorization |
 
 Target repositories do not need `.github/issuelens.yml` or any customization
 Markdown files. When the config is absent, or when it omits a capability,
@@ -138,7 +263,11 @@ thresholds, mappings, readiness states, publication behavior, and response
 presentation. They cannot change the owning sub-agent's role, required
 parent-facing data contract, security or repository-scope boundaries, or write
 authorization. Explicit user instructions win when they conflict with
-customization.
+customization within content guidance; they cannot override the structured wiki
+destination. Validated `team_memory.wiki_repository` is the narrow wiki-only
+scope exception described above, not access to additional source repositories,
+other writes, or notifications. Omitting that field defaults to the source's
+own wiki without making the domain's policy `path` optional.
 
 The global IssueLens command language is outside this precedence and has no
 configuration domain. Target repositories cannot rename commands, add aliases,
@@ -224,7 +353,8 @@ conversation, later feedback uses the resumed session context. Invocations are
 stateless, so a revision request must identify the issue and the planning
 artifact or requested section to revise.
 
-The planning agent receives the same tools as the other sub-agents. A request
+The planning agent receives the shared tools, not the maintenance-only wiki
+writer. A request
 to plan or revise a specific issue authorizes publication of the planning
 artifacts on that issue using explicit user instructions, validated planning
 customization, or the two-comment default. Labels, assignments, notifications,
@@ -277,6 +407,7 @@ App endpoint variables are configured.
 ### Prerequisites
 
 - Python 3.12+
+- An existing initialized destination wiki for wiki reads and authorized writes
 - A GitHub fine-grained PAT (`github_pat_` prefix)
 - Azure credentials that can read the configured Key Vault secret
 
@@ -595,7 +726,7 @@ For the full deployment guide, see [Azure AI Foundry hosted agents](https://aka.
 
 ## Sub-agent and skills
 
-The Foundry hosted agent registers the `issuelens` orchestrator and its three sub-agents, `triage`, `find-criticals`, and `plan`, as Copilot SDK `CustomAgentConfig` objects in `main.py`. All prompts are loaded explicitly at startup so their behavior is consistent locally and in the hosted package:
+The Foundry hosted agent registers the `issuelens` orchestrator and its four sub-agents, `triage`, `find-criticals`, `plan`, and `team-memory`, as Copilot SDK `CustomAgentConfig` objects in `main.py`. All prompts are loaded explicitly at startup so their behavior is consistent locally and in the hosted package:
 
 ```
 agents.md                   ← global IssueLens identity and current scope
@@ -603,23 +734,26 @@ agents.md                   ← global IssueLens identity and current scope
 agents/
 ├── triage.md               ← issue-level triage and recommendations
 ├── find-criticals.md        ← critical-issue scan and JSON report
-└── plan.md                  ← action plan, design specification, and readiness
+├── plan.md                 ← action plan, design specification, and readiness
+└── team-memory.md          ← explicitly authorized wiki maintenance
 
 skills/
 ├── issuelens-config/ ← load validated repository policy
 ├── find-duplicates/ ← identify duplicate and related issues
 ├── label-issue/     ← classify and apply labels
 ├── assign-issue/    ← route and assign issues
+├── team-memory/     ← read-only project knowledge retrieval
 └── notify/          ← send the report via configured notification tools
 github_app_mcp/             ← bundled GitHub App stdio MCP server
 ```
 
-All three sub-agents are available to IssueLens through runtime inference. `triage`
+All four sub-agents are available to IssueLens through runtime inference. `triage`
 analyzes target issues and owns requested duplicate, label, assignment, and
 notification work. `find-criticals` scans a repository and time scope for hot,
 blocking, and regression issues and returns the structured report. `plan`
 investigates a triaged issue, produces ordered planning artifacts, and waits for
-human direction. They use the same GitHub App MCP tools, while `agents.md` keeps
+human direction. `team-memory` owns authorized wiki changes through its local
+write tool; all agents use the shared read-only memory skill. `agents.md` keeps
 the parent IssueLens agent responsible for splitting mixed requests, selecting
 the owner for each job, and sequencing them. This responsibility-first routing
 rule also applies when new sub-agents are added.

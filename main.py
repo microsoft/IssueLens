@@ -124,9 +124,11 @@ _ISSUELENS_AGENT: CustomAgentConfig = {
     "display_name": "IssueLens",
     "description": (
         "Triages GitHub issues, performs requested follow-up actions, and "
-        "creates action plans followed by design specifications."
+        "creates action plans followed by design specifications; routes "
+        "project wiki maintenance to the team-memory agent."
     ),
     "prompt": _load_prompt(_project_dir / "agents.md"),
+    "skills": ["issuelens-config", "team-memory"],
 }
 
 
@@ -140,6 +142,7 @@ _TRIAGE_AGENT: CustomAgentConfig = {
     "prompt": _load_prompt(_agents_dir / "triage.md"),
     "skills": [
         "issuelens-config",
+        "team-memory",
         "find-duplicates",
         "label-issue",
         "assign-issue",
@@ -157,7 +160,7 @@ _FIND_CRITICALS_AGENT: CustomAgentConfig = {
         "and regression issues."
     ),
     "prompt": _load_prompt(_agents_dir / "find-criticals.md"),
-    "skills": ["issuelens-config"],
+    "skills": ["issuelens-config", "team-memory"],
     "infer": True,
 }
 
@@ -172,9 +175,49 @@ _PLAN_AGENT: CustomAgentConfig = {
     "prompt": _load_prompt(_agents_dir / "plan.md"),
     "skills": [
         "issuelens-config",
+        "team-memory",
         "label-issue",
         "assign-issue",
         "notify",
+    ],
+    "infer": True,
+}
+
+_TEAM_MEMORY_AGENT: CustomAgentConfig = {
+    "name": "team-memory",
+    "display_name": "Team Memory",
+    "description": (
+        "Maintains project wiki knowledge using validated team_memory "
+        "customization and bounded MCP wiki read/write tools."
+    ),
+    "prompt": _load_prompt(_agents_dir / "team-memory.md"),
+    "skills": ["issuelens-config", "team-memory"],
+    "tools": [
+        "issuelens-config",
+        "github-get_repository",
+        "github-list_issues",
+        "github-get_issue",
+        "github-list_issue_comments",
+        "github-get_issue_comment",
+        "github-search_issues",
+        "github-get_file",
+        "github-get_pull_request",
+        "github-list_pull_request_files",
+        "github-list_pull_request_commits",
+        "github-list_pull_request_reviews",
+        "github-list_pull_request_review_comments",
+        "github-get_commit",
+        "github-compare_commits",
+        "github-list_repository_tree",
+        "github-search_repository_content",
+        "github-list_merged_pull_requests",
+        "github-get_wiki_snapshot",
+        "github-list_wiki_pages",
+        "github-get_wiki_page",
+        "github-search_wiki",
+        "github-list_wiki_history",
+        "github-get_wiki_diff",
+        "wiki-writer-write_wiki_pages",
     ],
     "infer": True,
 }
@@ -303,6 +346,25 @@ def _build_mcp_servers() -> dict:
     return {"github": _github_mcp_server()}
 
 
+def _configured_team_memory_agent(mcp_servers: dict) -> CustomAgentConfig:
+    """Attach the App-authenticated wiki writer only to the maintenance agent."""
+    agent = dict(_TEAM_MEMORY_AGENT)
+    if "github" in mcp_servers:
+        server = mcp_servers["github"]
+        agent["mcp_servers"] = {
+            "wiki-writer": {
+                **server,
+                "args": [*server.get("args", []), "--wiki-writer"],
+                "env": {
+                    **server.get("env", {}),
+                    "GITHUB_MCP_ENABLE_WRITES": "false",
+                },
+                "tools": ["write_wiki_pages"],
+            },
+        }
+    return agent
+
+
 def _session_options(
     mcp_servers: dict,
     runtime_tools: list[Tool] | None = None,
@@ -327,6 +389,7 @@ def _session_options(
             _TRIAGE_AGENT,
             _FIND_CRITICALS_AGENT,
             _PLAN_AGENT,
+            _configured_team_memory_agent(mcp_servers),
         ],
         "agent": "issuelens",
     }

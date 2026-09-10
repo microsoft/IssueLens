@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -30,7 +31,10 @@ def create_server(
         instructions=(
             "Every tool requires an explicit owner/repository value. The "
             "server prefers repository-scoped GitHub App access and may fall "
-            "back to anonymous access for bounded reads of public repositories."
+            "back to anonymous access for bounded reads of public repositories. "
+            "For wiki tools, repository is always the source project. Its "
+            "validated team-memory customization selects the wiki repository, "
+            "which requires App access; wiki operations never use anonymous access."
         ),
         version="0.1.0",
     )
@@ -134,9 +138,137 @@ def create_server(
         )
 
     @server.tool()
-    async def get_file(repository: str, path: str) -> Any:
+    async def get_file(repository: str, path: str, ref: str | None = None) -> Any:
         """Read one bounded UTF-8 file or directory listing from a repository."""
-        return await github.get_file(repository, path)
+        return await github.get_file(repository, path, ref=ref)
+
+    @server.tool()
+    async def get_pull_request(repository: str, pull_number: int) -> Any:
+        return await github.get_pull_request(repository, pull_number)
+
+    @server.tool()
+    async def list_pull_request_files(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_pull_request_files(repository, pull_number, per_page=per_page, page=page)
+
+    @server.tool()
+    async def list_pull_request_commits(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_pull_request_commits(repository, pull_number, per_page=per_page, page=page)
+
+    @server.tool()
+    async def list_pull_request_reviews(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_pull_request_reviews(repository, pull_number, per_page=per_page, page=page)
+
+    @server.tool()
+    async def list_pull_request_review_comments(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_pull_request_review_comments(repository, pull_number, per_page=per_page, page=page)
+
+    @server.tool()
+    async def get_commit(repository: str, sha: str) -> Any:
+        return await github.get_commit(repository, sha)
+
+    @server.tool()
+    async def compare_commits(repository: str, base: str, head: str) -> Any:
+        return await github.compare_commits(repository, base, head)
+
+    @server.tool()
+    async def list_repository_tree(repository: str, ref: str, recursive: bool = True) -> Any:
+        return await github.list_repository_tree(repository, ref, recursive=recursive)
+
+    @server.tool()
+    async def search_repository_content(repository: str, query: str, ref: str | None = None, per_page: int = 30, page: int = 1) -> Any:
+        """Search content in one explicit repository; query cannot contain qualifiers.
+
+        With ref, resolve a branch, tag, or commit to one immutable commit and
+        search its regular UTF-8 files for the trimmed, case-insensitive literal
+        query within each line, not in paths. No regex or search operators apply.
+        At most 64 regular files, 256 KiB eligible content, and 66 content API
+        requests are allowed, plus initial authentication lookup/minting overhead.
+        One HTTP client is reused for the scan's content requests and closed on
+        success, error, cancellation, or deadline expiry. A fixed 60-second overall
+        scan time budget covers authentication, response-body reads, and local
+        result construction without resetting per request. Deadline expiry fails
+        explicitly without partial results or indexed fallback; host cancellation
+        propagates after cleanup. Files over 64 KiB, binary/non-UTF-8 content, unsupported
+        encodings, symlinks, and submodules are skipped explicitly. Truncated
+        trees, exhausted scan limits, and malformed responses fail without an
+        indexed fallback. API responses and returned results are capped at 100 KB.
+        Items are sorted by path then paginated; total_count counts matching
+        files in the scanned subset. Check incomplete_results and skipped_reasons
+        before treating zero matches as exhaustive. Each item has a blob SHA,
+        commit-pinned URL, and at most three matching line numbers with excerpts
+        capped at the first 160 characters. Reuse resolved_ref for later pages
+        to avoid a moving branch changing the snapshot; reduce per_page if the
+        result exceeds the response limit.
+
+        Without ref, use GitHub's indexed default-branch code search and return
+        its native result/pagination semantics, not immutable source evidence.
+        """
+        return await github.search_repository_content(repository, query, ref=ref, per_page=per_page, page=page)
+
+    @server.tool()
+    async def list_merged_pull_requests(repository: str, base: str, since: str | None = None, per_page: int = 30, page: int = 1) -> Any:
+        return await github.list_merged_pull_requests(repository, base=base, since=since, per_page=per_page, page=page)
+
+    @server.tool()
+    async def get_wiki_snapshot(repository: str) -> Any:
+        """Read the source project's configured wiki snapshot using App access."""
+        return await github.get_wiki_snapshot(repository)
+
+    @server.tool()
+    async def list_wiki_pages(repository: str, ref: str = "HEAD") -> Any:
+        """List pages in the source project's configured wiki using App access."""
+        return await github.list_wiki_pages(repository, ref)
+
+    @server.tool()
+    async def get_wiki_page(repository: str, path: str, ref: str = "HEAD") -> Any:
+        """Read a page in the source project's configured wiki using App access."""
+        return await github.get_wiki_page(repository, path, ref)
+
+    @server.tool()
+    async def search_wiki(repository: str, query: str, ref: str = "HEAD") -> Any:
+        """Search the source project's configured wiki using App access."""
+        return await github.search_wiki(repository, query, ref)
+
+    @server.tool()
+    async def list_wiki_history(
+        repository: str, path: str | None = None, limit: int = 30, ref: str = "HEAD"
+    ) -> Any:
+        """Read history in the source project's configured wiki using App access."""
+        return await github.list_wiki_history(repository, path, limit, ref)
+
+    @server.tool()
+    async def get_wiki_diff(repository: str, base: str, head: str = "HEAD") -> Any:
+        """Diff snapshots in the source project's configured wiki using App access."""
+        return await github.get_wiki_diff(repository, base, head)
+
+    if github.wiki_writes_enabled:
+
+        @server.tool()
+        async def write_wiki_pages(
+            repository: str,
+            pages: dict[str, str],
+            expected_base: str,
+            message: str,
+            expected_wiki_repository: str,
+        ) -> Any:
+            """Write source-project memory to its configured wiki using App access.
+
+            repository is the source project, never a raw wiki destination or
+            remote. Validated team-memory customization resolves the destination;
+            its App installation and contents-write token authorize access.
+            Read a new wiki snapshot first and pass its wiki_repository as
+            expected_wiki_repository and its full SHA as expected_base. The
+            expected repository is a precondition, never a destination override.
+            If the destination changes, read a fresh snapshot before writing.
+            Paths must be relative Markdown pages: 1-20 pages, at most 64 KiB per
+            page and 256 KiB per batch. The single-line message is at most 512
+            bytes. The backend validates all paths, refs, and limits and rejects
+            conflicting snapshots. Commits use the verified App Bot identity.
+            """
+            return await github.write_wiki_pages(
+                repository, pages, expected_base, message,
+                expected_wiki_repository=expected_wiki_repository,
+            )
 
     if github.writes_enabled:
 
@@ -193,11 +325,15 @@ def create_server(
 
 def build_server_from_environment(
     environment: Mapping[str, str] | None = None,
+    *,
+    wiki_writer: bool = False,
 ) -> MCPServer:
-    """Build a server using only validated environment configuration."""
+    """Build a server with validated credentials and an explicit internal role."""
+    if not isinstance(wiki_writer, bool):
+        raise ConfigurationError("wiki_writer must be a boolean")
     environment = os.environ if environment is None else environment
     app_config = GitHubAppConfig.from_environment(environment)
-    writes_enabled = _boolean(
+    writes_enabled = False if wiki_writer else _boolean(
         environment.get(_ENABLE_WRITES_ENV, "false"),
         _ENABLE_WRITES_ENV,
     )
@@ -205,6 +341,7 @@ def build_server_from_environment(
     github = GitHubClient(
         provider,
         writes_enabled=writes_enabled,
+        wiki_writes_enabled=wiki_writer,
     )
     return create_server(github)
 
@@ -220,8 +357,14 @@ def _boolean(value: str, name: str) -> bool:
 
 def main() -> None:
     """Run the server over stdio without writing non-protocol data to stdout."""
+    parser = argparse.ArgumentParser(description="IssueLens GitHub MCP server")
+    parser.add_argument(
+        "--wiki-writer", action="store_true",
+        help="Internal wiki-writer role; disables issue writes",
+    )
+    options = parser.parse_args()
     try:
-        server = build_server_from_environment()
+        server = build_server_from_environment(wiki_writer=options.wiki_writer)
     except (ConfigurationError, GitHubAppError) as error:
         raise SystemExit(f"IssueLens GitHub MCP configuration failed: {error}") from error
     server.run(transport="stdio")

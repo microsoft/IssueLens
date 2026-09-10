@@ -1,9 +1,15 @@
 import json
 import pathlib
+import re
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from copilot.tools import ToolInvocation
 
+import issuelens_config
+from github_app_mcp.src.issuelens_github_mcp import policy
 from issuelens_config import (
     INSTRUCTION_DOMAINS,
     MAX_CONFIG_BYTES,
@@ -11,6 +17,8 @@ from issuelens_config import (
     IssueLensConfigError,
     load_instruction,
     parse_config,
+    resolve_wiki_repository,
+    validate_wiki_repository,
 )
 from issuelens_config_tool import create_tool
 
@@ -25,8 +33,10 @@ class NotFoundError(RuntimeError):
 class RepositoryClient:
     def __init__(self, files):
         self.files = files
+        self.calls = []
 
     async def get_file(self, repository, path):
+        self.calls.append((repository, path))
         if path == ".github":
             entries = []
             for file_path in self.files:
@@ -42,6 +52,120 @@ class RepositoryClient:
 
 
 class IssueLensConfigTests(unittest.IsolatedAsyncioTestCase):
+    def test_root_reexports_share_the_package_objects(self):
+        for name in issuelens_config.__all__:
+            with self.subTest(name=name):
+                self.assertIs(getattr(issuelens_config, name), getattr(policy, name))
+
+    async def test_team_memory_tool_returns_structured_destination_and_only_its_content(self):
+        client = RepositoryClient({
+            ".github/issuelens.yml": (
+                "version: 1\ninstructions:\n  team_memory:\n"
+                "    path: .github/issuelens/team-memory.md\n"
+                "    wiki_repository: microsoft/team-knowledge\n"
+                "  planning:\n    path: docs/planning.md\n"
+            ),
+            ".github/issuelens/team-memory.md": "Topics. wiki_repository: other/from-markdown",
+            "docs/planning.md": "Planning-only instructions",
+        })
+        result = await create_tool(client).handler(ToolInvocation(arguments={
+            "repository": "microsoft/IssueLens", "domain": "team_memory",
+        }))
+        self.assertEqual(result.result_type, "success")
+        payload = json.loads(result.text_result_for_llm)
+        self.assertEqual(payload["repository"], "microsoft/IssueLens")
+        self.assertEqual(payload["wiki_repository"], "microsoft/team-knowledge")
+        self.assertEqual(payload["source"], "configured")
+        self.assertEqual(payload["configStatus"], "loaded")
+        self.assertEqual(payload["path"], ".github/issuelens/team-memory.md")
+        self.assertIn("other/from-markdown", payload["content"])
+        self.assertNotIn("Planning-only", result.text_result_for_llm)
+        self.assertEqual(client.calls, [
+            ("microsoft/IssueLens", ".github"),
+            ("microsoft/IssueLens", ".github/issuelens.yml"),
+            ("microsoft/IssueLens", ".github/issuelens/team-memory.md"),
+        ])
+
+    async def test_root_resolver_defaults_and_fails_for_missing_policy(self):
+        self.assertEqual(await resolve_wiki_repository(
+            RepositoryClient({}), "microsoft/IssueLens",
+        ), "microsoft/IssueLens")
+        client = RepositoryClient({
+            ".github/issuelens.yml": (
+                "version: 1\ninstructions:\n  team_memory:\n"
+                "    path: docs/missing.md\n    wiki_repository: microsoft/team-knowledge\n"
+            ),
+        })
+        with self.assertRaisesRegex(IssueLensConfigError, "file not found"):
+            await resolve_wiki_repository(client, "microsoft/IssueLens")
+        result = await create_tool(client).handler(ToolInvocation(arguments={
+            "repository": "microsoft/IssueLens", "domain": "team_memory",
+        }))
+        self.assertEqual(result.result_type, "failure")
+        self.assertIn("file not found", result.error)
+
+    def test_team_memory_schema_retains_path_ref_and_scopes_destination(self):
+        schema = json.loads((ROOT / "schemas" / "issuelens.schema.json").read_text(encoding="utf-8"))
+        domains = schema["properties"]["instructions"]["properties"]
+        self.assertEqual(domains["team_memory"], {"$ref": "#/$defs/teamMemoryInstruction"})
+        memory = schema["$defs"]["teamMemoryInstruction"]
+        self.assertFalse(memory["additionalProperties"])
+        self.assertEqual(memory["required"], ["path"])
+        self.assertEqual(memory["properties"]["path"], {
+            "$ref": "#/$defs/instructionFile/properties/path",
+        })
+        self.assertEqual(set(memory["properties"]), {"path", "wiki_repository"})
+        self.assertEqual(set(schema["$defs"]["instructionFile"]["properties"]), {"path"})
+        for domain in INSTRUCTION_DOMAINS - {"team_memory"}:
+            with self.subTest(domain=domain):
+                self.assertEqual(domains[domain], {"$ref": "#/$defs/instructionFile"})
+
+    def test_schema_repository_pattern_matches_runtime_validation(self):
+        schema = json.loads((ROOT / "schemas" / "issuelens.schema.json").read_text(encoding="utf-8"))
+        repository = schema["$defs"]["teamMemoryInstruction"]["properties"]["wiki_repository"]
+        self.assertEqual(repository["type"], "string")
+        self.assertEqual(repository["maxLength"], 140)
+        valid = (
+            "microsoft/team-knowledge", "owner/.github", "owner/repo.wiki",
+            "owner/repo..name", "owner/-repo", "owner/a_b.c-d", "a/b",
+            f"{'a' * 39}/{'b' * 100}",
+        )
+        invalid = (
+            "", "owner/.", "owner/..", "../repo", "owner/repo.git", "owner/repo.WIKI.GIT",
+            "https://github.com/owner/repo", "git@github.com:owner/repo",
+            "owner/repo/path", "owner/repo#main", "owner/repo?ref=main", "owner/repo@main",
+            " owner/repo", "owner/repo ", "owner/repo\n", "owner/re\npo", "owner/re po",
+            "owner/repo\r\n", "owner/repo\t", "owner/re\x00po", "owner\\repo",
+            "-owner/repo", "owner-/repo", "my--team/repo", "my_team/repo",
+            f"{'a' * 40}/repo", f"owner/{'b' * 101}",
+        )
+        for value in valid:
+            with self.subTest(value=value):
+                self.assertIsNotNone(re.search(repository["pattern"], value))
+                self.assertEqual(validate_wiki_repository(value), value)
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertIsNone(re.search(repository["pattern"], value))
+                with self.assertRaises(IssueLensConfigError):
+                    validate_wiki_repository(value)
+
+    def test_root_imports_work_outside_repository_cwd(self):
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, {str(ROOT)!r})\n"
+            "import issuelens_config as host\n"
+            "from github_app_mcp.src.issuelens_github_mcp import policy\n"
+            "assert host.IssueLensConfigError is policy.IssueLensConfigError\n"
+            "assert host.resolve_wiki_repository is policy.resolve_wiki_repository\n"
+            "assert host.parse_config('version: 1') == {}\n"
+        )
+        with tempfile.TemporaryDirectory() as outside_root:
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", code], cwd=outside_root,
+                capture_output=True, text=True, timeout=15,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     async def test_mixed_case_config_loads_configured_instruction(self):
         client = RepositoryClient({
             ".github/IssueLens.YML": (

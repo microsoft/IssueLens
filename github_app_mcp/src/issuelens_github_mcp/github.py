@@ -2,27 +2,41 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import html
 import json
 import pathlib
 import re
-from collections.abc import Mapping, Sequence
+import time
+import unicodedata
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import quote, urljoin, urlparse
 
 import httpx
 
-from .auth import GitHubAppError, GitHubAppTokenProvider, Permissions, validate_repository
+from .auth import GitHubAppError, GitHubAppTokenProvider, InstallationCredential, Permissions, validate_repository
+from .policy import IssueLensConfigError, resolve_wiki_repository, validate_wiki_repository
+from .wiki import WikiError, WikiRepository
 
 
 _API_ROOT = "https://api.github.com"
 _API_VERSION = "2026-03-10"
 _MAX_RESULT_BYTES = 100_000
+_MAX_WIKI_RESULT_BYTES = 6 * 64 * 1024 + 4096
 _MAX_HTTP_RESPONSE_BYTES = 128 * 1024
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_QUERY_CHARS = 512
+_MAX_SEARCH_FILES = 64
+_MAX_SEARCH_BYTES = 256 * 1024
+_MAX_SEARCH_SECONDS = 60
+_MAX_SEARCH_MATCH_LINES = 3
+_MAX_SEARCH_EXCERPT_CHARS = 160
+_SEARCH_OID_PATTERN = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _MAX_ISSUE_IMAGES = 5
 _MAX_ISSUE_IMAGE_BYTES = 5 * 1024 * 1024
 _MAX_ISSUE_IMAGES_TOTAL_BYTES = 15 * 1024 * 1024
@@ -62,6 +76,14 @@ _REACTION_TARGETS: dict[ReactionTarget, tuple[str, str]] = {
 }
 
 
+@dataclass(frozen=True)
+class _ContentReadAuth:
+    """Authentication resolved for one repository's contents-read scan."""
+
+    repository: str
+    credential: InstallationCredential | None = field(repr=False)
+
+
 class GitHubClient:
     """Perform only the repository operations required by IssueLens."""
 
@@ -70,8 +92,12 @@ class GitHubClient:
         token_provider: GitHubAppTokenProvider,
         *,
         writes_enabled: bool = False,
+        wiki_writes_enabled: bool = False,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
+        if not isinstance(wiki_writes_enabled, bool):
+            raise GitHubAppError("wiki_writes_enabled must be a boolean")
+        self._wiki_writes_enabled = wiki_writes_enabled
         self._token_provider = token_provider
         self._writes_enabled = writes_enabled
         self._transport = transport
@@ -80,6 +106,11 @@ class GitHubClient:
     def writes_enabled(self) -> bool:
         """Whether this trusted client instance permits GitHub writes."""
         return self._writes_enabled
+
+    @property
+    def wiki_writes_enabled(self) -> bool:
+        """Whether this trusted client instance exposes the wiki writer capability."""
+        return self._wiki_writes_enabled
 
     async def get_repository(self, repository: str) -> Any:
         """Read repository metadata."""
@@ -266,14 +297,16 @@ class GitHubClient:
             params=_pagination(per_page, page),
         )
 
-    async def get_file(self, repository: str, path: str) -> Any:
+    async def get_file(self, repository: str, path: str, ref: str | None = None) -> Any:
         """Read one repository-relative UTF-8 text file or directory listing."""
         path = _repository_path(path)
+        params = {"ref": _ref(ref)} if ref is not None else None
         payload = await self._request(
             "GET",
             repository,
             f"/contents/{quote(path, safe='/')}",
             permissions={"contents": "read"},
+            params=params,
         )
         if isinstance(payload, Mapping) and payload.get("type") == "file":
             content = payload.get("content")
@@ -300,6 +333,375 @@ class GitHubClient:
             payload = dict(payload)
             payload.pop("content", None)
             payload["decoded_content"] = decoded_content
+        return payload
+
+    async def get_pull_request(self, repository: str, pull_number: int) -> Any:
+        return await self._request(
+            "GET", repository, f"/pulls/{_positive(pull_number, 'pull_number')}",
+            permissions={"pull_requests": "read"},
+        )
+
+    async def list_pull_request_files(
+        self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
+    ) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/files",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page),
+        )
+
+    async def list_pull_request_commits(
+        self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
+    ) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/commits",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page),
+        )
+
+    async def list_pull_request_reviews(
+        self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
+    ) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/reviews",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page),
+        )
+
+    async def list_pull_request_review_comments(
+        self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
+    ) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/comments",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page),
+        )
+
+    async def get_commit(self, repository: str, sha: str) -> Any:
+        return await self._request(
+            "GET", repository, f"/commits/{_sha(sha)}",
+            permissions={"contents": "read"},
+        )
+
+    async def compare_commits(self, repository: str, base: str, head: str) -> Any:
+        return await self._request(
+            "GET", repository,
+            f"/compare/{quote(_ref(base), safe='')}...{quote(_ref(head), safe='')}",
+            permissions={"contents": "read"},
+        )
+
+    async def list_repository_tree(self, repository: str, ref: str, *, recursive: bool = True) -> Any:
+        commit = await self._request(
+            "GET", repository, f"/git/trees/{quote(_ref(ref), safe='')}",
+            permissions={"contents": "read"},
+            params={"recursive": "1"} if recursive else None,
+        )
+        return commit
+
+    async def search_repository_content(
+        self, repository: str, query: str, *, ref: str | None = None,
+        per_page: int = 30, page: int = 1,
+    ) -> Any:
+        repository = self._authorize(repository)
+        if not isinstance(query, str) or any(
+            unicodedata.category(char).startswith("C")
+            or (char.isspace() and char != " ") for char in query
+        ):
+            raise GitHubAppError("query must be single-line plain text")
+        query = query.strip()
+        if not query or len(query) > _MAX_QUERY_CHARS or _SEARCH_QUALIFIER.search(query):
+            raise GitHubAppError("query must be plain text and within the bounded limit")
+        pagination = _pagination(per_page, page)
+        if ref is None:
+            return await self._request(
+                "GET", repository, absolute_url=f"{_API_ROOT}/search/code",
+                permissions={"contents": "read"},
+                params={"q": f"{query} repo:{repository}", **pagination},
+            )
+
+        ref = _ref(ref)
+        scan_timeout = asyncio.timeout(_MAX_SEARCH_SECONDS)
+        budget_error = f"Repository search exceeded its {_MAX_SEARCH_SECONDS}-second scan time budget"
+        async with AsyncExitStack() as stack:
+            try:
+                async with scan_timeout:
+                    client = httpx.AsyncClient(
+                        transport=self._transport, timeout=30, follow_redirects=False,
+                    )
+                    stack.push_async_callback(client.aclose)
+                    result = await self._search_repository_content_at_ref(
+                        repository, query, ref, per_page=per_page, page=page, client=client,
+                    )
+                    deadline = scan_timeout.when()
+                    if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                        raise GitHubAppError(budget_error)
+                    return result
+            except TimeoutError:
+                if not scan_timeout.expired():
+                    raise
+                raise GitHubAppError(budget_error) from None
+
+    async def _search_repository_content_at_ref(
+        self, repository: str, query: str, ref: str, *,
+        per_page: int, page: int, client: httpx.AsyncClient,
+    ) -> Any:
+        try:
+            credential = await self._token_provider.get_token(
+                repository, {"contents": "read"}
+            )
+        except GitHubAppError:
+            credential = None
+        content_read_auth = _ContentReadAuth(repository, credential)
+        commit = await self._request(
+            "GET", repository, f"/commits/{quote(ref, safe='')}",
+            permissions={"contents": "read"}, content_read_auth=content_read_auth,
+            _client=client,
+        )
+        if (
+            not isinstance(commit, Mapping)
+            or not isinstance(commit.get("commit"), Mapping)
+            or not isinstance(commit["commit"].get("tree"), Mapping)
+        ):
+            raise GitHubAppError("GitHub returned an invalid search commit")
+        resolved_ref = _search_oid(commit.get("sha"))
+        tree_sha = _search_oid(commit["commit"]["tree"].get("sha"))
+        if _SEARCH_OID_PATTERN.fullmatch(ref) and ref.lower() != resolved_ref:
+            raise GitHubAppError("GitHub returned a different search commit")
+        tree = await self._request(
+            "GET", repository, f"/git/trees/{tree_sha}",
+            permissions={"contents": "read"}, params={"recursive": "1"},
+            content_read_auth=content_read_auth,
+            _client=client,
+        )
+        if (
+            not isinstance(tree, Mapping)
+            or not isinstance(tree.get("tree"), list)
+            or type(tree.get("truncated")) is not bool
+            or _search_oid(tree.get("sha")) != tree_sha
+        ):
+            raise GitHubAppError("GitHub returned an invalid search tree")
+        if tree["truncated"]:
+            raise GitHubAppError("Repository search tree is truncated; scan cannot be complete")
+
+        files = []
+        seen_paths = set()
+        skipped_reasons: dict[str, int] = {}
+        for entry in tree["tree"]:
+            if not isinstance(entry, Mapping):
+                raise GitHubAppError("GitHub returned an invalid search tree entry")
+            path = _repository_path(entry.get("path"))
+            if (
+                path in seen_paths
+                or path != "/".join(pathlib.PurePosixPath(path).parts)
+                or any(unicodedata.category(char).startswith("C") for char in path)
+            ):
+                raise GitHubAppError("GitHub returned an invalid search tree path")
+            seen_paths.add(path)
+            blob_sha = _search_oid(entry.get("sha"))
+            kind, mode = entry.get("type"), entry.get("mode")
+            if kind == "tree" and mode == "040000":
+                continue
+            if (kind == "blob" and mode == "120000") or (kind == "commit" and mode == "160000"):
+                reason = "symlink" if kind == "blob" else "submodule"
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                continue
+            if kind != "blob" or mode not in ("100644", "100755"):
+                raise GitHubAppError("GitHub returned an unsupported search tree mode")
+            size = entry.get("size")
+            if type(size) is not int or size < 0:
+                raise GitHubAppError("GitHub returned an invalid search file size")
+            files.append((path, blob_sha, size))
+        if len(files) > _MAX_SEARCH_FILES:
+            raise GitHubAppError(f"Repository search exceeds {_MAX_SEARCH_FILES} regular files")
+        if sum(size for _, _, size in files if size <= _MAX_FILE_BYTES) > _MAX_SEARCH_BYTES:
+            raise GitHubAppError(f"Repository search exceeds {_MAX_SEARCH_BYTES} content bytes")
+
+        items = []
+        for path, blob_sha, size in sorted(files):
+            if size > _MAX_FILE_BYTES:
+                skipped_reasons["file_too_large"] = skipped_reasons.get("file_too_large", 0) + 1
+                continue
+            blob = await self._request(
+                "GET", repository, f"/git/blobs/{blob_sha}",
+                permissions={"contents": "read"}, content_read_auth=content_read_auth,
+                _client=client,
+            )
+            text, reason = _search_blob_text(blob, blob_sha, size)
+            if reason is not None:
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                continue
+            matches = _search_line_matches(text, query)
+            if matches:
+                items.append({
+                    "path": path, "name": path.rsplit("/", 1)[-1], "sha": blob_sha,
+                    "repository": {"full_name": repository},
+                    "html_url": f"https://github.com/{repository}/blob/{resolved_ref}/{quote(path, safe='/')}",
+                    "matches": matches,
+                })
+        start = (page - 1) * per_page
+        result = {
+            "items": items[start:start + per_page], "total_count": len(items),
+            "incomplete_results": bool(skipped_reasons), "resolved_ref": resolved_ref,
+            "skipped_files": sum(skipped_reasons.values()), "skipped_reasons": skipped_reasons,
+        }
+        if len(json.dumps(result, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
+            raise GitHubAppError("GitHub search result is too large; reduce per_page")
+        return result
+
+    async def list_merged_pull_requests(
+        self, repository: str, *, base: str, since: str | None = None,
+        per_page: int = 30, page: int = 1,
+    ) -> Any:
+        params = {
+            "q": f"repo:{self._authorize(repository)} is:pr is:merged base:{_ref(base)}",
+            **_pagination(per_page, page),
+        }
+        if since is not None:
+            params["q"] += f" merged:>={_timestamp(since)[:10]}"
+        return await self._request(
+            "GET", repository, absolute_url=f"{_API_ROOT}/search/issues",
+            permissions={"pull_requests": "read"}, params=params,
+        )
+
+    async def get_wiki_snapshot(self, repository: str) -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.snapshot())
+
+    async def list_wiki_pages(self, repository: str, ref: str = "HEAD") -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.pages(ref))
+
+    async def get_wiki_page(self, repository: str, path: str, ref: str = "HEAD") -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.page(path, ref))
+
+    async def search_wiki(self, repository: str, query: str, ref: str = "HEAD") -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.search(query, ref))
+
+    async def list_wiki_history(
+        self, repository: str, path: str | None = None, limit: int = 30,
+        ref: str = "HEAD",
+    ) -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.history(path, limit, ref))
+
+    async def get_wiki_diff(self, repository: str, base: str, head: str = "HEAD") -> Any:
+        return await self._wiki_read(repository, lambda wiki: wiki.diff(base, head))
+
+    async def write_wiki_pages(
+        self, repository: str, pages: dict[str, str], expected_base: str, message: str,
+        *, expected_wiki_repository: str,
+    ) -> Any:
+        """Publish source-project memory to its configured wiki as the App Bot."""
+        repository = validate_repository(repository)
+        if not self.wiki_writes_enabled:
+            raise GitHubAppError("Wiki writes are not enabled")
+        try:
+            if not (
+                isinstance(expected_wiki_repository, str)
+                and expected_wiki_repository.casefold() == repository.casefold()
+            ):
+                expected_wiki_repository = validate_wiki_repository(expected_wiki_repository)
+        except IssueLensConfigError:
+            raise GitHubAppError(
+                "expected_wiki_repository must be a GitHub owner/repository identifier; "
+                "read a fresh snapshot before writing"
+            ) from None
+        wiki_repository = await self._resolve_wiki_repository(
+            repository, write=True, expected_wiki_repository=expected_wiki_repository,
+        )
+        try:
+            credential = await self._token_provider.get_token(
+                wiki_repository, {"contents": "write"}
+            )
+            author_name, author_email = await self._token_provider.get_bot_identity()
+        except Exception:
+            raise GitHubAppError("Wiki write authentication failed") from None
+        return await asyncio.to_thread(
+            self._wiki_operation, repository, wiki_repository, credential.token,
+            lambda wiki: wiki.write(
+                pages, expected_base, message,
+                author_name=author_name, author_email=author_email,
+            ),
+        )
+
+    async def _resolve_wiki_repository(
+        self, repository: str, *, write: bool, expected_wiki_repository: str | None = None,
+    ) -> str:
+        try:
+            wiki_repository = await resolve_wiki_repository(self, repository)
+        except Exception:
+            raise GitHubAppError("Team memory customization could not be loaded") from None
+        if (
+            expected_wiki_repository is not None
+            and expected_wiki_repository.casefold() != wiki_repository.casefold()
+        ):
+            raise GitHubAppError("Wiki destination changed; read a fresh snapshot before writing")
+        if repository.casefold() == wiki_repository.casefold():
+            return wiki_repository
+        try:
+            source_metadata = await self.get_repository(repository)
+            wiki_metadata = await self.get_repository(wiki_repository)
+            visibilities = []
+            for metadata in (source_metadata, wiki_metadata):
+                visibility = metadata.get("visibility") if isinstance(metadata, Mapping) else None
+                if not isinstance(visibility, str) or visibility not in {"public", "private", "internal"}:
+                    raise ValueError("Invalid repository visibility")
+                visibilities.append(visibility)
+        except Exception:
+            raise GitHubAppError("Team memory repository visibility could not be verified") from None
+        source_visibility, wiki_visibility = visibilities
+        if write and source_visibility != "public" and wiki_visibility == "public":
+            raise GitHubAppError("Team memory cannot write non-public project context to a public wiki")
+        if not write and source_visibility == "public" and wiki_visibility != "public":
+            raise GitHubAppError("Team memory cannot read a non-public wiki in a public project context")
+        if source_visibility != "public" and wiki_visibility != "public":
+            raise GitHubAppError(
+                "Team memory cannot access a different non-public repository's wiki "
+                "without a verified audience relationship; use the source project's own wiki"
+            )
+        return wiki_repository
+
+    async def _wiki_read(
+        self, repository: str, operation: Callable[[WikiRepository], Any]
+    ) -> Any:
+        repository = self._authorize(repository)
+        wiki_repository = await self._resolve_wiki_repository(repository, write=False)
+        try:
+            credential = await self._token_provider.get_token(
+                wiki_repository, {"contents": "read"}
+            )
+        except Exception:
+            raise GitHubAppError("Wiki read authentication failed") from None
+        return await asyncio.to_thread(
+            self._wiki_operation, repository, wiki_repository, credential.token, operation
+        )
+
+    @staticmethod
+    def _wiki_operation(
+        source_repository: str, repository: str, token: str,
+        operation: Callable[[WikiRepository], Any],
+    ) -> Any:
+        try:
+            with WikiRepository(repository, token=token) as wiki:
+                payload = operation(wiki)
+            if isinstance(payload, dict):
+                payload = {
+                    **payload,
+                    "source_repository": source_repository,
+                    "wiki_repository": repository,
+                }
+            encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode("utf-8")
+        except WikiError:
+            raise GitHubAppError(
+                "Wiki operation failed; re-read a snapshot and check paths, refs, and limits"
+            ) from None
+        except Exception:
+            raise GitHubAppError("Wiki operation failed") from None
+        if len(encoded) > _MAX_WIKI_RESULT_BYTES:
+            raise GitHubAppError("GitHub response is too large; narrow the request")
+        if json.dumps(token, ensure_ascii=True)[1:-1].encode("utf-8") in encoded:
+            raise GitHubAppError("Wiki operation returned an unsafe result")
         return payload
 
     async def get_issue_images(
@@ -540,31 +942,59 @@ class GitHubClient:
         params: Mapping[str, Any] | None = None,
         body: Mapping[str, Any] | None = None,
         write: bool = False,
+        content_read_auth: _ContentReadAuth | None = None,
+        _client: httpx.AsyncClient | None = None,
     ) -> Any:
         repository = self._authorize(repository, write=write)
+        if _client is not None and content_read_auth is None:
+            raise GitHubAppError("Repository content authentication scope mismatch")
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "IssueLens-GitHub-MCP/0.1",
             "X-GitHub-Api-Version": _API_VERSION,
         }
         anonymous_fallback = False
-        try:
-            credential = await self._token_provider.get_token(
-                repository,
-                permissions,
-            )
+        if content_read_auth is not None:
+            if (
+                method != "GET" or write or absolute_url is not None
+                or repository.casefold() != content_read_auth.repository.casefold()
+                or permissions != {"contents": "read"}
+            ):
+                raise GitHubAppError("Repository content authentication scope mismatch")
+            credential = content_read_auth.credential
+            if credential is not None:
+                if (
+                    credential.repository.casefold() != repository.casefold()
+                    or credential.permissions != (("contents", "read"),)
+                ):
+                    raise GitHubAppError("Repository content authentication scope mismatch")
+                if credential.expires_at <= time.time():
+                    raise GitHubAppError("GitHub App scan credential expired; retry the search")
+            anonymous_fallback = credential is None
+        else:
+            try:
+                credential = await self._token_provider.get_token(
+                    repository,
+                    permissions,
+                )
+            except GitHubAppError:
+                if write or method != "GET":
+                    raise
+                credential = None
+                anonymous_fallback = True
+        if credential is not None:
             headers["Authorization"] = f"Bearer {credential.token}"
-        except GitHubAppError:
-            if write or method != "GET":
-                raise
-            anonymous_fallback = True
         url = absolute_url or f"{_API_ROOT}/repos/{repository}{path}"
         try:
-            async with httpx.AsyncClient(
-                transport=self._transport,
-                timeout=30,
-                follow_redirects=False,
-            ) as client:
+            async with AsyncExitStack() as stack:
+                client = _client
+                if client is None:
+                    client = httpx.AsyncClient(
+                        transport=self._transport,
+                        timeout=30,
+                        follow_redirects=False,
+                    )
+                    stack.push_async_callback(client.aclose)
                 async with client.stream(
                     method,
                     url,
@@ -605,6 +1035,57 @@ class GitHubClient:
         return payload
 
 
+def _search_oid(value: Any) -> str:
+    if not isinstance(value, str) or not _SEARCH_OID_PATTERN.fullmatch(value):
+        raise GitHubAppError("GitHub returned an invalid search object SHA")
+    return value.lower()
+
+
+def _search_blob_text(payload: Any, blob_sha: str, size: int) -> tuple[str, str | None]:
+    if (
+        not isinstance(payload, Mapping)
+        or _search_oid(payload.get("sha")) != blob_sha
+        or type(payload.get("size")) is not int
+        or payload["size"] != size
+        or not isinstance(payload.get("content"), str)
+        or not isinstance(payload.get("encoding"), str)
+    ):
+        raise GitHubAppError("GitHub returned an invalid search blob")
+    if payload["encoding"] != "base64":
+        return "", "unsupported_encoding"
+    compact = "".join(payload["content"].split())
+    if len(compact) > 4 * ((size + 2) // 3):
+        raise GitHubAppError("GitHub search blob exceeds its declared size")
+    try:
+        decoded = base64.b64decode(compact, validate=True)
+    except ValueError:
+        raise GitHubAppError("GitHub returned invalid search blob base64") from None
+    if len(decoded) != size:
+        raise GitHubAppError("GitHub search blob differs from its declared size")
+    if any(byte < 32 and byte not in (9, 10, 12, 13) or byte == 127 for byte in decoded):
+        return "", "binary"
+    try:
+        return decoded.decode("utf-8"), None
+    except UnicodeDecodeError:
+        return "", "non_utf8"
+
+
+def _search_line_matches(text: str, query: str) -> list[dict[str, Any]]:
+    matches = []
+    folded_query = query.casefold()
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        line = line.removesuffix("\r")
+        if folded_query in line.casefold():
+            matches.append({
+                "line_number": line_number,
+                "excerpt": line[:_MAX_SEARCH_EXCERPT_CHARS],
+                "truncated": len(line) > _MAX_SEARCH_EXCERPT_CHARS,
+            })
+            if len(matches) == _MAX_SEARCH_MATCH_LINES:
+                break
+    return matches
+
+
 def _pagination(per_page: int, page: int) -> dict[str, int]:
     if type(per_page) is not int or not 1 <= per_page <= 100:
         raise GitHubAppError("per_page must be an integer from 1 to 100")
@@ -626,6 +1107,26 @@ def _timestamp(value: str) -> str:
         raise GitHubAppError("since must be an ISO 8601 timestamp") from error
     if parsed.tzinfo is None:
         raise GitHubAppError("since must include a timezone")
+    return value
+
+
+def _ref(value: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 200:
+        raise GitHubAppError("ref must be a bounded non-empty string")
+    if (
+        any(char.isspace() or unicodedata.category(char).startswith("C") for char in value)
+        or any(char in value for char in '\\~^:?*[#%"\'')
+        or ".." in value or "@{" in value or value == "@"
+        or value.startswith(("-", "/")) or value.endswith(("/", "."))
+        or any(not part or part.startswith(".") or part.endswith(".lock") for part in value.split("/"))
+    ):
+        raise GitHubAppError("ref contains unsupported characters")
+    return value
+
+
+def _sha(value: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
+        raise GitHubAppError("commit SHA must be 7 to 64 hexadecimal characters")
     return value
 
 

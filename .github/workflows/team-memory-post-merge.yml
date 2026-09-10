@@ -1,0 +1,40 @@
+name: IssueLens team memory (opt-in)
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [closed]
+
+concurrency:
+  group: issue-lens-team-memory-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  reconcile:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.base.ref == github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Opt-in gate
+        id: gate
+        env:
+          ENABLED: ${{ vars.ISSUELENS_TEAM_MEMORY_ENABLED }}
+        run: |
+          if [ "$ENABLED" != "true" ]; then
+            echo "Team memory is disabled; no action."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Submit trusted merge event
+        if: steps.gate.outputs.enabled == 'true' && github.event_name == 'pull_request'
+        env:
+          AGENT_ENDPOINT: ${{ secrets.ISSUELENS_AGENT_ENDPOINT }}
+        run: |
+          test -n "$AGENT_ENDPOINT"
+          echo "The hosted agent must independently verify this repository, PR, merge, and caller provenance."
+          echo "Deployment, publication, and App permission changes are intentionally not performed by this workflow."

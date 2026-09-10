@@ -27,6 +27,9 @@ protocol for chat.
   produces an action plan followed by a design specification, reports readiness
   using validated repository policy or built-in defaults, and waits for human
   direction before revising or advancing the proposal.
+- **Team memory** - every agent reads relevant wiki knowledge through the
+  read-only `team-memory` skill. Only the `team-memory` sub-agent owns separately
+  authorized direct wiki maintenance through `write_wiki_pages`.
 - **Built-in commands** — immutable `@issuelens triage`, `retriage`, `plan`,
   and `replan` commands work across Responses chat and validated GitHub
   maintainer comments. `@issuelens go` is reserved for a future coding loop and
@@ -36,7 +39,7 @@ protocol for chat.
   multiple-command inputs are rejected.
 - **App-scoped GitHub access** — both protocols use the bundled stdio MCP
   server. It resolves the App installation for each explicit repository and
-  mints repository- and permission-scoped tokens. Bounded reads fall back to
+  mints repository- and permission-scoped tokens. Bounded REST reads fall back to
   anonymous access for public repositories without an installation. Writes
   always require App access and are attributed to the App bot rather than an
   ambient user identity.
@@ -91,21 +94,42 @@ protocol for chat.
     assignment, and notification safeguards for planning-owned writes. It
     requires explicit authorization for writes and waits for human feedback or
     configured readiness signals rather than autonomously revising.
+  - **`team-memory`** - maintains wiki knowledge from cited evidence and full
+    source commit SHAs. Its prompt is `agents/team-memory.md`. Only its local
+    MCP server exposes `write_wiki_pages`; the parent automatically supplies
+    internal `--wiki-writer` mode. Users need no environment flag. The existing
+    `GITHUB_MCP_ENABLE_WRITES` remains for triage, not wiki writes.
 - **Skills** (`skills/`): `issuelens-config` (validated repository policy),
-  `find-duplicates`, `label-issue`, `assign-issue`, and `notify`.
+  `find-duplicates`, `label-issue`, `assign-issue`, `notify`, and `team-memory`
+  (read-only retrieval preloaded on all agents, including the orchestrator).
 - **Media inputs** — `media_inputs.py` normalizes Responses `input_image` and
   `input_file` content and invocation `blob` attachments into Copilot session
   attachments. Only inline base64 content is accepted; remote URLs, file IDs,
   and request-supplied server paths are rejected.
 - **GitHub access** — both protocols use only the bundled GitHub App stdio MCP
   tools for model-facing GitHub reads and writes. Every tool requires an
-  explicit `owner/repository`; reads prefer App access and may fall back to
+  explicit `owner/repository`; REST reads prefer App access and may fall back to
   anonymous access for public repositories, while writes require successful
   App installation resolution. The constrained `issuelens-config` tool and
   host image loader create separate request-local, read-only App clients.
   Related public repositories named by duplicate instructions use the same MCP
-  read tools without requiring an App installation.
-- **Runtime configuration** — `main.py` explicitly loads `agents.md`, all three
+  read tools without requiring an App installation. Wiki tools instead take
+  the source project as `repository`, independently re-read and validate its
+  wiki mapping, and resolve credentials/transport to the destination. App
+  installation and operation-scoped read/write access are required there;
+  tokens are scoped to that actual destination, not merely the source.
+- **Wiki backend** - the packaged Dulwich Python library performs Git network
+  and object operations without spawning Git, SSH, or credential helpers. The
+  host still starts the stdio MCP server as a Python subprocess. Wiki operations
+  use bounded temporary PACK storage and in-memory Git objects, with no full
+  worktree checkout, hooks, filters, or Git config discovery. Typed validation,
+  byte budgets, and redirect denial remain enforced. Internal HTTPS
+  `x-access-token` authentication stays inside the backend. Socket/library/DNS
+  timeouts are cooperative, not a hard CPU deadline. Only SHA-1 Git repositories
+  (GitHub's current format) are supported; SHA-256 is rejected. Binary diffs are
+  notices, not binary patches; unchanged assets are preserved byte-for-byte and
+  page deletion is unsupported.
+- **Runtime configuration** — `main.py` explicitly loads `agents.md`, all four
   sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config
   discovery in the read-only hosted code directory.
@@ -139,9 +163,40 @@ protocol for chat.
 - Repository customization is optional. A missing `.github/issuelens.yml` or an
   omitted domain uses legacy or built-in behavior; only a present but invalid
   configuration stops that capability and its related writes.
+- **Wiki-destination exception** - validated `team_memory.wiki_repository`
+  may select only the wiki capability's destination, not other source
+  repositories, other writes, or notification scope. The structured
+  `instructions.team_memory` requires `path`; optional `wiki_repository` is
+  validated as a GitHub parent repository identifier (`owner/repository`), not a
+  wiki UI name or Git URL. Its `.wiki.git` stores memory. The shared package
+  parser returns resolved `wiki_repository` alongside `content` through the
+  config tool. An omitted field, config, or domain defaults to the source
+  project's own wiki. Pass the source project to all wiki MCP tools, never the
+  destination. Markdown guides organization/topics only; it cannot override
+  the target or supply arbitrary Git URLs, tokens, or shell settings.
+- Source-user authorization is separate from destination App installation
+  access. Never publish private/internal-source knowledge to a public wiki or
+  read a private/internal wiki for public-source context. Cross-repository
+  mappings between private/internal repositories are rejected for both reads
+  and writes because their audience relationship cannot be verified; use the
+  source project's own wiki. Same-repository and public-to-public mappings
+  remain supported. A private/internal source may read a public wiki, and a
+  public source may write public information to a private/internal wiki,
+  subject to job authorization and destination App access.
+  Invalid or inaccessible destinations fail without silent source-wiki fallback.
+  No per-repository App environment configuration is needed.
+- Wiki writes require an explicit current-user wiki-update request or an
+  accepted trusted postmerge maintenance job; policy, a merge alone, and
+  issue-loop commands grant no wiki-write authority. Preserve the paired
+  `expected_wiki_repository` precondition, full-SHA `expected_base` checks,
+  atomic Git history, and tool-confirmed status; expose
+  no force option. If a mapping change conflicts with the read SHA, stop and
+  re-establish destination, authorization, and evidence, not an automatic
+  overwrite. No database, SQLite, proposal store, or host approval layer is used.
 - The orchestrator routes by job responsibility, not tool availability. It
   splits mixed requests so triage work goes to `triage`, planning work goes to
-  `plan`, and future capabilities go only to their owning sub-agent. Each
+  `plan`, separately authorized wiki maintenance goes to `team-memory`, and
+  future capabilities go only to their owning sub-agent. Each
   sub-agent applies the relevant capability skill before an authorized write.
 - Triage must inspect targeted repository source and tests when a conclusion
   depends on current implementation state, including whether an issue remains
@@ -160,7 +215,9 @@ protocol for chat.
   validated capability customization, which overrides built-in behavior. These
   sources may replace workflows, criteria, thresholds, readiness, publication,
   and presentation defaults, but not role ownership, parent-handoff contracts,
-  security boundaries, repository scope, or write authorization.
+  security boundaries, repository scope, or write authorization. The validated
+  structured wiki-destination exception above is the only team-memory scope
+  mapping; explicit instructions cannot override it through content guidance.
 - Prefer adding behavior to a skill or sub-agent prompt before changing
   `main.py`; register new runtime components explicitly when needed.
 
@@ -181,6 +238,11 @@ comments before Azure login, then sends a neutral orchestration task with
 trusted event metadata. Per-issue concurrency allows different issues to run
 independently while coalescing bursts for the same issue.
 
+Team-memory postmerge orchestration remains incomplete: the workflow skeleton
+does not submit automatic wiki updates. Git provides knowledge, history, and
+conflict detection, not a durable job queue or guaranteed exactly-once delivery.
+Local documentation does not establish live hosted sub-agent dispatch.
+
 ## Run & deploy
 
 - **Local:** `pip install -r requirements.txt`, copy `.env.example` → `.env` and
@@ -192,16 +254,21 @@ independently while coalescing bursts for the same issue.
   investigate, or prepare deployment changes does not imply permission to
   deploy them.
 - **Deploy to Foundry:** `azd deploy` — see `azure.yaml` (Python hosted agent,
-  `codeConfiguration` remote build) and `agent.yaml` (hosted-agent manifest). A
-  `Dockerfile` is also provided for a container build.
+  ZIP `codeConfiguration` with `remote_build` and `runtime: python_3_13`) and
+  `agent.yaml` (hosted-agent manifest). The ZIP remote build installs root
+  `requirements.txt`; standalone MCP packaging in `github_app_mcp/pyproject.toml`
+  declares the same Dulwich dependency (1.2.14). A `Dockerfile` is also provided
+  for a container build. Wiki access needs no Git installation, Dockerfile
+  change, or runtime installer in either mode.
 
 ## Layout
 
 - `main.py` — agent server, session wiring, custom-agent registration
 - `github_app_mcp/` — bundled GitHub App stdio MCP server and isolated tests
 - `agents.md` — global IssueLens identity and current runtime scope, works as orchestrator for sub-agents and skills
-- `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`, `plan.md`)
+- `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`, `plan.md`,
+  `team-memory.md`)
 - `skills/` — modular skills (`issuelens-config`, `find-duplicates`,
-  `label-issue`, `assign-issue`, `notify`)
+  `label-issue`, `assign-issue`, `notify`, `team-memory`)
 - `azure.yaml` / `agent.yaml` / `Dockerfile` — deployment config
 - `.github/workflows/issue-triage.yml` — the triggering workflow
