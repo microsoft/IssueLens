@@ -1,0 +1,5 @@
+# CI/test tools only; runtime dependencies remain in their existing manifests.
+-c constraints-ci.txt
+build==1.6.1
+packaging==26.3
+PyYAML==6.0.3
