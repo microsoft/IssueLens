@@ -18,7 +18,7 @@ assignees when making an assignment.
 ## Triage Behavior
 
 - **Keywords**: critical, hot, blocking, regression, duplicate, classify, owner, notification, email, Teams
-- **Paths**: agents.md, agents/**, skills/find-duplicates/**, skills/notify/**, .github/issuelens/**
+- **Paths**: agents/**, skills/find-duplicates/**, skills/notify/**, .github/issuelens/**
 - **Owners**: @chagong
 
 ## Deployment And Operations

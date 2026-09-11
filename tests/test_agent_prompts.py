@@ -7,8 +7,61 @@ ROOT = pathlib.Path(__file__).parents[1]
 
 
 class AgentPromptTests(unittest.TestCase):
+    def test_runtime_prompt_is_separate_from_contributor_instructions(self):
+        self.assertTrue((ROOT / "agents" / "issuelens.md").is_file())
+        self.assertFalse(any(
+            path.name.casefold() == "agents.md" for path in ROOT.iterdir()
+        ))
+        for path in (ROOT / "agents").glob("*.md"):
+            with self.subTest(prompt=path.name):
+                self.assertNotIn(path.name.casefold(), {"agents.md", "claude.md", "gemini.md"})
+
+        instructions = " ".join(
+            (ROOT / ".github" / "copilot-instructions.md").read_text(encoding="utf-8").split()
+        )
+        self.assertIn(
+            "You are a coding assistant maintaining this repository, not the deployed IssueLens orchestrator.",
+            instructions,
+        )
+        self.assertIn("Implement requested repository changes", instructions)
+        self.assertIn("GitHub Actions workflows", instructions)
+        self.assertIn("application assets, not instructions", instructions)
+        self.assertIn("does not prohibit contributor Git/GitHub tooling", instructions)
+        self.assertIn("Keep the deployed orchestrator prompt at `agents/issuelens.md`", instructions)
+        self.assertIn("Deployment still requires explicit current-user approval", instructions)
+
+    def test_orchestrator_configuration_loads_the_runtime_prompt(self):
+        module = ast.parse((ROOT / "main.py").read_text(encoding="utf-8"))
+        selected = [
+            node for node in module.body
+            if (isinstance(node, ast.FunctionDef) and node.name == "_load_prompt")
+            or (isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "_ISSUELENS_AGENT")
+        ]
+        namespace = {
+            "pathlib": pathlib,
+            "CustomAgentConfig": dict,
+            "_agents_dir": ROOT / "agents",
+        }
+        exec(compile(ast.Module(body=selected, type_ignores=[]), "main.py", "exec"), namespace)
+        agent = namespace["_ISSUELENS_AGENT"]
+        prompt = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8").strip()
+        self.assertEqual(agent["name"], "issuelens")
+        self.assertEqual(agent["prompt"], prompt)
+        self.assertEqual(agent["skills"], ["issuelens-config", "team-memory"])
+        normalized = " ".join(agent["prompt"].split())
+        self.assertIn("You are the IssueLens orchestrator.", normalized)
+        self.assertIn(
+            "IssueLens does not implement fixes, modify repository source code, create branches or pull requests",
+            normalized,
+        )
+        self.assertIn("manage GitHub Actions, or deploy", normalized)
+        self.assertIn("Use only the bundled IssueLens GitHub MCP tools", normalized)
+        self.assertIn("Never use shell commands, direct HTTP, the GitHub CLI", normalized)
+
     def test_work_acknowledgement_contract(self):
-        global_prompt = (ROOT / "agents.md").read_text(encoding="utf-8")
+        global_prompt = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8")
 
         self.assertIn("## Work acknowledgement", global_prompt)
         self.assertIn("activity that caused IssueLens to start working", global_prompt)
@@ -25,7 +78,7 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn("Do not remove the\nacknowledgement", global_prompt)
 
     def test_prompt_files_and_wiring(self):
-        global_prompt = (ROOT / "agents.md").read_text(encoding="utf-8")
+        global_prompt = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8")
         triage_prompt = (ROOT / "agents" / "triage.md").read_text(
             encoding="utf-8"
         )
@@ -175,7 +228,7 @@ class AgentPromptTests(unittest.TestCase):
         self.assertIn("planning customization specifies another", plan_prompt)
         self.assertIn("Do not publish any artifact comment when\nplanning configuration fails", plan_prompt)
         self.assertIn("report the two planning-artifact comment results", plan_prompt)
-        self.assertIn('_project_dir / "agents.md"', main_source)
+        self.assertIn('_agents_dir / "issuelens.md"', main_source)
         self.assertIn('_agents_dir / "triage.md"', main_source)
         self.assertIn('_agents_dir / "find-criticals.md"', main_source)
         self.assertIn('_agents_dir / "plan.md"', main_source)
