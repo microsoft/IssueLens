@@ -42,6 +42,32 @@ def safe_text(text, secrets=()):
     return text.replace("::", ": :")
 
 
+def message_key(event, data):
+    identity = event.get("agentId") or data.get("parentToolCallId")
+    scope = identity if isinstance(identity, str) and len(identity) <= 256 else "root"
+    message_id = data.get("messageId")
+    if not isinstance(message_id, str) or len(message_id) > 256:
+        message_id = "unidentified"
+    return scope, message_id
+
+
+class MessagePhases:
+    MAX_ITEMS = 256
+
+    def __init__(self):
+        self.blocked = {}
+        self.limited = False
+
+    def allows(self, event, data):
+        key = message_key(event, data)
+        if key not in self.blocked and len(self.blocked) >= self.MAX_ITEMS:
+            self.limited = True
+            return False
+        blocked = self.blocked.get(key, False) or data.get("phase") in ("analysis", "reasoning")
+        self.blocked[key] = blocked
+        return not blocked
+
+
 class StreamRenderer:
     MAX_ITEMS = 256
     MAX_MESSAGE = 64 * 1024
@@ -61,6 +87,7 @@ class StreamRenderer:
         self.secrets = tuple(secret for secret in secrets if secret)
         self.holdback = max((len(secret) - 1 for secret in self.secrets), default=0)
         self.messages = {}
+        self.phases = MessagePhases()
         self.tools = {}
         self.agents = {}
         self.seen = set()
@@ -105,8 +132,7 @@ class StreamRenderer:
         return True
 
     def _scope(self, event, data):
-        identity = event.get("agentId") or data.get("parentToolCallId")
-        return identity if isinstance(identity, str) and len(identity) <= 256 else "root"
+        return message_key(event, data)[0]
 
     def _label(self, scope):
         return "IssueLens" if scope == "root" else self.agents.get(scope, "sub-agent")
@@ -141,15 +167,12 @@ class StreamRenderer:
                 self._flush(state)
 
     def _message(self, event, data, delta):
-        if self.mode != "hybrid" or data.get("toolRequests") or data.get("phase") in {"reasoning", "analysis"}:
+        if self.mode != "hybrid" or data.get("toolRequests"):
             return
         content = data.get("deltaContent" if delta else "content")
         if not isinstance(content, str):
             return
-        scope = self._scope(event, data)
-        message_id = data.get("messageId")
-        if not isinstance(message_id, str) or len(message_id) > 256:
-            message_id = "unidentified"
+        scope, message_id = message_key(event, data)
         key = (scope, message_id)
         state = self.messages.get(key)
         if state is not None and state["done"]:
@@ -199,8 +222,12 @@ class StreamRenderer:
             return
         kind = event.get("type")
         scope = self._scope(event, data)
-        if kind in {"assistant.message_delta", "assistant.message"}:
-            self._message(event, data, kind == "assistant.message_delta")
+        if kind in {"assistant.message_start", "assistant.message_delta", "assistant.message"}:
+            if not self.phases.allows(event, data):
+                self.messages.pop(message_key(event, data), None)
+            elif kind != "assistant.message_start":
+                self._message(event, data, kind == "assistant.message_delta")
+            self.display_truncated |= self.phases.limited
         elif kind in {"subagent.started", "subagent.completed", "subagent.failed"}:
             name = data.get("agentName")
             label = name if isinstance(name, str) and name in self.ROLES else "sub-agent"

@@ -248,6 +248,7 @@ def unique_object(pairs):
 
 def read_response(response, renderer=None):
     require(response.headers.get_content_type() == "text/event-stream", "Expected an SSE agent response")
+    phases = _display.MessagePhases()
     started = time.monotonic()
     total = 0
     event_name, data_lines, last_message, completed = "message", [], None, False
@@ -273,12 +274,13 @@ def read_response(response, renderer=None):
                     break
                 if renderer is not None:
                     renderer.event(event)
-                if event.get("type") == "assistant.message":
+                if event.get("type") in {"assistant.message_start", "assistant.message_delta", "assistant.message"}:
                     data = event.get("data", {})
                     require(isinstance(data, dict), "Invalid assistant message")
-                    if event.get("agentId") is None and data.get("parentToolCallId") is None:
-                        internal = data.get("phase") in {"reasoning", "analysis"}
-                        last_message = None if data.get("toolRequests") or internal else data.get("content")
+                    visible = phases.allows(event, data)
+                    if (event.get("type") == "assistant.message" and event.get("agentId") is None
+                            and data.get("parentToolCallId") is None):
+                        last_message = data.get("content") if visible and not data.get("toolRequests") else None
             event_name, data_lines = "message", []
         elif line.startswith("event:"):
             event_name = line[6:].lstrip(" ")

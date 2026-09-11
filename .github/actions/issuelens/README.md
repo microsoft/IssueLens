@@ -231,6 +231,14 @@ duplicates, tool-call fragments, permission and usage chatter, system prompts,
 and reasoning events are excluded. A recovered retry or a failed tool does not
 by itself fail the invocation; the existing stream/result checks decide success.
 
+The client tracks `assistant.message_start` phase metadata by agent scope and
+message ID. Messages marked `analysis` or `reasoning` stay suppressed through
+phase-less deltas and completion, including duplicate starts. This check also
+applies to final-answer selection, independently of the selected display mode,
+so an internal completion cannot be saved or summarized as the root answer.
+Legacy messages without start/phase metadata retain their existing behavior;
+the client does not infer a phase from their text.
+
 After completion, GitHub renders the Markdown report on the run's **Summary**
 page. It includes elapsed time, observed tool/retry counts, and the final root
 answer for generic requests. Team-memory gets a validated identity/SHA table and
@@ -271,6 +279,11 @@ artifact is uploaded by this action.
 If the log writer fails, live display falls back to quiet mode. A failed summary
 write is reported when possible without changing the validated invocation
 outcome. Failure to save the actual response/output contract still fails the action.
+Phase classification is separately bounded to 256 scoped message identities per
+invocation. Classifications are not evicted; messages with new identities beyond
+that limit are suppressed and cannot qualify as the final answer. If no eligible
+root answer remains, the action reports failure rather than publishing unchecked
+content. Already tracked public messages can still complete normally.
 
 ## Setup and Security
 

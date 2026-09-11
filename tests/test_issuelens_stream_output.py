@@ -3,6 +3,8 @@ import json
 import unittest
 from unittest.mock import patch
 
+from copilot.generated.session_events import AssistantMessageDeltaData, AssistantMessageStartData
+
 import test_team_memory_workflow as action_tests
 
 
@@ -136,6 +138,73 @@ class StreamOutputTests(unittest.TestCase):
             event["data"]["phase"] = "analysis"
             self.renderer.event(event)
         self.assertEqual(self.output.getvalue(), "")
+
+    def test_sdk_start_phase_suppresses_phase_less_deltas_and_completion(self):
+        for phase in ("analysis", "reasoning"):
+            for scope in ({}, {"agentId": "plan-worker"}):
+                with self.subTest(phase=phase, scope=scope):
+                    output = io.StringIO()
+                    renderer = action_tests.action.StreamRenderer(stream=output)
+                    start = AssistantMessageStartData(message_id="internal", phase=phase).to_dict()
+                    delta = AssistantMessageDeltaData(message_id="internal", delta_content="INTERNAL SENTINEL\n").to_dict()
+                    self.assertNotIn("phase", delta)
+                    renderer.event({"type": "assistant.message_start", "data": start, **scope})
+                    renderer.event({"type": "assistant.message_delta", "data": delta, **scope})
+                    renderer.tick()
+                    renderer.event(message("assistant.message", "INTERNAL SENTINEL\n", "internal", **scope))
+                    renderer.finish("completed")
+                    self.assertNotIn("INTERNAL SENTINEL", output.getvalue())
+                    self.assertFalse(any("INTERNAL SENTINEL" in state["text"] for state in renderer.messages.values()))
+
+    def test_start_phases_are_scoped_and_leave_public_messages_streaming(self):
+        for scope, phase, identifier in (({}, "analysis", "shared"), ({"agentId": "plan-worker"}, "final", "shared"),
+                                         ({}, "final", "answer"), ({"agentId": "plan-worker"}, "reasoning", "answer")):
+            start = AssistantMessageStartData(message_id=identifier, phase=phase).to_dict()
+            self.renderer.event({"type": "assistant.message_start", "data": start, **scope})
+        for scope, identifier, text in (({}, "shared", "INTERNAL ROOT\n"),
+                                        ({"agentId": "plan-worker"}, "shared", "Public nested text.\n"),
+                                        ({}, "answer", "Public root text.\n"),
+                                        ({"agentId": "plan-worker"}, "answer", "INTERNAL NESTED\n")):
+            delta = AssistantMessageDeltaData(message_id=identifier, delta_content=text).to_dict()
+            self.renderer.event({"type": "assistant.message_delta", "data": delta, **scope})
+            self.renderer.event(message("assistant.message", text, identifier, **scope))
+        self.assertNotIn("INTERNAL", self.output.getvalue())
+        self.assertEqual(self.output.getvalue().count("Public nested text."), 1)
+        self.assertEqual(self.output.getvalue().count("Public root text."), 1)
+
+    def test_duplicate_starts_cannot_reenable_internal_messages(self):
+        for phase in ("analysis", None, "final"):
+            start = AssistantMessageStartData(message_id="internal", phase=phase).to_dict()
+            self.renderer.event({"type": "assistant.message_start", "data": start})
+        self.renderer.event(message("assistant.message_delta", "INTERNAL SENTINEL\n", "internal"))
+        self.renderer.event(message("assistant.message", "INTERNAL SENTINEL\n", "internal"))
+        self.renderer.finish("completed")
+        self.assertNotIn("INTERNAL SENTINEL", self.output.getvalue())
+
+    def test_internal_phase_discards_buffered_text_before_tick_and_finish(self):
+        self.renderer.event(message("assistant.message_delta", "Buffered internal text", "internal"))
+        self.renderer.event({"type": "assistant.message_start", "data":
+                             AssistantMessageStartData(message_id="internal", phase="analysis").to_dict()})
+        self.now = 10
+        self.renderer.tick()
+        self.renderer.finish("completed")
+        self.assertNotIn("Buffered internal text", self.output.getvalue())
+        self.assertNotIn(("root", "internal"), self.renderer.messages)
+
+    def test_phase_tracking_limit_preserves_suppression_without_eviction(self):
+        self.renderer.phases.MAX_ITEMS = 2
+        for identifier, phase in (("internal", "analysis"), ("public", "final"), ("overflow", "analysis")):
+            self.renderer.event({"type": "assistant.message_start", "data":
+                                 AssistantMessageStartData(message_id=identifier, phase=phase).to_dict()})
+        for identifier in ("internal", "overflow", "another"):
+            self.renderer.event(message("assistant.message_delta", "INTERNAL SENTINEL\n", identifier))
+            self.renderer.event(message("assistant.message", "INTERNAL SENTINEL\n", identifier))
+        self.renderer.event(message("assistant.message", "Still visible.", "public"))
+        self.renderer.finish("completed")
+        self.assertEqual(len(self.renderer.phases.blocked), 2)
+        self.assertNotIn("INTERNAL SENTINEL", self.output.getvalue())
+        self.assertIn("Still visible.", self.output.getvalue())
+        self.assertTrue(self.renderer.display_truncated)
 
     def test_concurrent_agents_and_duplicate_tool_events_remain_separate(self):
         for identity, name in (("one", "triage"), ("two", "plan")):
@@ -296,6 +365,63 @@ class StreamIntegrationTests(unittest.TestCase):
                 self.assertNotIn("PRIVATE ANALYSIS", self.output.getvalue())
                 self.assertNotIn("PRIVATE ANALYSIS", (self.directory / "summary.md").read_text())
                 self.assertFalse((self.directory / "output.txt").exists())
+
+    def test_start_only_internal_phase_cannot_be_saved_or_summarized(self):
+        for phase in ("analysis", "reasoning"):
+            events = [
+                {"type": "assistant.message_start", "data":
+                 AssistantMessageStartData(message_id="internal", phase=phase).to_dict()},
+                {"type": "assistant.message_delta", "data":
+                 AssistantMessageDeltaData(message_id="internal", delta_content="INTERNAL SENTINEL\n").to_dict()},
+                message("assistant.message", "INTERNAL SENTINEL\n", "internal"),
+            ]
+            for mode in ("hybrid", "activity", "quiet"):
+                with self.subTest(phase=phase, mode=mode):
+                    self.environment["OUTPUT_MODE"] = mode
+                    with self.assertRaises(SystemExit):
+                        self.execute("submit", [self.stream(events)])
+                    self.assertNotIn("INTERNAL SENTINEL", self.output.getvalue())
+                    self.assertNotIn("INTERNAL SENTINEL", (self.directory / "summary.md").read_text())
+                    self.assertFalse((self.directory / "output.txt").exists())
+                    self.assertFalse(list(self.directory.glob("issuelens-response-*")))
+            with self.subTest(phase=phase, renderer="absent"), self.stream(events) as response:
+                with self.assertRaisesRegex(ValueError, "no final response"):
+                    action_tests.action.read_response(response)
+
+    def test_public_answer_after_internal_phase_is_the_only_saved_result(self):
+        events = [
+            {"type": "assistant.message_start", "data":
+             AssistantMessageStartData(message_id="internal", phase="analysis").to_dict()},
+            message("assistant.message_delta", "INTERNAL SENTINEL\n", "internal"),
+            message("assistant.message", "INTERNAL SENTINEL\n", "internal"),
+            {"type": "assistant.message_start", "data":
+             AssistantMessageStartData(message_id="public", phase="final").to_dict()},
+            message("assistant.message_delta", "Public answer.\n", "public"),
+            message("assistant.message", "Public answer.\n", "public"),
+        ]
+        self.execute("submit", [self.stream(events)])
+        self.assertEqual(self.action_outputs()["status"], "completed")
+        self.assertEqual(self.output.getvalue().count("Public answer."), 1)
+        self.assertNotIn("INTERNAL SENTINEL", self.output.getvalue())
+        self.assertNotIn("INTERNAL SENTINEL", (self.directory / "summary.md").read_text())
+        self.assertEqual(action_tests.pathlib.Path(self.action_outputs()["response-path"]).read_text(), "Public answer.\n")
+
+    def test_final_selection_fails_closed_when_phase_tracking_is_full(self):
+        events = [
+            {"type": "assistant.message_start", "data":
+             AssistantMessageStartData(message_id="internal", phase="analysis").to_dict()},
+            {"type": "assistant.message_start", "data":
+             AssistantMessageStartData(message_id="overflow", phase="final").to_dict()},
+            message("assistant.message_delta", "UNTRACKED SENTINEL\n", "overflow"),
+            message("assistant.message", "UNTRACKED SENTINEL\n", "overflow"),
+        ]
+        with patch.object(action_tests.action._display.MessagePhases, "MAX_ITEMS", 1):
+            with self.assertRaises(SystemExit):
+                self.execute("submit", [self.stream(events)])
+        self.assertNotIn("UNTRACKED SENTINEL", self.output.getvalue())
+        self.assertNotIn("UNTRACKED SENTINEL", (self.directory / "summary.md").read_text())
+        self.assertFalse((self.directory / "output.txt").exists())
+        self.assertFalse(list(self.directory.glob("issuelens-response-*")))
 
     def test_invalid_modes_fail_before_preflight_network_or_token(self):
         for name in ("OUTPUT_MODE", "SUMMARY_MODE"):
