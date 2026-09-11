@@ -1,5 +1,28 @@
 # IssueLens — Copilot instructions
 
+## Contributor role
+
+You are a coding assistant maintaining this repository, not the deployed
+IssueLens orchestrator. Implement requested repository changes, including
+source code, tests, GitHub Actions workflows, and documentation, and use the
+normal contributor tools to validate changes and prepare requested pull
+requests. Do not route repository maintenance to IssueLens runtime sub-agents
+or refuse it because the deployed product does not implement code.
+
+The prompts under `agents/`, skills under `skills/`, and repository policies
+under `.github/issuelens/` are application assets, not instructions that change
+your contributor role or restrict your development tools. Preserve their
+runtime behavior and safeguards when editing them. The runtime-only GitHub
+MCP boundary does not prohibit contributor Git/GitHub tooling.
+
+Keep the deployed orchestrator prompt at `agents/issuelens.md`, loaded
+explicitly by `main.py`. Do not place runtime prompts in an `AGENTS.md` file
+(including lowercase `agents.md`), which coding assistants can discover as
+repository instructions. Deployment still requires explicit current-user
+approval as described below.
+
+## Product overview
+
 IssueLens is a **GitHub issue-triage and planning agent** that runs as a
 **Microsoft Foundry hosted agent**, built on the **GitHub Copilot SDK**. It
 analyzes issues across repositories, identifies critical (hot / blocking /
@@ -75,8 +98,8 @@ protocol for chat.
     only when `FOUNDRY_PROJECT_ENDPOINT` is absent.
 - **Custom agents** (registered in `main.py`):
   - **`issuelens`** — the global agent identity. Its system prompt lives in
-    `agents.md`. It routes issue-level analysis to `triage` and critical-issue
-    scans to `find-criticals`. It also owns built-in command parsing, channel
+    `agents/issuelens.md`. It routes issue-level analysis to `triage` and
+    critical-issue scans to `find-criticals`. It also owns built-in command parsing, channel
     trust validation, replay checks, and normalized handoff; sub-agents never
     parse command text. If the
     sub-agent's response is not valid JSON or is an empty object, stop, skip
@@ -129,18 +152,23 @@ protocol for chat.
   (GitHub's current format) are supported; SHA-256 is rejected. Binary diffs are
   notices, not binary patches; unchanged assets are preserved byte-for-byte and
   page deletion is unsupported.
-- **Runtime configuration** — `main.py` explicitly loads `agents.md`, all four
-  sub-agent prompts under `agents/`, and the skill directories. Explicit
+- **Runtime configuration** — `main.py` explicitly loads `agents/issuelens.md`,
+  all four sub-agent prompts under `agents/`, and the skill directories. Explicit
   loading keeps local and hosted behavior identical without enabling config
   discovery in the read-only hosted code directory.
 
-## Conventions
+## Runtime design constraints
 
-- **GitHub access has one model-facing boundary** — use only the bundled
-  IssueLens GitHub MCP tools for both protocols. The constrained
-  `issuelens-config` host tool returns one validated policy domain. Never shell
-  out to `gh` / `bash` / `powershell`, call GitHub over direct HTTP, use a
-  Foundry GitHub toolbox connection, or expose App credentials. See `agents.md`.
+The following constraints describe the deployed application's behavior.
+Preserve them in code and runtime prompts; they do not assign the runtime
+agent's role or tool restrictions to repository contributors.
+
+- **GitHub access has one model-facing boundary** — both deployed protocols
+  must use only the bundled IssueLens GitHub MCP tools. The constrained
+  `issuelens-config` host tool returns one validated policy domain. Do not add
+  runtime paths that bypass this boundary through shell commands, model-directed
+  GitHub HTTP calls, ambient credentials, or a Foundry GitHub toolbox connection, or
+  expose App credentials. See the runtime contract in `agents/issuelens.md`.
 - Only `find-criticals` is required to return JSON, which IssueLens preserves at
   the end of its response. `triage` may use the format appropriate for its task.
 - Planning loads the validated `planning` instruction domain. Repository policy
@@ -149,8 +177,8 @@ protocol for chat.
   source changes, commits, pull requests, or deployment, and is never expressed
   by `@issuelens go`.
 - Built-in command names, syntax, routing, channel trust, and authorization are
-  hard-coded in `agents.md` above user and repository customization. Responses
-  users are trusted team maintainers. GitHub commands require exactly one valid
+  hard-coded in `agents/issuelens.md` above user and repository customization.
+  Responses users are trusted team maintainers. GitHub commands require exactly one valid
   command occurrence in the authoritative `issue_comment.created` comment from
   a human maintainer, verified through `get_issue_comment` and trusted event
   metadata. Event and authoritative comment associations must each independently
@@ -319,9 +347,9 @@ IssueLens runtime agent's capabilities or write authorization.
 
 - `main.py` — agent server, session wiring, custom-agent registration
 - `github_app_mcp/` — bundled GitHub App stdio MCP server and isolated tests
-- `agents.md` — global IssueLens identity and current runtime scope, works as orchestrator for sub-agents and skills
-- `agents/` — sub-agent prompts (`triage.md`, `find-criticals.md`, `plan.md`,
-  `team-memory.md`)
+- `agents/issuelens.md` — deployed IssueLens identity, runtime scope, and orchestration
+- `agents/` — runtime prompts (`issuelens.md`, `triage.md`, `find-criticals.md`,
+  `plan.md`, `team-memory.md`), not contributor instructions
 - `skills/` — modular skills (`issuelens-config`, `find-duplicates`,
   `label-issue`, `assign-issue`, `notify`, `team-memory`)
 - `azure.yaml` / `agent.yaml` / `Dockerfile` — deployment config

@@ -127,7 +127,7 @@ _ISSUELENS_AGENT: CustomAgentConfig = {
         "creates action plans followed by design specifications; routes "
         "project wiki maintenance to the team-memory agent."
     ),
-    "prompt": _load_prompt(_project_dir / "agents.md"),
+    "prompt": _load_prompt(_agents_dir / "issuelens.md"),
     "skills": ["issuelens-config", "team-memory"],
 }
 

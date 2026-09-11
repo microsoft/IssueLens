@@ -153,7 +153,7 @@ class TeamMemoryInstructionTests(unittest.TestCase):
         self.assertIn("Policy grants no independent write permission", prompt)
 
     def test_orchestrator_routes_maintenance_not_shared_retrieval(self):
-        prompt = (ROOT / "agents.md").read_text(encoding="utf-8")
+        prompt = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8")
         self.assertIn("planning, and team-memory capabilities", prompt)
         self.assertIn("do not dispatch routine\nretrieval", prompt)
         self.assertIn("Retrieval cannot publish wiki", prompt)

@@ -259,11 +259,11 @@ class WikiPackagingTests(unittest.TestCase):
 
     def test_clean_source_zip_runs_package_only_without_git_or_native_accelerators(self):
         files = set(ROOT.glob("*.py"))
-        files.update(ROOT / name for name in ("agents.md", "requirements.txt", "azure.yaml", "github_app_mcp/pyproject.toml"))
+        files.update(ROOT / name for name in ("requirements.txt", "azure.yaml", "github_app_mcp/pyproject.toml"))
         for directory, pattern in (("agents", "*.md"), ("skills", "*.md"), ("schemas", "*.json"),
                                    ("github_app_mcp/src", "*.py")):
             files.update((ROOT / directory).rglob(pattern))
-        required = {"main.py", "github_app_mcp/src/issuelens_github_mcp/wiki.py",
+        required = {"main.py", "agents/issuelens.md", "github_app_mcp/src/issuelens_github_mcp/wiki.py",
                     "github_app_mcp/src/issuelens_github_mcp/policy.py",
                     "github_app_mcp/src/issuelens_github_mcp/server.py"}
         self.assertTrue(required <= {path.relative_to(ROOT).as_posix() for path in files})

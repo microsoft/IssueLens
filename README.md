@@ -212,7 +212,7 @@ are not proof of publication. Sensitive/conflicting changes require human review
    - the constrained in-process `issuelens-config` tool, backed by a separate
      request-local read-only App client;
    - in-process notification tools when their Logic App endpoints are configured.
-3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents.md`. It routes issue-level work to `triage`, critical-issue scans to `find-criticals`, and planning work to `plan`. For trusted issue-loop events it re-reads current issue context and chooses initial triage, re-triage, initial planning, re-planning, or no action. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions. The `plan` sub-agent investigates a triaged issue, returns an action plan followed by a design specification, reports readiness, and waits for human direction.
+3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents/issuelens.md`. It routes issue-level work to `triage`, critical-issue scans to `find-criticals`, and planning work to `plan`. For trusted issue-loop events it re-reads current issue context and chooses initial triage, re-triage, initial planning, re-planning, or no action. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions. The `plan` sub-agent investigates a triaged issue, returns an action plan followed by a design specification, reports readiness, and waits for human direction.
 4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Critical-issue scans end with a JSON report.
 
 ### Chat — `POST /responses`
@@ -818,9 +818,8 @@ For the full deployment guide, see [Azure AI Foundry hosted agents](https://aka.
 The Foundry hosted agent registers the `issuelens` orchestrator and its four sub-agents, `triage`, `find-criticals`, `plan`, and `team-memory`, as Copilot SDK `CustomAgentConfig` objects in `main.py`. All prompts are loaded explicitly at startup so their behavior is consistent locally and in the hosted package:
 
 ```
-agents.md                   ← global IssueLens identity and current scope
-
 agents/
+├── issuelens.md            ← global IssueLens identity and current scope
 ├── triage.md               ← issue-level triage and recommendations
 ├── find-criticals.md        ← critical-issue scan and JSON report
 ├── plan.md                 ← action plan, design specification, and readiness
@@ -842,10 +841,19 @@ notification work. `find-criticals` scans a repository and time scope for hot,
 blocking, and regression issues and returns the structured report. `plan`
 investigates a triaged issue, produces ordered planning artifacts, and waits for
 human direction. `team-memory` owns authorized wiki changes through its local
-write tool; all agents use the shared read-only memory skill. `agents.md` keeps
+write tool; all agents use the shared read-only memory skill. `agents/issuelens.md` keeps
 the parent IssueLens agent responsible for splitting mixed requests, selecting
 the owner for each job, and sequencing them. This responsibility-first routing
 rule also applies when new sub-agents are added.
+
+Repository maintenance guidance lives in `.github/copilot-instructions.md`.
+The runtime prompts under `agents/` are application assets, not contributor
+instructions: their restrictions on implementation, PR creation, and workflow
+management apply to the deployed IssueLens agent, not to coding assistants
+maintaining this repository. Keep runtime prompts out of `AGENTS.md` (including
+lowercase `agents.md`) so instruction discovery does not assign the product's
+runtime role to a contributor. `main.py` loads `agents/issuelens.md` explicitly
+for both protocols; the runtime authorization and tool boundaries are unchanged.
 
 Any subdirectory under `skills/` containing a `SKILL.md` file is loaded by the Copilot SDK.
 
