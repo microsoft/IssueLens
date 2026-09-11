@@ -1,0 +1,3 @@
+# Preserve the existing MCP protocol-test baseline without changing runtime ranges.
+# Newer SDK error masking needs a separate runtime compatibility change.
+mcp==2.0.1

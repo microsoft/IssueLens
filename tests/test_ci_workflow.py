@@ -1,8 +1,10 @@
 import pathlib
 import re
+import tomllib
 import unittest
 
 import yaml
+from packaging.requirements import Requirement
 
 
 ROOT = pathlib.Path(__file__).parents[1]
@@ -96,9 +98,34 @@ class CIWorkflowTests(unittest.TestCase):
         ):
             setup = self.python_setup(job_id)["with"]
             self.assertEqual(setup["cache"], "pip")
-            self.assertEqual(set(setup["cache-dependency-path"].split()), {manifest, "requirements-ci.txt"})
+            self.assertEqual(
+                set(setup["cache-dependency-path"].split()),
+                {manifest, "requirements-ci.txt", "constraints-ci.txt"},
+            )
             if job_id != "application-tests":
                 self.assertEqual(setup["python-version"], "${{ matrix.python-version }}")
+
+    def test_ci_dependency_baseline_satisfies_both_runtime_manifests(self):
+        requirements = (ROOT / "requirements-ci.txt").read_text(encoding="utf-8")
+        self.assertIn("-c constraints-ci.txt", requirements)
+        pins = [
+            Requirement(line) for line in (ROOT / "constraints-ci.txt").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+        self.assertEqual([pin.name for pin in pins], ["mcp"])
+        project = tomllib.loads((ROOT / "github_app_mcp" / "pyproject.toml").read_text(encoding="utf-8"))
+        for dependencies in (
+            (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines(),
+            project["project"]["dependencies"],
+        ):
+            runtime = {
+                req.name: req for line in dependencies if line.strip() and not line.startswith("#")
+                for req in [Requirement(line)]
+            }
+            for pin in pins:
+                version, = [spec.version for spec in pin.specifier if spec.operator == "=="]
+                self.assertIn(version, runtime[pin.name].specifier)
+                self.assertIn(str(pin), (ROOT / "README.md").read_text(encoding="utf-8"))
 
     def test_both_suites_run_directly_so_failures_fail_the_job(self):
         for job_id, command in (
@@ -120,7 +147,7 @@ class CIWorkflowTests(unittest.TestCase):
         for command in (
             'python -m build --outdir "$RUNNER_TEMP/dist" github_app_mcp',
             'python -m venv "$RUNNER_TEMP/wheel-venv"',
-            '"$RUNNER_TEMP/wheel-venv/bin/python" -m pip install "$RUNNER_TEMP"/dist/*.whl',
+            '"$RUNNER_TEMP/wheel-venv/bin/python" -m pip install -c constraints-ci.txt "$RUNNER_TEMP"/dist/*.whl',
             '"$RUNNER_TEMP/wheel-venv/bin/python" -m pip check',
             '"$RUNNER_TEMP/wheel-venv/bin/python" -I -',
             'distribution("issuelens-github-mcp")',

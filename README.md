@@ -581,6 +581,12 @@ test execution needs no live services.
 workflow/configuration tests, `packaging` for dependency-manifest assertions, and
 PyPA `build` for the existing Hatchling backend. Production dependency ranges
 and build-backend policy remain unchanged; this is not a full dependency lock.
+[`constraints-ci.txt`](constraints-ci.txt), loaded by the CI requirements and
+clean wheel installation, fixes the tested MCP baseline at `mcp==2.0.1`, within
+both runtime manifests' supported range. MCP 2.2.0 masks tool-error details that
+the existing wiki protocol tests assert. Adapting that runtime contract is
+separate work; CI does not silently weaken those assertions or claim coverage
+of every newer MCP release. Review this constraint when updating SDK support.
 Python validation uses standard-library `compileall` on root modules, action
 helpers, MCP sources/scripts, and both test directories. It checks syntax, not
 formatting, types, or style.
@@ -610,7 +616,7 @@ python3.12 -m venv "$MCP_CHECK_DIR/build"
   python -m pip install -r requirements-ci.txt
   python -m build --outdir "$MCP_CHECK_DIR/dist" github_app_mcp
   python -m venv "$MCP_CHECK_DIR/wheel"
-  "$MCP_CHECK_DIR/wheel/bin/python" -m pip install "$MCP_CHECK_DIR"/dist/*.whl
+  "$MCP_CHECK_DIR/wheel/bin/python" -m pip install -c constraints-ci.txt "$MCP_CHECK_DIR"/dist/*.whl
   "$MCP_CHECK_DIR/wheel/bin/python" -m pip check
   "$MCP_CHECK_DIR/wheel/bin/python" -I - <<'PY'
 from importlib.metadata import distribution
