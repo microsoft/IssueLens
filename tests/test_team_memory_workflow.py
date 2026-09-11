@@ -124,7 +124,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
             self.assertIn(f"`{name}`", guide)
 
     def test_agents_do_not_depend_on_the_workflow_contract(self):
-        orchestrator = (ROOT / "agents.md").read_text(encoding="utf-8")
+        orchestrator = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8")
         writer = (ROOT / "agents" / "team-memory.md").read_text(encoding="utf-8")
         self.assertIn("Do not assume the request's origin", orchestrator)
         self.assertIn("explicitly supplied", orchestrator)
@@ -137,7 +137,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
                 content = (ROOT / "agents" / f"{name}.md").read_text(encoding="utf-8")
                 self.assertIn("Do not assume the request's origin", content)
         self.assertIn("Preserve the required critical-issue JSON handoff", (ROOT / "agents" / "find-criticals.md").read_text(encoding="utf-8"))
-        for path in ("agents.md", "agents/team-memory.md", ".github/issuelens/team-memory.md",
+        for path in ("agents/issuelens.md", "agents/team-memory.md", ".github/issuelens/team-memory.md",
                      "examples/team-memory.md", "skills/team-memory/SKILL.md", "skills/issuelens-config/SKILL.md"):
             with self.subTest(path=path):
                 content = (ROOT / path).read_text(encoding="utf-8")
@@ -159,7 +159,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertIn("pull_request_target: closed", readme)
         self.assertIn("OIDC federation", readme)
         self.assertIn("inspect the mapped wiki/history", readme)
-        for path in ("agents.md", "agents/team-memory.md", "README.md", "github_app_mcp/README.md",
+        for path in ("agents/issuelens.md", "agents/team-memory.md", "README.md", "github_app_mcp/README.md",
                      ".github/copilot-instructions.md", ".github/issuelens/team-memory.md", "examples/team-memory.md"):
             with self.subTest(path=path):
                 content = " ".join((ROOT / path).read_text(encoding="utf-8").split())
