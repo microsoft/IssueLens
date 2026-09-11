@@ -68,8 +68,9 @@ not an automatic overwrite. The reader may continue its owning job with other
 authorized evidence after reporting a wiki limitation.
 
 Only the maintenance job may call `write_wiki_pages`, and only for an explicit
-current-user wiki-update request or an accepted trusted postmerge job authorizing
-the source project and its mapped wiki. The parent automatically supplies the
+current request or parent handoff authorizing a wiki update for the source
+project and its mapped wiki. Request origin alone grants no authority.
+The parent automatically supplies the
 internal `--wiki-writer` mode only to the team-memory agent's local MCP server;
 users need no environment flag. Policy grants no independent write permission.
 The reader skill remains read-only. Sensitive, conflicting, destructive, or unsupported changes

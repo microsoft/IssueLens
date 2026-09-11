@@ -185,8 +185,8 @@ protocol for chat.
   subject to job authorization and destination App access.
   Invalid or inaccessible destinations fail without silent source-wiki fallback.
   No per-repository App environment configuration is needed.
-- Wiki writes require an explicit current-user wiki-update request or an
-  accepted trusted postmerge maintenance job; policy, a merge alone, and
+- Wiki writes require an explicit current request or parent handoff authorizing
+  a wiki update for the target; policy, a merge alone, and
   issue-loop commands grant no wiki-write authority. Preserve the paired
   `expected_wiki_repository` precondition, full-SHA `expected_base` checks,
   atomic Git history, and tool-confirmed status; expose
@@ -220,6 +220,15 @@ protocol for chat.
   mapping; explicit instructions cannot override it through content guidance.
 - Prefer adding behavior to a skill or sub-agent prompt before changing
   `main.py`; register new runtime components explicitly when needed.
+- Keep agent and skill instructions universal across calling surfaces. Do not
+  assume a request comes from GitHub Actions, Teams, or any other client.
+  Origin and trigger context must be explicitly supplied in the request or
+  trusted host context; such claims do not by themselves establish authority.
+  Caller-specific event metadata, validation requirements, acknowledgement
+  preferences, and requested response schemas belong in the caller's input,
+  not a permanent transport-specific agent or knowledge-policy contract.
+  Preserve role ownership, explicit write authorization, and existing
+  channel-specific command validation when its trusted context is present.
 
 ## Triggering (GitHub Actions)
 
@@ -231,6 +240,20 @@ The agent is driven by a workflow in the target repo
   hosted agent owns the App credentials; target repositories do not store the
   App private key or mint tokens.
 
+Both issue-loop and team-memory workflows use `.github/actions/issuelens`.
+Its `request-type` selects `issue-loop`, `team-memory`, or a direct `task` with
+explicit `input`. Request adapters validate before shared OIDC login and one
+bounded invocation. The action does not choose sub-agents or parse commands.
+The event adapter omits issue/comment bodies; direct tasks never synthesize
+trusted event provenance. Generic final answers are saved in a runner-local
+`response-path`: `completed` means stream completion, not successful writes.
+Only team-memory results require the wiki-specific structured result contract.
+The action's `output-mode` selects hybrid live text/activity, activity-only, or
+quiet display; `summary-mode` selects full, status-only, or no job summary.
+Defaults publish sanitized user-facing text and a final report, not raw event
+JSON, reasoning, or tool payloads. Display stays separate from outcome validation.
+Callers must choose privacy-appropriate modes for their Actions audience.
+
 Triggers: `issues` opened/reopened, `issue_comment` created/edited for issues
 only, and `workflow_dispatch`. The workflow does not subscribe to issue edits or
 pull request comments. A preflight step rejects PR-backed and bot-authored
@@ -238,10 +261,26 @@ comments before Azure login, then sends a neutral orchestration task with
 trusted event metadata. Per-issue concurrency allows different issues to run
 independently while coalescing bursts for the same issue.
 
-Team-memory postmerge orchestration remains incomplete: the workflow skeleton
-does not submit automatic wiki updates. Git provides knowledge, history, and
-conflict detection, not a durable job queue or guaranteed exactly-once delivery.
-Local documentation does not establish live hosted sub-agent dispatch.
+Team-memory postmerge orchestration uses the opt-in
+`.github/workflows/team-memory-post-merge.yml`: trusted-base
+`pull_request_target` closed/merged events and explicit merged-PR manual dispatch
+on the default branch. The shared composite action in `.github/actions/issuelens`
+owns preflight, pinned Azure OIDC login, and submission through a standalone
+Python helper. External callers pin an action commit and need no checkout;
+this repository's thin caller sparsely loads the local action from the trusted
+`github.workflow_sha`, never a PR head, with credentials not persisted. The
+action checks authoritative GitHub metadata before OIDC login and submits a
+bounded wiki-only job using the issue-loop secrets. Enable it with the repository
+variable `ISSUELENS_TEAM_MEMORY_ENABLED=true`, not an agent environment flag.
+The workflow explicitly requests merge revalidation, wiki-only writes, no
+reactions/comments, and a JSON result through its `input`. The generic agent
+preserves wiki policy/privacy/preconditions and the requested response format;
+the caller's schema is not a permanent agent instruction. Only completed
+`updated`/`no-change` results with
+matching source metadata and verified wiki identity succeed. Ambiguous submissions
+are not retried automatically. Git provides knowledge, history, and conflict
+detection, not a durable job queue or guaranteed exactly-once delivery. Local
+tests do not establish live OIDC federation, hosted writer dispatch, or publication.
 
 ## Run & deploy
 
@@ -260,6 +299,21 @@ Local documentation does not establish live hosted sub-agent dispatch.
   declares the same Dulwich dependency (1.2.14). A `Dockerfile` is also provided
   for a container build. Wiki access needs no Git installation, Dockerfile
   change, or runtime installer in either mode.
+
+## Pull request review follow-up
+
+These rules apply to coding assistants maintaining this repository, not to the
+IssueLens runtime agent's capabilities or write authorization.
+
+- Self-review changes and run relevant tests before pushing review fixes.
+- After pushing and verifying the fix on the PR branch, reply to each addressed
+  review thread with the fixing commit and validation results, then resolve the
+  thread without waiting for another user request. A reply alone is not enough.
+- Resolve only threads whose concerns are fully addressed by the verified
+  commits. Leave partially addressed or still-valid concerns unresolved.
+- Re-read the thread state to confirm resolution. If permissions or tooling
+  prevent resolution, report the blocker and identify the threads still open;
+  never claim they are resolved without confirmation.
 
 ## Layout
 

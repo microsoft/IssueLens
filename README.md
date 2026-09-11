@@ -60,9 +60,9 @@ mappings remain supported. A private/internal source may read a public wiki,
 and a public source may write public information to a private/internal wiki,
 subject to job authorization and destination App access. Source-user authorization is
 separate from App installation access.
-Writes require an explicit current-user wiki-update request or an accepted
-trusted postmerge job authorizing the source project and its mapped wiki; existing issue-loop commands and
-repository policy alone do not authorize them. Sensitive, conflicting,
+Writes require an explicit current request or parent handoff authorizing a wiki
+update for the source project and its mapped wiki, regardless of origin.
+Existing issue-loop commands and repository policy alone do not authorize them. Sensitive, conflicting,
 destructive, or unsupported changes need ordinary human interaction.
 
 Only the team-memory agent-local server exposes `write_wiki_pages`; the parent
@@ -119,12 +119,86 @@ automatically, reuse edits for another wiki, or merely replace the expected
 repository to retry. See [MCP details](github_app_mcp/README.md).
 
 **Integration scope:** this simplifies direct maintenance, without a standalone
-host publisher or database/proposal/approval persistence. Full merge
-orchestration remains separate: the postmerge shell skeleton is not functional
-and does not submit automatic updates. There is no durable job queue,
+host publisher or database/proposal/approval persistence. The opt-in
+[post-merge workflow](.github/workflows/team-memory-post-merge.yml) validates
+merged PRs and submits wiki-maintenance jobs. There is no durable job queue,
 reconciliation service, or guaranteed exactly-once delivery. Git is knowledge,
 history, and conflict detection, not an external workflow scheduler. These local
 contracts do not establish live hosted sub-agent dispatch or deployment.
+
+### Post-merge team-memory automation
+
+1. Add a caller workflow on the source repository's default branch using the
+  [reusable IssueLens action](.github/actions/issuelens/README.md) with
+  `request-type: team-memory`. The guide
+  includes a complete example pinned to a reviewed action commit; external
+  consumers need no checkout. It uses `pull_request_target: closed` so merged
+  fork PRs run the trusted base workflow with endpoint credentials. IssueLens's
+  own workflow loads only the local action directory from `github.workflow_sha`
+  with credentials not persisted. Neither path checks out or executes PR-head
+  code. Protect workflow and action changes as privileged code.
+2. Reuse the issue-loop Actions secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+  `AZURE_SUBSCRIPTION_ID`, `ISSUELENS_AGENT_URL` (the complete Foundry
+  invocations endpoint), and `ISSUELENS_AGENT_SCOPE`. The old skeleton's
+  `ISSUELENS_AGENT_ENDPOINT` is not used. Configure Azure OIDC federation for
+  this repository and the actual workflow event/ref subject, including manual
+  dispatch if used; do not assume issue-loop federation covers both triggers.
+  The identity needs permission to invoke the existing Foundry agent, not
+  deployment or GitHub wiki-write credentials. No App private key is stored here.
+3. Use a deployed agent with wiki-maintenance support and source-independent
+  request handling, configure optional `instructions.team_memory` policy, initialize the chosen
+  wiki, and confirm destination App Contents read/write access. The workflow
+  neither initializes the wiki nor changes permissions or agent deployments.
+4. Set the repository Actions variable `ISSUELENS_TEAM_MEMORY_ENABLED=true`
+  when ready. This opts into automatic maintenance; it is not an agent
+  environment flag or a wiki-destination allowlist. Without it, the job skips
+  before acquiring Azure credentials.
+
+Only PRs merged into the current default branch are accepted. Manual **Run
+workflow** requires a positive `pull_request_number` and the default branch;
+it revalidates the same merged PR instead of inventing a merge event. GitHub
+repository and PR metadata are re-read before Azure login. PR titles, bodies,
+comments, and fork source are not embedded in the trusted task. The authenticated
+request authorizes only minimal wiki maintenance; the agent independently
+rechecks the merge and treats retrieved content as untrusted evidence. Endpoint
+authentication alone does not cryptographically attest the JSON metadata.
+
+Both GitHub workflows use one composite action with three request adapters:
+`issue-loop`, `team-memory`, and `task`. The selected adapter prepares and
+validates the request before shared Azure OIDC login and invocation. The helper is
+a normal, directly testable Python module; no Python is embedded in the YAML.
+The action is one client of the same agent used by chat and other callers.
+It supplies its origin, merge evidence, validation constraints, no-reaction
+instruction, and requested response format in `input`. Its JSON result schema
+belongs to this caller, not to the shared agent prompts or knowledge policy.
+Other callers may request different formats or updates unrelated to a merge;
+the same authorization, evidence, and wiki preconditions still apply. Shared
+instructions use explicit request context rather than assuming a workflow,
+Teams conversation, or other delivery surface. Changes to those shared
+instructions require normal deployment approval; changing caller metadata or
+formatting does not introduce a new agent protocol.
+
+The job has a 20-minute timeout and a bounded streamed response. It submits once
+without following redirects or automatically retrying a write-capable request.
+It requires an SSE completion event and a final structured result matching the
+submitted repository, PR, and merge SHA. Only `updated` or `no-change` with a
+verified wiki repository and full SHA succeed. The Actions summary records
+those identities as a table; the default hybrid log streams sanitized agent text
+and compact tool activity, without raw event JSON or tool payloads. Publication
+is configurable through `output-mode` and `summary-mode`; use activity/status
+or quiet/none when the log audience should not see agent text.
+`needs-review`, failures, invalid results, and incomplete streams fail the job.
+The existing bounded GitHub readers can also reject oversized PR metadata or
+source responses. Such runs fail without weakening read limits or reporting
+unverified maintenance success.
+
+Different PRs have independent concurrency groups so a later merge cannot
+replace another PR's pending run. Jobs may overlap or finish out of merge order:
+the agent uses pinned evidence, current knowledge, and wiki compare-and-swap to
+avoid overwriting newer edits. This is not a durable queue. After an ambiguous
+failure, inspect the mapped wiki/history before rerunning or manually dispatching
+the PR. Replays compare current content and skip unchanged knowledge; run IDs
+are not proof of publication. Sensitive/conflicting changes require human review.
 
 ### Automation — `POST /invocations`
 
@@ -657,11 +731,26 @@ maintainer association is validated by the global IssueLens contract against
 trusted event provenance. The workflow carries that provenance but does not
 parse commands. A no-action decision performs no GitHub write.
 
-Copy [.github/workflows/issue-triage.yml](.github/workflows/issue-triage.yml)
-into a target repository's `.github/workflows/`, then configure the Azure OIDC
-identity and agent URL/scope. Keep repository-specific policy in
+Use the [IssueLens action guide](.github/actions/issuelens/README.md) to create
+an external caller using `request-type: issue-loop` and a full action commit SHA.
+The repository's [issue workflow](.github/workflows/issue-triage.yml) is a thin
+local caller and shares the same action as team memory. External consumers
+omit its local checkout step. Configure the Azure OIDC identity and agent
+URL/scope, and use the default branch for manual dispatch. Keep repository-specific policy in
 `.github/issuelens.yml`; the
 workflow filename intentionally differs from the policy filename.
+
+For explicit triage, planning, or other supported requests, use `request-type:
+task` with trusted `input` text. This does not synthesize issue-loop event or
+maintainer-command authority. Both generic adapters accept a completed final
+answer in the format chosen by the caller. `status=completed` confirms invocation
+completion, not a successful requested write; the original answer is available
+through a runner-local `response-path`. The default hybrid view streams readable
+text and tool activity, and the full job summary renders the final answer. Use
+the [publication controls](.github/actions/issuelens/README.md#publication-controls)
+for sensitive requests. Raw protocol events and tool payloads are not logged. Only
+`team-memory` enforces the wiki-specific result schema. The agent retains role
+routing and command validation; no new permanent agent contract is introduced.
 
 > **Alternative (kept as backup):** [webhook_bridge/](webhook_bridge) is a GitHub App **webhook** → Azure Function → queue → agent path (install-and-go, no per-repo files, lowest latency). It's retained as an alternative trigger transport but is not required for the Actions-based setup.
 

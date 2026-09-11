@@ -1,0 +1,101 @@
+name: IssueLens
+description: Prepare issue-loop, team-memory, or direct tasks and invoke an existing IssueLens agent.
+
+inputs:
+  request-type:
+    description: Request adapter to use (issue-loop, team-memory, or task).
+    required: true
+  input:
+    description: Explicit task text for request-type task; not accepted by event adapters.
+    required: false
+    default: ''
+  issue-number:
+    description: Issue number for manually dispatched issue-loop requests.
+    required: false
+    default: ''
+  github-token:
+    description: Caller repository read token; issue-loop dispatch needs Issues read, team-memory needs Pull requests read.
+    required: false
+    default: ${{ github.token }}
+  pull-request-number:
+    description: Merged PR number for manually dispatched team-memory requests.
+    required: false
+    default: ''
+  azure-client-id:
+    description: Client ID of the existing Azure OIDC identity.
+    required: true
+  azure-tenant-id:
+    description: Azure tenant ID for the OIDC identity.
+    required: true
+  azure-subscription-id:
+    description: Azure subscription ID for the OIDC login.
+    required: true
+  agent-url:
+    description: Full HTTPS Foundry invocations endpoint.
+    required: true
+  agent-scope:
+    description: Entra scope used to acquire the endpoint access token.
+    required: true
+  output-mode:
+    description: Live log mode (hybrid includes agent text, activity shows statuses only, quiet disables stream display).
+    required: false
+    default: hybrid
+  summary-mode:
+    description: Job summary mode (full includes final agent text, status includes metrics/status only, none disables summary).
+    required: false
+    default: full
+
+outputs:
+  status:
+    description: skipped, completed (stream success only), or validated team-memory updated/no-change.
+    value: ${{ steps.submit.outputs.status || steps.preflight.outputs.status }}
+  skip-reason:
+    description: Reason an ineligible event was skipped before Azure login.
+    value: ${{ steps.preflight.outputs.skip-reason }}
+  response-path:
+    description: Runner-local UTF-8 final response file for completed issue-loop/task requests; treat contents as untrusted.
+    value: ${{ steps.submit.outputs.response-path }}
+  wiki-repository:
+    description: Resolved wiki repository reported by successful maintenance.
+    value: ${{ steps.submit.outputs.wiki-repository }}
+  wiki-sha:
+    description: Full wiki commit SHA reported by successful maintenance.
+    value: ${{ steps.submit.outputs.wiki-sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare and validate request
+      id: preflight
+      shell: bash
+      env:
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        GH_TOKEN: ${{ inputs.github-token }}
+        REQUEST_TYPE: ${{ inputs.request-type }}
+        TASK_INPUT: ${{ inputs.input }}
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        DISPATCH_PR: ${{ inputs.pull-request-number }}
+        OUTPUT_MODE: ${{ inputs.output-mode }}
+        SUMMARY_MODE: ${{ inputs.summary-mode }}
+      run: python3 -I "$GITHUB_ACTION_PATH/issuelens_action.py" preflight
+
+    - name: Azure login (OIDC) for the agent endpoint
+      if: steps.preflight.outputs.eligible == 'true'
+      uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+      with:
+        client-id: ${{ inputs.azure-client-id }}
+        tenant-id: ${{ inputs.azure-tenant-id }}
+        subscription-id: ${{ inputs.azure-subscription-id }}
+
+    - name: Invoke IssueLens
+      id: submit
+      if: steps.preflight.outputs.eligible == 'true'
+      shell: bash
+      env:
+        GITHUB_ACTION_PATH: ${{ github.action_path }}
+        REQUEST_PATH: ${{ steps.preflight.outputs.request-path }}
+        AGENT_URL: ${{ inputs.agent-url }}
+        AGENT_SCOPE: ${{ inputs.agent-scope }}
+        OUTPUT_MODE: ${{ inputs.output-mode }}
+        SUMMARY_MODE: ${{ inputs.summary-mode }}
+      run: python3 -I "$GITHUB_ACTION_PATH/issuelens_action.py" submit

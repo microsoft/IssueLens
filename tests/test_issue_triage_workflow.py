@@ -2,6 +2,7 @@ import pathlib
 import unittest
 
 import yaml
+import test_team_memory_workflow as action_tests
 
 
 ROOT = pathlib.Path(__file__).parents[1]
@@ -12,7 +13,8 @@ class IssueTriageWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = WORKFLOW.read_text(encoding="utf-8")
-        yaml.compose(cls.source)
+        cls.workflow = yaml.load(cls.source, Loader=yaml.BaseLoader)
+        cls.job = cls.workflow["jobs"]["orchestrate"]
 
     def test_supported_events_are_explicit(self):
         self.assertIn("types: [opened, reopened]", self.source)
@@ -21,18 +23,30 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertNotIn("types: [opened, reopened, edited]", self.source)
 
     def test_preflight_rejects_pr_and_bot_comments_before_login(self):
-        preflight = self.source.index("- name: Validate issue event")
-        azure_login = self.source.index("- name: Azure login")
-        self.assertLess(preflight, azure_login)
-        self.assertIn(".issue.pull_request != null", self.source)
-        self.assertIn('"$actor_type" != "User"', self.source)
-        self.assertIn('"$comment_author_type" != "User"', self.source)
-        self.assertIn("reason=pull_request_comment", self.source)
-        self.assertIn("reason=bot_comment", self.source)
-        self.assertEqual(
-            self.source.count("if: steps.preflight.outputs.eligible == 'true'"),
-            2,
-        )
+        gate = self.job["if"]
+        self.assertIn("github.event.issue.pull_request == null", gate)
+        self.assertIn("github.event.sender.type == 'User'", gate)
+        self.assertIn("github.event.comment.user.type == 'User'", gate)
+        self.assertIn("github.event.repository.default_branch", gate)
+        metadata = yaml.load((action_tests.ACTION_DIR / "action.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        preflight, login, submit = metadata["runs"]["steps"]
+        self.assertEqual(preflight["id"], "preflight")
+        for step in (login, submit):
+            self.assertEqual(step["if"], "steps.preflight.outputs.eligible == 'true'")
+
+    def test_caller_is_thin_and_loads_trusted_action(self):
+        checkout, invoke = self.job["steps"]
+        self.assertEqual(checkout["with"]["ref"], "${{ github.workflow_sha }}")
+        self.assertEqual(checkout["with"]["persist-credentials"], "false")
+        self.assertEqual(checkout["with"]["sparse-checkout"], "/.github/actions/issuelens/")
+        self.assertEqual(invoke["uses"], "./.github/actions/issuelens")
+        self.assertEqual(invoke["with"]["request-type"], "issue-loop")
+        self.assertEqual(invoke["with"]["issue-number"], "${{ inputs.issue_number }}")
+        self.assertEqual(self.workflow["permissions"], {})
+        self.assertEqual(self.job["permissions"], {"contents": "read", "issues": "read", "id-token": "write"})
+        self.assertEqual(self.job["timeout-minutes"], "20")
+        self.assertTrue(all("run" not in step for step in self.job["steps"]))
+        self.assertNotIn("pull_request.head", self.source)
 
     def test_concurrency_remains_per_issue(self):
         self.assertIn(
@@ -44,6 +58,7 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertNotIn("issuelens-triage-${{ github.ref }}", self.source)
 
     def test_trusted_metadata_excludes_issue_and_comment_text(self):
+        helper = action_tests.HELPER.read_text(encoding="utf-8")
         for field in (
             "event_name",
             "event_action",
@@ -59,43 +74,25 @@ class IssueTriageWorkflowTests(unittest.TestCase):
             "comment_edited",
             "manual_dispatch",
         ):
-            self.assertIn(field, self.source)
-        self.assertNotIn(".comment.body", self.source)
-        self.assertNotIn(".issue.body", self.source)
+            self.assertIn(field, helper)
+        self.assertNotIn('.get("body")', helper)
+        self.assertNotIn('["body"]', helper)
 
     def test_optional_metadata_uses_null_when_unknown(self):
-        self.assertIn(
-            'issue_author_association: (if $issue_author_association == "" '
-            'then null else $issue_author_association end)',
-            self.source,
-        )
-        self.assertIn(
-            'comment_author_association: (if $comment_author_association == "" '
-            'then null else $comment_author_association end)',
-            self.source,
-        )
-        self.assertIn(
-            'comment_author_login: (if $comment_author_login == "" '
-            'then null else $comment_author_login end)',
-            self.source,
-        )
-        self.assertIn(
-            'comment_id: (if $comment_id == "" then null else '
-            '($comment_id | tonumber) end)',
-            self.source,
-        )
+        helper = action_tests.HELPER.read_text(encoding="utf-8")
+        self.assertIn('"issue_author_association": issue.get("author_association") or None', helper)
+        self.assertIn('"comment_author_association": comment.get("author_association") or None', helper)
+        self.assertIn('"comment_author_login": comment.get("user", {}).get("login") or None', helper)
+        self.assertIn('if event_name == "issue_comment" else None', helper)
 
     def test_invocation_is_neutral_and_supports_no_action(self):
-        self.assertIn("trusted IssueLens issue-loop event", self.source)
-        self.assertIn("global built-in command and trusted issue-loop contracts", self.source)
-        self.assertIn("Trusted event metadata: ${EVENT_METADATA}", self.source)
-        self.assertNotIn("@issuelens ", self.source)
-        self.assertNotIn("initial triage, re-triage", self.source)
-        self.assertNotIn("responsibility-first rules", self.source)
-        self.assertNotIn("this workflow authorizes", self.source)
-        self.assertNotIn("validated planning policy", self.source)
-        self.assertNotIn("privileged authorization", self.source)
-        self.assertNotIn('input="Triage GitHub issue', self.source)
+        helper = action_tests.HELPER.read_text(encoding="utf-8")
+        self.assertIn("trusted IssueLens issue-loop event", helper)
+        self.assertIn("global built-in command and trusted issue-loop contracts", helper)
+        self.assertIn("Trusted event metadata: ", helper)
+        for text in ("@issuelens ", "initial triage, re-triage", "responsibility-first rules",
+                     "this workflow authorizes", "validated planning policy", "privileged authorization"):
+            self.assertNotIn(text, helper)
 
     def test_documentation_describes_event_loop_boundaries(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

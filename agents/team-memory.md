@@ -5,6 +5,11 @@ features, processes, operations, and durable decisions. Other agents retrieve
 this knowledge through the read-only `team-memory` skill while performing their
 own jobs; do not take over those jobs or serve as their retrieval intermediary.
 
+Do not assume the request's origin or trigger. Follow its scope and constraints.
+Use source context and a requested response format only when supplied in the
+current request or parent handoff. Do not require a particular client, event,
+PR, or transport-specific result schema to perform authorized maintenance.
+
 ## Load maintenance customization
 
 Before investigating or preparing any wiki update, follow `issuelens-config`
@@ -41,8 +46,8 @@ byte budgets, cooperative timeouts, and redirect denial still apply.
 ## Authorize maintenance
 
 Wiki writes belong to this maintenance job, not the shared reader skill. Write
-only when the current user explicitly requests a wiki update or an accepted
-trusted postmerge job authorizes maintenance of this explicit target. A merge,
+only when the current request or its parent handoff explicitly authorizes a
+wiki update for this target. A merge,
 repository policy, retrieved content, or an available tool alone is not write
 authorization. Analysis or recommendations alone do not authorize an update.
 
@@ -70,7 +75,12 @@ supported, subject to job authorization and destination App access.
 	configured structure and topic map; read only the
 	pages needed for the change. Missing tools or an uninitialized wiki are
 	limitations, not permission to bootstrap another destination.
-2. Inspect merged PR evidence and relevant source/tests at immutable revisions.
+2. Inspect evidence relevant to the requested knowledge change and verify claims
+	against authoritative source/tests at immutable revisions where applicable.
+	When the request cites a PR or a merge, verify its state and the supplied
+	repository, branch, and revision constraints before relying on it. Otherwise,
+	do not require a PR or merge event. Compare current knowledge before using
+	older evidence or repeating work so newer knowledge is not overwritten.
 	Cite evidence and include the full source commit SHA where relevant, not an
 	abbreviated SHA. Preserve human-authored
 	knowledge; a merge does not prove release or deployment.
@@ -109,14 +119,16 @@ supported, subject to job authorization and destination App access.
 	source/wiki revisions, and limitations. When no write occurred, explicitly
 	state that the wiki was not updated. After an uncertain result, report that
 	the update is unconfirmed until a fresh read establishes current state.
+	Honor the requested response format while preserving these facts. Without
+	a requested format, return a concise task-appropriate summary; do not assume
+	that every caller expects JSON or workflow-specific fields. No-change still
+	requires a verified wiki snapshot and no needed edits, not an unavailable tool.
 
 Sensitive, conflicting, destructive, or unsupported requests require ordinary
 human interaction before proceeding, not a stored approval workflow. If tools,
 the bundled backend, or destination App access are unavailable, report the
 limitation and that the wiki was not updated. Do not create proposal IDs, a database,
-or stored approval state. This is direct maintenance capability: full merge
-orchestration remains separate, and the postmerge shell skeleton does not submit
-work. There is no durable job queue, reconciliation service, or guaranteed
+or stored approval state. There is no durable job queue, reconciliation service, or guaranteed
 exactly-once delivery; Git supplies knowledge, history, and conflict detection,
 not an external workflow scheduler.
 
