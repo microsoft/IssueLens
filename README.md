@@ -539,6 +539,114 @@ python main.py
 
 The agent starts on `http://localhost:8088/`.
 
+## Continuous integration
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every pull request
+and push to `main`, independently of the operational issue-loop, team-memory,
+and billing workflows. Its stable check names are:
+
+| Check | Scope |
+| --- | --- |
+| `Application tests (Python 3.13)` | Python syntax validation and all `tests/`; matches the hosted runtime. |
+| `MCP tests (Python 3.12)` | All `github_app_mcp/tests/` at the standalone package's minimum Python version. |
+| `MCP tests (Python 3.13)` | The same MCP suite on the hosted Python version. |
+| `MCP package build/install (Python 3.12)` | Build an sdist, build its wheel, install into a clean environment, check dependencies and import the console entry point. |
+| `MCP package build/install (Python 3.13)` | The same distributable validation on Python 3.13. |
+| `Workflow validation` | actionlint validation of all `.github/workflows/*.yml`. |
+
+These checks use ordinary `pull_request`, **not** `pull_request_target`, with
+only `contents: read`, no persisted checkout credentials, and no secrets or
+environment approvals. They need no `.env`, Azure credentials, GitHub App
+secrets, live model calls, or deployment access. Tests use local fixtures and
+mocked services; the wheel smoke test imports but does not start the MCP server.
+CI does not invoke IssueLens, deploy agents, publish packages, or write issues
+or wikis. Fork PRs are supported, subject to GitHub's normal maintainer approval
+for first-time contributors. Local validation alone does not verify fork
+approval settings or live Actions execution.
+
+Jobs have 10–15 minute timeouts; newer runs cancel superseded runs for the same
+PR/ref. Python jobs cache pip downloads using their runtime and CI dependency
+manifests; a cache miss only requires downloading again. Matrix failures remain
+failing checks and do not cancel the other Python version. Maintainers can make
+the names above required branch checks after observing successful Actions runs.
+
+### Tools and equivalent local checks
+
+Run these Bash commands from the repository root. Validation needs Python 3.13
+(plus 3.12 for MCP compatibility), `venv`/pip, and Go 1.25+ for actionlint, not the
+credentials listed under **Running Locally**. Downloads require network access;
+test execution needs no live services.
+
+[`requirements-ci.txt`](requirements-ci.txt) pins the CI-only tools: PyYAML for
+workflow/configuration tests, `packaging` for dependency-manifest assertions, and
+PyPA `build` for the existing Hatchling backend. Production dependency ranges
+and build-backend policy remain unchanged; this is not a full dependency lock.
+Python validation uses standard-library `compileall` on root modules, action
+helpers, MCP sources/scripts, and both test directories. It checks syntax, not
+formatting, types, or style.
+
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt -r requirements-ci.txt
+python -m compileall -q *.py .github/actions/issuelens github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
+python -m unittest discover -s tests -p 'test_*.py' -v
+```
+
+Use an isolated environment for the standalone suite and packaging checks;
+repeat with `python3.13` in place of `python3.12`:
+
+```bash
+MCP_CHECK_DIR="$(mktemp -d)"
+python3.12 -m venv "$MCP_CHECK_DIR/tests"
+(
+  source "$MCP_CHECK_DIR/tests/bin/activate"
+  python -m pip install ./github_app_mcp -r requirements-ci.txt
+  python -m unittest discover -s github_app_mcp/tests -p 'test_*.py' -v
+)
+python3.12 -m venv "$MCP_CHECK_DIR/build"
+(
+  source "$MCP_CHECK_DIR/build/bin/activate"
+  python -m pip install -r requirements-ci.txt
+  python -m build --outdir "$MCP_CHECK_DIR/dist" github_app_mcp
+  python -m venv "$MCP_CHECK_DIR/wheel"
+  "$MCP_CHECK_DIR/wheel/bin/python" -m pip install "$MCP_CHECK_DIR"/dist/*.whl
+  "$MCP_CHECK_DIR/wheel/bin/python" -m pip check
+  "$MCP_CHECK_DIR/wheel/bin/python" -I - <<'PY'
+from importlib.metadata import distribution
+
+dist = distribution("issuelens-github-mcp")
+entry, = (ep for ep in dist.entry_points if ep.group == "console_scripts" and ep.name == "issuelens-github-mcp")
+assert entry.value == "issuelens_github_mcp.server:main"
+assert callable(entry.load())
+print(f"Installed {dist.metadata['Name']} {dist.version}; entry point imports successfully")
+PY
+)
+rm -rf "$MCP_CHECK_DIR"
+```
+
+[actionlint](https://github.com/rhysd/actionlint) v1.7.12 checks workflow syntax,
+expressions, job dependencies, and action inputs. Its optional ShellCheck and
+Pyflakes integrations are explicitly disabled so local and CI scope is the
+same, independent of runner-installed tools:
+
+```bash
+go install github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca
+"$(go env GOPATH)/bin/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml
+```
+
+[`.github/actionlint.yaml`](.github/actionlint.yaml) suppresses only the unknown
+`copilot-requests` permission diagnostic in the existing manual billing probe.
+actionlint v1.7.12 does not recognize that scope; all other diagnostics and
+workflows remain checked. Remove this narrow exception when actionlint supports
+it. The operational workflow itself is unchanged.
+
+All actions and actionlint source are pinned to immutable commits. Existing
+Dependabot configuration proposes action updates; review tool upgrades, update
+the SHA/version comment or CI requirement pin and this documentation together,
+and rerun validation. Go caching is disabled because this Python repository has
+no Go module; Go is used only to install actionlint.
+
 ## Invoke with azd
 
 <details>
