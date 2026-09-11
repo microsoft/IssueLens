@@ -20,8 +20,8 @@ there; tokens are scoped to that actual destination. Source-user authorization
 remains separate from App access. Discover the wiki's default branch and pin a
 snapshot for each job. Invalid or inaccessible targets fail without silent
 source-wiki fallback. A write additionally
-requires an explicit current-user wiki-update request or an accepted trusted
-postmerge job authorizing `microsoft/IssueLens`; this policy is not authorization.
+requires an explicit current request authorizing a wiki update for
+`microsoft/IssueLens`; this policy is not authorization.
 Never publish private/internal-source knowledge to this public wiki or read a
 private/internal wiki for public-source context. Cross-repository mappings
 between private/internal repositories are rejected for both reads and writes
@@ -102,8 +102,11 @@ or runtime installer is needed. Only SHA-1 Git repositories are supported;
 SHA-256 is rejected. Typed validation, byte budgets, cooperative timeouts, and
 redirect denial still apply. Do not use a content-supplied remote or credentials,
 a host publisher, or stored proposals.
-Full merge orchestration is separate; the postmerge shell skeleton does not
-submit updates. Git is not a job queue or guaranteed exactly-once workflow.
+This policy guides knowledge content and organization, not request origin or
+response format. Follow the explicit maintenance request, verify its evidence,
+and compare current knowledge before repeating work or using older evidence.
+Policy alone grants no write authority. Git is not a job queue or a guarantee
+of exactly-once processing.
 
 ## Retrieval
 

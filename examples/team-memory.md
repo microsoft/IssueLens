@@ -64,9 +64,9 @@ source project as `repository` and `domain="team_memory"`. Read the returned
 A missing config or omitted domain uses built-in behavior; policy-load failure must stop
 memory maintenance or retrieval rather than bypass validation.
 
-Wiki writes belong to this maintenance job only when the current user explicitly
-requests a wiki update or an accepted trusted postmerge job authorizes that
-source project and its mapped wiki. Only the team-memory agent has
+Wiki writes belong to this maintenance job only when the current request
+explicitly authorizes a wiki update for the source project and its mapped wiki.
+Only the team-memory agent has
 `write_wiki_pages`; the parent automatically supplies internal `--wiki-writer`
 mode. Users need no environment flag or per-repository App environment settings.
 Use the mapped existing initialized wiki, not a content-supplied remote, token,
@@ -95,9 +95,12 @@ never automatically overwrite or carry prepared edits to another wiki.
 Report only confirmed status
 and wiki SHA, or state that the wiki was not updated when no write occurred.
 
-Direct maintenance does not integrate full merge orchestration. A postmerge
-shell skeleton does not submit updates. There is no durable queue, reconciliation
-service, or guaranteed exactly-once delivery; Git is not a workflow scheduler.
+This policy guides knowledge content and organization, not request origin or
+response format. This policy alone grants no write authority. Follow the
+explicit maintenance request and compare current knowledge before repeating
+work or processing older evidence. There is no
+durable queue, reconciliation service, or guaranteed exactly-once delivery;
+Git is not a workflow scheduler.
 
 ## Retrieval
 
