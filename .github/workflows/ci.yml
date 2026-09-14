@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.repository }}-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  application-tests:
+    name: Application tests (Python 3.13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ci.txt
+            constraints-ci.txt
+      - name: Install application and test dependencies
+        run: python -m pip install -r requirements.txt -r requirements-ci.txt
+      - name: Validate Python syntax
+        run: python -m compileall -q *.py .github/actions/issuelens github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
+      - name: Run application tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+
+  mcp-tests:
+    name: MCP tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            github_app_mcp/pyproject.toml
+            requirements-ci.txt
+            constraints-ci.txt
+      - name: Install MCP and test dependencies
+        run: python -m pip install ./github_app_mcp -r requirements-ci.txt
+      - name: Run MCP tests
+        run: python -m unittest discover -s github_app_mcp/tests -p 'test_*.py' -v
+
+  mcp-package:
+    name: MCP package build/install (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13']
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            github_app_mcp/pyproject.toml
+            requirements-ci.txt
+            constraints-ci.txt
+      - name: Install build tooling
+        run: python -m pip install -r requirements-ci.txt
+      - name: Build source distribution and wheel
+        run: python -m build --outdir "$RUNNER_TEMP/dist" github_app_mcp
+      - name: Install and smoke-test wheel in a clean environment
+        run: |
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install -c constraints-ci.txt "$RUNNER_TEMP"/dist/*.whl
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip check
+          "$RUNNER_TEMP/wheel-venv/bin/python" -I - <<'PY'
+          from importlib.metadata import distribution
+
+          dist = distribution("issuelens-github-mcp")
+          entry, = (ep for ep in dist.entry_points if ep.group == "console_scripts" and ep.name == "issuelens-github-mcp")
+          assert entry.value == "issuelens_github_mcp.server:main"
+          assert callable(entry.load())
+          print(f"Installed {dist.metadata['Name']} {dist.version}; entry point imports successfully")
+          PY
+
+  workflow-validation:
+    name: Workflow validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25'
+          cache: false
+      - name: Install actionlint
+        # actionlint v1.7.12, built from an immutable source revision.
+        run: go install github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76d2b11c789d3fca
+      - name: Validate all workflows
+        run: '"$(go env GOPATH)/bin/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml'
