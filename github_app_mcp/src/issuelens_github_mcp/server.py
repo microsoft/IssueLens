@@ -216,7 +216,10 @@ def create_server(
 
     @server.tool()
     async def list_wiki_pages(repository: str, ref: str = "HEAD") -> Any:
-        """List pages in the source project's configured wiki using App access."""
+        """List pages in the source project's configured wiki using App access.
+
+        Returns source_repository, wiki_repository, and the page list in result.
+        """
         return await github.list_wiki_pages(repository, ref)
 
     @server.tool()
@@ -226,19 +229,28 @@ def create_server(
 
     @server.tool()
     async def search_wiki(repository: str, query: str, ref: str = "HEAD") -> Any:
-        """Search the source project's configured wiki using App access."""
+        """Search the source project's configured wiki using App access.
+
+        Returns source_repository, wiki_repository, and the matching page list in result.
+        """
         return await github.search_wiki(repository, query, ref)
 
     @server.tool()
     async def list_wiki_history(
         repository: str, path: str | None = None, limit: int = 30, ref: str = "HEAD"
     ) -> Any:
-        """Read history in the source project's configured wiki using App access."""
+        """Read history in the source project's configured wiki using App access.
+
+        Returns source_repository, wiki_repository, and the commit SHA list in result.
+        """
         return await github.list_wiki_history(repository, path, limit, ref)
 
     @server.tool()
     async def get_wiki_diff(repository: str, base: str, head: str = "HEAD") -> Any:
-        """Diff snapshots in the source project's configured wiki using App access."""
+        """Diff snapshots in the source project's configured wiki using App access.
+
+        Returns source_repository, wiki_repository, and the diff text in result.
+        """
         return await github.get_wiki_diff(repository, base, head)
 
     if github.wiki_writes_enabled:

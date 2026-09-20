@@ -232,6 +232,18 @@ are not proof of publication. Sensitive/conflicting changes require human review
   `team-memory` agent-local writer.
 6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
 
+## Observability
+
+Content-free run accounting is always on for both protocols through the existing
+Foundry/Application Insights pipeline. Content capture stays disabled. See the
+[observability guide](docs/observability.md) for configuration, privacy,
+measurement definitions and limitations, the
+[Azure Monitor Workbook](observability/workbook.json), and
+[copyable KQL reports](observability/queries.kql). Reports keep transport,
+execution, confirmed operations and telemetry coverage separate; missing usage is not
+zero, and HTTP success is not business success. Assets are checked offline;
+live ingestion/import validation and any deployment need separate authorization.
+
 ## Environment Variables
 
 ### Model (inference) — configure one

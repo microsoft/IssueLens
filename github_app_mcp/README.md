@@ -129,6 +129,17 @@ destination-scoped App access:
 | `list_wiki_history` | Read bounded history at a snapshot | Contents: read |
 | `get_wiki_diff` | Compare explicit wiki revisions | Contents: read |
 
+Every successful wiki response includes `source_repository` and the actual
+resolved `wiki_repository`. `list_wiki_pages`, `search_wiki`, and
+`list_wiki_history` return their original lists under `result`; `get_wiki_diff`
+returns its original diff string under `result`. Empty lists and empty diffs
+use the same envelope. Callers must read this field instead of treating these
+responses as bare lists or text. Snapshot, page, and write responses retain
+their existing top-level payload fields alongside the identity metadata.
+The complete response, including the envelope, remains subject to result-size
+and credential-exposure checks. Continue passing the source project to tools,
+not the destination returned in the metadata.
+
 Pin page, search, and history reads to the same full SHA and compare explicit
 SHAs for diffs. Only `HEAD` or full SHAs are accepted as wiki refs. Keep private
 knowledge separate from public wikis and results; anonymous public reads never

@@ -16,6 +16,8 @@ services:
                 memory: 1Gi
         description: IssueLens — GitHub issue triage agent.
         environmentVariables:
+            - name: OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
+              value: "false"
             - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
               value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
             - name: AZURE_AI_MODEL_API_KEY

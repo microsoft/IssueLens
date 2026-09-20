@@ -210,6 +210,9 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(set(tools[name].input_schema["properties"]), set(parameters))
                     self.assertIn("source project", tools[name].description)
                     self.assertIn("configured wiki", tools[name].description)
+                    if name in {"list_wiki_pages", "search_wiki", "list_wiki_history", "get_wiki_diff"}:
+                        for field in ("source_repository", "wiki_repository", "result"):
+                            self.assertIn(field, tools[name].description)
                     result = await client.call_tool(name, parameters)
                     self.assertFalse(result.is_error)
                     self.assertEqual(github.calls[-1], (name, tuple(parameters.values()), {}))

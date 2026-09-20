@@ -50,6 +50,12 @@ READ_CASES = (
     ("list_wiki_history", ("Home.md", 5, BASE), "history", ("Home.md", 5, BASE)),
     ("get_wiki_diff", (BASE, HEAD), "diff", (BASE, HEAD)),
 )
+NON_DICT_READ_CASES = (
+    ("list_wiki_pages", (), "pages", [{"path": "Home.md"}]),
+    ("search_wiki", ("memory",), "search", [{"path": "Home.md", "content": "memory"}]),
+    ("list_wiki_history", (), "history", [BASE, HEAD]),
+    ("get_wiki_diff", (BASE,), "diff", "diff --git a/Home.md b/Home.md\n"),
+)
 WRITE_ARGUMENTS = ({"Home.md": "text"}, BASE, "Update")
 
 
@@ -501,21 +507,45 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.provider.get_bot_identity.assert_not_awaited()
 
-    async def test_list_and_text_read_shapes_remain_unchanged(self):
+    async def test_list_and_text_reads_include_identity_and_preserve_payloads(self):
+        for destination in (REPOSITORY, WIKI_REPOSITORY):
+            if destination != REPOSITORY:
+                self.configure_memory()
+            for method, arguments, operation, populated in NON_DICT_READ_CASES:
+                for payload in (populated, "" if isinstance(populated, str) else []):
+                    with self.subTest(destination=destination, method=method, empty=not payload):
+                        self.provider.get_token.reset_mock()
+                        with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+                            getattr(backend.return_value.__enter__.return_value, operation).return_value = payload
+                            result = await getattr(self.github, method)(REPOSITORY, *arguments)
+                        self.assertEqual(result, {
+                            "result": payload, "source_repository": REPOSITORY,
+                            "wiki_repository": destination,
+                        })
+                        self.assertIs(type(result["result"]), type(payload))
+                        backend.assert_called_once_with(destination, token=TOKEN)
+                        self.provider.get_token.assert_awaited_once_with(destination, {"contents": "read"})
+
+    async def test_list_and_text_result_budgets_include_the_identity_envelope(self):
         self.configure_memory()
-        cases = (
-            ("list_wiki_pages", (), "pages", [{"path": "Home.md"}]),
-            ("search_wiki", ("memory",), "search", [{"path": "Home.md", "content": "memory"}]),
-            ("list_wiki_history", (), "history", [BASE, HEAD]),
-            ("get_wiki_diff", (BASE,), "diff", "diff --git a/Home.md b/Home.md\n"),
-        )
-        for method, arguments, operation, payload in cases:
-            with self.subTest(method=method):
-                with patch("issuelens_github_mcp.github.WikiRepository") as backend:
-                    getattr(backend.return_value.__enter__.return_value, operation).return_value = payload
-                    result = await getattr(self.github, method)(REPOSITORY, *arguments)
-                self.assertEqual(result, payload)
-                self.assertIs(type(result), type(payload))
+        for method, arguments, operation, payload in NON_DICT_READ_CASES:
+            result = {
+                "result": payload, "source_repository": REPOSITORY,
+                "wiki_repository": WIKI_REPOSITORY,
+            }
+            size = len(json.dumps(result, ensure_ascii=True, allow_nan=False).encode("utf-8"))
+            for budget in (size, size - 1):
+                with self.subTest(method=method, budget=budget):
+                    with (
+                        patch("issuelens_github_mcp.github.WikiRepository") as backend,
+                        patch("issuelens_github_mcp.github._MAX_WIKI_RESULT_BYTES", budget),
+                    ):
+                        getattr(backend.return_value.__enter__.return_value, operation).return_value = payload
+                        if budget == size:
+                            self.assertEqual(await getattr(self.github, method)(REPOSITORY, *arguments), result)
+                        else:
+                            with self.assertRaisesRegex(GitHubAppError, "response is too large"):
+                                await getattr(self.github, method)(REPOSITORY, *arguments)
 
     async def test_result_budget_includes_source_and_wiki_metadata(self):
         self.configure_memory()
@@ -656,9 +686,12 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                         wiki.__exit__.assert_called_once()
 
     async def test_structured_result_budget_and_credential_boundary_apply_to_reads_and_writes(self):
-        for payload in ({"content": "\u00e9" * 70_000}, {"token": TOKEN}, {"invalid": object()}, {"invalid": float("nan")}):
+        for payload in (
+            {"content": "\u00e9" * 70_000}, {"token": TOKEN}, [TOKEN], TOKEN,
+            {"invalid": object()}, {"invalid": float("nan")}, [object()], [float("nan")],
+        ):
             for write in (False, True):
-                with self.subTest(payload_type=next(iter(payload)), write=write):
+                with self.subTest(payload_type=type(payload).__name__, write=write):
                     wiki = MagicMock(spec=WikiRepository)
                     wiki.__enter__.return_value = wiki
                     wiki.snapshot.return_value = wiki.write.return_value = payload
@@ -870,15 +903,17 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
             "expected_base": self.base, "message": "Update wiki memory",
         }
 
-        async def call_json(client, name, arguments, *, sequence=False, text=False):
+        async def call_json(client, name, arguments):
             result = await client.call_tool(name, arguments)
             self.assertFalse(result.is_error, result.content)
             for item in result.content:
                 self.assertNotIn(TOKEN, item.text)
                 self.assertNotIn("mocked-app-jwt", item.text)
-            if sequence:
-                return [item.text if text else json.loads(item.text) for item in result.content]
-            return json.loads(result.content[0].text)
+            self.assertEqual(len(result.content), 1)
+            payload = json.loads(result.content[0].text)
+            self.assertEqual(payload["source_repository"], REPOSITORY)
+            self.assertEqual(payload["wiki_repository"], WIKI_REPOSITORY)
+            return payload
 
         with patch("issuelens_github_mcp.github.WikiRepository", self.local_wiki):
             async with Client(server) as client:
@@ -907,15 +942,22 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(page["content"], write["pages"]["Home.md"])
                 old_page = await call_json(client, "get_wiki_page", {"repository": REPOSITORY, "path": "Home.md", "ref": self.base})
                 self.assertEqual(old_page["content"], "# Home\nWelcome\n")
-                history = await call_json(client, "list_wiki_history", {"repository": REPOSITORY, "ref": self.base}, sequence=True, text=True)
-                self.assertEqual(history, [self.base])
-                pages = await call_json(client, "list_wiki_pages", {"repository": REPOSITORY, "ref": updated["sha"]}, sequence=True)
-                self.assertEqual([page["path"] for page in pages], ["Home.md", "New.md"])
-                found = await call_json(client, "search_wiki", {"repository": REPOSITORY, "query": "Updated", "ref": updated["sha"]}, sequence=True)
-                self.assertEqual([page["path"] for page in found], ["Home.md"])
-                diff = await client.call_tool("get_wiki_diff", {"repository": REPOSITORY, "base": self.base, "head": updated["sha"]})
-                self.assertFalse(diff.is_error)
-                self.assertIn("+Updated memory", diff.content[0].text)
+                history = await call_json(client, "list_wiki_history", {"repository": REPOSITORY, "ref": self.base})
+                self.assertEqual(history["result"], [self.base])
+                pages = await call_json(client, "list_wiki_pages", {"repository": REPOSITORY, "ref": updated["sha"]})
+                self.assertEqual([page["path"] for page in pages["result"]], ["Home.md", "New.md"])
+                found = await call_json(client, "search_wiki", {"repository": REPOSITORY, "query": "Updated", "ref": updated["sha"]})
+                self.assertEqual([page["path"] for page in found["result"]], ["Home.md"])
+                diff = await call_json(client, "get_wiki_diff", {"repository": REPOSITORY, "base": self.base, "head": updated["sha"]})
+                self.assertIn("+Updated memory", diff["result"])
+                empty_search = await call_json(client, "search_wiki", {
+                    "repository": REPOSITORY, "query": "no matching content", "ref": updated["sha"],
+                })
+                self.assertEqual(empty_search["result"], [])
+                empty_diff = await call_json(client, "get_wiki_diff", {
+                    "repository": REPOSITORY, "base": updated["sha"], "head": updated["sha"],
+                })
+                self.assertEqual(empty_diff["result"], "")
                 retry = await call_json(client, "write_wiki_pages", write)
                 self.assertEqual(retry["status"], "no-change")
                 self.assertEqual(retry["sha"], updated["sha"])
