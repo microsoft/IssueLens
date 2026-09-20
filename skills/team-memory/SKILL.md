@@ -52,7 +52,10 @@ redirect denial remain enforced. Binary diffs are notices, not binary patches.
 2. Call `get_wiki_snapshot`, then use `list_wiki_pages`, `search_wiki`, and
 	`get_wiki_page` at that same snapshot, pinned to the full wiki SHA. Use
 	`list_wiki_history` at that SHA and `get_wiki_diff` with explicit comparison
-	SHAs; refs are only `HEAD` or full SHAs. Preserve page links
+	SHAs; refs are only `HEAD` or full SHAs. Tool results identify both the source
+	project and the resolved wiki. Page lists, search results, history lists,
+	and diff text are under `result`, including empty results; snapshot and page
+	fields stay at the top level. Preserve page links
 	and revision IDs. Follow configured navigation and important knowledge areas
 	without dumping the entire wiki. An uninitialized wiki or unavailable tools
 	is a limitation, not proof that the project has no knowledge. If a mapping

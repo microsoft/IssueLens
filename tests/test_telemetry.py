@@ -13,6 +13,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
+from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient
 from telemetry import RunTelemetry, Settings, copilot_environment, prepare_environment
 from telemetry_targets import result_metadata
 
@@ -494,6 +495,46 @@ class TelemetryTests(unittest.TestCase):
         self.assertFalse(any(f["repository"] == "org/repo" and f["relationship"] == "write_succeeded" for f in facts))
         self.assertTrue(any(f["repository"] == "org/memory" and f["target_kind"] == "wiki" for f in facts))
         self.assertEqual(result["write_operations_succeeded"], 1)
+
+    def test_wiki_read_envelopes_preserve_actual_destinations_without_exporting_content(self):
+        cases = (
+            ("list_wiki_pages", {}, [{"path": "PRIVATE-CANARY.md"}]),
+            ("search_wiki", {"query": "PRIVATE-CANARY"}, [{"path": "PRIVATE-CANARY.md"}]),
+            ("list_wiki_history", {}, ["a" * 40]),
+            ("get_wiki_diff", {"base": "a" * 40}, "+PRIVATE-CANARY"),
+        )
+        calls = 0
+        for destination in ("org/repo", "org/memory"):
+            for operation, arguments, populated in cases:
+                for payload in (populated, "" if isinstance(populated, str) else []):
+                    with patch("github_app_mcp.src.issuelens_github_mcp.github.WikiRepository"):
+                        result = GitHubClient._wiki_operation(
+                            "org/repo", destination, "offline-only-token", lambda _: payload,
+                        )
+                    for tool_result in ({"structuredContent": result}, {"content": json.dumps(result)}):
+                        calls += 1
+                        identifier = f"read-{calls}"
+                        self.run.observe(event("tool.execution_start", {
+                            "toolCallId": identifier, "toolName": f"github-{operation}",
+                            "arguments": {"repository": "org/repo", **arguments},
+                        }))
+                        self.run.observe(event("tool.execution_complete", {
+                            "toolCallId": identifier, "success": True, "result": tool_result,
+                        }))
+        summary = self.complete()
+        self.assertEqual(summary["tools_completed"], calls)
+        self.assertEqual(summary["write_operations_succeeded"], 0)
+        self.assertFalse(summary["telemetry_incomplete"])
+        self.assertNotIn("incomplete_missing_wiki_identity", summary)
+        reads = [row for row in self.backend.facts("issuelens.run.target") if row["relationship"] == "read"]
+        self.assertEqual({
+            (row["repository"], row["target_kind"], row["operations"]) for row in reads
+        }, {("org/repo", "wiki", 16), ("org/memory", "wiki", 16)})
+        exported = {
+            "facts": self.backend.events, "metrics": self.backend.metrics,
+            "spans": [dict(span.attributes) for span in self.backend.exporter.get_finished_spans()],
+        }
+        self.assertNotIn("PRIVATE-CANARY", json.dumps(exported))
 
     def test_wiki_transport_success_without_a_confirmed_status_is_not_a_write(self):
         self.tool_start("wiki", "wiki-writer-write_wiki_pages", issue_number=None)

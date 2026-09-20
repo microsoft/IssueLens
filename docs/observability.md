@@ -152,6 +152,10 @@ runs cannot be assumed to be either issues or PRs.
 Wiki writes additionally require the tool's `updated` or `no-change` status;
 transport success with an unknown status is incomplete evidence, not a
 confirmed write.
+All successful wiki read responses carry source/destination identity, including
+list and text results wrapped under `result`. Empty search results or an empty
+diff still count as observed reads of the actual resolved wiki. Telemetry copies
+only the allowlisted identity fields, not the enclosed payload.
 For `add_eyes_reaction`, `target_id` identifies an issue/PR number only when
 `target_kind` is `issue` or `pull_request`. Reactions to comments remain
 repository-level associations; their comment IDs are not issue/PR numbers.

@@ -685,12 +685,13 @@ class GitHubClient:
         try:
             with WikiRepository(repository, token=token) as wiki:
                 payload = operation(wiki)
-            if isinstance(payload, dict):
-                payload = {
-                    **payload,
-                    "source_repository": source_repository,
-                    "wiki_repository": repository,
-                }
+            if not isinstance(payload, dict):
+                payload = {"result": payload}
+            payload = {
+                **payload,
+                "source_repository": source_repository,
+                "wiki_repository": repository,
+            }
             encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode("utf-8")
         except WikiError:
             raise GitHubAppError(
