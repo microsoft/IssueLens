@@ -48,6 +48,7 @@ import time
 import httpx
 from azure.core.credentials import AccessToken
 from dotenv import load_dotenv
+from opentelemetry.instrumentation.utils import suppress_instrumentation
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
@@ -83,9 +84,10 @@ from media_inputs import (
     MAX_ATTACHMENTS,
     MediaInputError,
     invocation_attachments,
-    redacted_input_items,
     response_input,
 )
+from telemetry import RunTelemetry, copilot_environment, prepare_environment
+from telemetry_export import OpenTelemetryBackend
 
 _project_dir = pathlib.Path(__file__).parent
 _github_mcp_src = _project_dir / "github_app_mcp" / "src"
@@ -94,6 +96,7 @@ load_dotenv(override=False)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+_telemetry_settings = prepare_environment()
 
 
 class IssueLensHost(InvocationAgentServerHost, ResponsesAgentServerHost):
@@ -101,6 +104,12 @@ class IssueLensHost(InvocationAgentServerHost, ResponsesAgentServerHost):
 
 
 app = IssueLensHost()
+_telemetry_backend = OpenTelemetryBackend()
+if not os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
+    logger.warning(
+        "Application Insights is not configured; "
+        "IssueLens BI records require a configured hosting exporter"
+    )
 
 _client: CopilotClient | None = None
 _client_lock = asyncio.Lock()
@@ -326,11 +335,13 @@ async def _ensure_client() -> CopilotClient:
             # actions go through our configured MCP server (installation token →
             # App bot), not the machine's logged-in user.
             client = CopilotClient(
-                use_logged_in_user=False, base_directory=base_dir)
+                use_logged_in_user=False, base_directory=base_dir,
+                env=copilot_environment())
         elif github_token:
             # Copilot mode: use GitHub token for the model.
             client = CopilotClient(
-                github_token=github_token, base_directory=base_dir)
+                github_token=github_token, base_directory=base_dir,
+                env=copilot_environment())
         else:
             raise RuntimeError(
                 "Set GITHUB_TOKEN (Copilot model) or "
@@ -417,8 +428,9 @@ def _default_recipients() -> list[str]:
 async def _post_logicapp(url: str, payload: dict) -> ToolResult:
     """POST a JSON payload to a Logic App endpoint and map the result for the LLM."""
     try:
-        async with httpx.AsyncClient(timeout=30) as http:
-            resp = await http.post(url, json=payload)
+        with suppress_instrumentation():
+            async with httpx.AsyncClient(timeout=30) as http:
+                resp = await http.post(url, json=payload)
     except Exception as exc:  # network / timeout
         return ToolResult(
             text_result_for_llm=f"Notification failed: {exc}",
@@ -554,75 +566,110 @@ _NOTIFICATION_TOOLS = _notification_tools()
 _RUNTIME_TOOLS = [*_NOTIFICATION_TOOLS]
 
 
-async def _stream_response(invocation_id: str, payload: dict):
+async def _stream_response(
+    invocation_id: str, payload: dict, run: RunTelemetry | None = None,
+):
     """Create a fresh session for this invocation and stream its events as SSE.
 
     A new session is created per request, so its stdio MCP process and token
     cache are destroyed when the request session disconnects.
     """
-    client = await _ensure_client()
-    mcp_servers = _build_mcp_servers()
-    prompt = _build_prompt(payload)
-    attachments = payload.get("_copilot_attachments") or []
-
-    if not prompt:
-        yield f"data: {json.dumps({'type': 'error', 'message': 'empty task'})}\n\n".encode()
-        return
-
-    request_github_client = _new_host_github_client()
-    request_config_tool = create_issuelens_config_tool(request_github_client)
-    try:
-        issue_attachments = await issue_image_attachments(
-            prompt,
-            request_github_client,
-            maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
+    if run is None:
+        run = RunTelemetry(
+            _telemetry_backend, _telemetry_settings, "invocations",
+            identifiers={"invocation_id": invocation_id},
         )
-    except GitHubAppError:
-        logger.info("Invocation issue-body images could not be loaded")
-        issue_attachments = []
-    attachments = [*attachments, *issue_attachments]
-    session = await client.create_session(
-        **_session_options(
-            mcp_servers,
-            [*_NOTIFICATION_TOOLS, request_config_tool],
-        )
-    )
-    session_id = getattr(session, "session_id", None)
-
-    queue: asyncio.Queue = asyncio.Queue()
-
-    def on_event(event):
-        if event.type == SessionEventType.SESSION_IDLE:
-            queue.put_nowait(None)
-        elif event.type == SessionEventType.SESSION_ERROR:
-            queue.put_nowait(RuntimeError(
-                getattr(event.data, "message", "error")))
-        else:
-            queue.put_nowait(event)
-
-    unsubscribe = session.on(on_event)
+        run.admit()
+    session = None
+    unsubscribe = None
+    status, stage, transport = "cancelled", "setup", "interrupted"
+    error_type = "stream_interrupted"
     try:
-        await session.send(prompt, attachments=attachments or None)
+        with run.phase("client_start"):
+            client = await _ensure_client()
+        mcp_servers = _build_mcp_servers()
+        prompt = _build_prompt(payload)
+        attachments = payload.get("_copilot_attachments") or []
+        if not prompt:
+            status, error_type = "rejected", "invalid_input"
+            yield f"data: {json.dumps({'type': 'error', 'message': 'empty task'})}\n\n".encode()
+            return
+        request_github_client = _new_host_github_client()
+        request_config_tool = create_issuelens_config_tool(request_github_client)
+        try:
+            with run.phase("media_load"):
+                issue_attachments = await issue_image_attachments(
+                    prompt, request_github_client,
+                    maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
+                    on_issue_read=run.host_issue_read,
+                )
+        except GitHubAppError:
+            logger.info("Invocation issue-body images could not be loaded")
+            run.degraded("media_unavailable")
+            issue_attachments = []
+        attachments = [*attachments, *issue_attachments]
+        with run.phase("session_open"):
+            session = await client.create_session(
+                **_session_options(mcp_servers, [*_NOTIFICATION_TOOLS, request_config_tool])
+            )
+        session_id = getattr(session, "session_id", None)
+        run.set_identifier("session_id", session_id)
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_event(event):
+            run.observe(event)
+            if event.type == SessionEventType.SESSION_IDLE:
+                queue.put_nowait(None)
+            elif event.type == SessionEventType.SESSION_ERROR:
+                queue.put_nowait(RuntimeError(getattr(event.data, "message", "error")))
+            else:
+                queue.put_nowait(event)
+
+        unsubscribe = session.on(on_event)
+        stage = "session"
+        run.model_sent = True
+        with run.phase("session_send"):
+            await session.send(prompt, attachments=attachments or None)
         while True:
             item = await queue.get()
             if item is None:
+                status, error_type = "completed", ""
                 break
             if isinstance(item, Exception):
+                status, error_type = "failed", "execution_error"
                 yield f"data: {json.dumps({'type': 'error', 'message': str(item)})}\n\n".encode()
                 break
+            if item.type in {SessionEventType.ASSISTANT_MESSAGE_DELTA, SessionEventType.ASSISTANT_MESSAGE}:
+                run.visible_output(item)
             yield f"data: {json.dumps(item.to_dict())}\n\n".encode()
-
+        transport = "completed"
         yield f"event: done\ndata: {json.dumps({'invocation_id': invocation_id, 'session_id': session_id})}\n\n".encode()
+    except (asyncio.CancelledError, GeneratorExit):
+        if status not in {"completed", "failed", "rejected"}:
+            status, error_type = "cancelled", "cancelled"
+        raise
+    except Exception:
+        status, error_type = "failed", "execution_error"
+        raise RuntimeError("Could not run the IssueLens invocation.") from None
     finally:
-        unsubscribe()
         try:
-            await session.disconnect()
-        except Exception:  # pragma: no cover - best-effort cleanup
-            logger.debug("session.disconnect() failed", exc_info=True)
+            _unsubscribe_session(unsubscribe, run)
+            if session is not None:
+                with run.phase("session_close"):
+                    if not await _close_session(session):
+                        run.degraded("cleanup_failed")
+        finally:
+            run.finish(
+                status, stage=stage, error_type=error_type, transport_status=transport,
+            )
 
 
 @app.invoke_handler
 async def handle_invoke(request: Request) -> Response:
+    run = RunTelemetry(
+        _telemetry_backend, _telemetry_settings, "invocations",
+        identifiers={"invocation_id": request.state.invocation_id},
+    )
     try:
         data = await request.json()
         if not isinstance(data, dict):
@@ -636,6 +683,7 @@ async def handle_invoke(request: Request) -> Response:
             data.get("attachments")
         )
     except (json.JSONDecodeError, ValueError) as exc:
+        run.finish("rejected", stage="validation", error_type="invalid_input", transport_status="rejected")
         return JSONResponse(
             status_code=400,
             content={
@@ -657,8 +705,12 @@ async def handle_invoke(request: Request) -> Response:
                 },
             },
         )
+    except Exception:
+        run.finish("failed", stage="setup", error_type="configuration", transport_status="rejected")
+        raise RuntimeError("Could not initialize the IssueLens invocation.") from None
+    run.admit()
     return StreamingResponse(
-        _stream_response(request.state.invocation_id, data),
+        _stream_response(request.state.invocation_id, data, run),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
@@ -696,6 +748,7 @@ _GITHUB_APP_UNCONFIGURED = (
 
 # Copilot session id per conversation, so chat stays multi-turn.
 _chat_session_ids: dict[str, str] = {}
+_active_chat_conversations: set[str] = set()
 
 _toolbox_credential = None
 _toolbox_token: AccessToken | None = None
@@ -742,17 +795,29 @@ def _toolbox_mcp_server(endpoint: str, call_id: str | None) -> dict:
     }
 
 
-async def _close_session(session) -> None:
+async def _close_session(session) -> bool:
     try:
         await session.disconnect()
+        return True
     except Exception:  # pragma: no cover - best-effort cleanup
-        logger.debug("session.disconnect() failed", exc_info=True)
+        logger.warning("Copilot session cleanup failed")
+        return False
+
+
+def _unsubscribe_session(unsubscribe, run: RunTelemetry) -> None:
+    if unsubscribe is not None:
+        try:
+            unsubscribe()
+        except Exception:
+            logger.warning("Copilot observer cleanup failed")
+            run.degraded("cleanup_failed")
 
 
 async def _chat_session(
     conversation: str,
     mcp_servers: dict,
     runtime_tools: list[Tool],
+    run: RunTelemetry | None = None,
 ):
     """Open this conversation's Copilot session, resuming it when one exists.
 
@@ -766,8 +831,9 @@ async def _chat_session(
         try:
             return await client.resume_session(session_id, **options)
         except Exception:
-            logger.info(
-                "Could not resume session %s; starting a new one", session_id)
+            logger.info("Could not resume the chat session; starting a new one")
+            if run is not None:
+                run.degraded("resume_fallback")
 
     session = await client.create_session(**options)
     while len(_chat_session_ids) >= _MAX_CHAT_SESSIONS:
@@ -783,122 +849,178 @@ async def handle_chat(
     cancellation_signal: asyncio.Event,
 ):
     """Chat entry point — streams the agent's reply as Responses SSE events."""
-    stream = ResponseEventStream(
-        response_id=context.response_id, request=request)
-    yield stream.emit_created()
-    yield stream.emit_in_progress()
-
-    input_items = await context.get_input_items(resolve_references=True)
-    logger.info(
-        "responses.user_input_items=%s",
-        json.dumps(
-            redacted_input_items(input_items),
-            ensure_ascii=False,
-            default=str,
-        ),
+    run = RunTelemetry(
+        _telemetry_backend, _telemetry_settings, "responses",
+        identifiers={"response_id": context.response_id, "conversation_id": context.conversation_id},
     )
-
+    session = None
+    unsubscribe = None
+    cancellation_task = None
+    guarded_conversation = None
+    status, stage, transport = "cancelled", "setup", "interrupted"
+    error_type, no_action = "stream_interrupted", False
     try:
-        prompt, attachments = response_input(input_items)
-    except MediaInputError as exc:
-        logger.info("responses.media_input_rejected=%s", exc)
-        for event in stream.output_item_message(f"Unsupported attachment: {exc}"):
-            yield event
-        yield stream.emit_completed()
-        return
-
-    prompt = prompt.strip()
-    logger.info("responses.user_input_text=%s", json.dumps(prompt, ensure_ascii=False))
-    if not prompt:
-        if attachments:
-            prompt = _ATTACHMENT_ONLY_PROMPT
-        else:
-            for event in stream.output_item_message(_GREETING):
+        stream = ResponseEventStream(response_id=context.response_id, request=request)
+        yield stream.emit_created()
+        yield stream.emit_in_progress()
+        if cancellation_signal.is_set():
+            raise asyncio.CancelledError()
+        input_items = await context.get_input_items(resolve_references=True)
+        logger.info("Responses input received (%s items)", len(input_items))
+        try:
+            prompt, attachments = response_input(input_items)
+        except MediaInputError as exc:
+            status, stage, error_type = "rejected", "validation", "invalid_input"
+            logger.info("Responses media input rejected")
+            for event in stream.output_item_message(f"Unsupported attachment: {exc}"):
                 yield event
+            transport = "completed"
             yield stream.emit_completed()
             return
 
-    try:
-        request_github_client = _new_host_github_client()
-        github_mcp_server = _github_mcp_server()
-    except (ConfigurationError, GitHubAppError):
-        for event in stream.output_item_message(_GITHUB_APP_UNCONFIGURED):
-            yield event
+        prompt = prompt.strip()
+        if not prompt:
+            if attachments:
+                prompt = _ATTACHMENT_ONLY_PROMPT
+            else:
+                run.admit()
+                status, error_type, no_action = "completed", "", True
+                for event in stream.output_item_message(_GREETING):
+                    yield event
+                transport = "completed"
+                yield stream.emit_completed()
+                return
+
+        conversation = (
+            context.conversation_id
+            or context.platform_context.user_id_key
+            or _ANONYMOUS_CONVERSATION
+        )
+        if conversation in _active_chat_conversations or len(_active_chat_conversations) >= _MAX_CHAT_SESSIONS:
+            status, error_type = "rejected", "concurrent_turn"
+            for event in stream.output_item_message(
+                "A chat turn is already active or capacity is full. Wait for it to finish before retrying."
+            ):
+                yield event
+            transport = "completed"
+            yield stream.emit_completed()
+            return
+        _active_chat_conversations.add(conversation)
+        guarded_conversation = conversation
+        run.admit()
+        try:
+            request_github_client = _new_host_github_client()
+            github_mcp_server = _github_mcp_server()
+        except (ConfigurationError, GitHubAppError):
+            status, error_type = "failed", "configuration"
+            for event in stream.output_item_message(_GITHUB_APP_UNCONFIGURED):
+                yield event
+            transport = "completed"
+            yield stream.emit_completed()
+            return
+        request_config_tool = create_issuelens_config_tool(request_github_client)
+        try:
+            with run.phase("media_load"):
+                issue_attachments = await issue_image_attachments(
+                    prompt, request_github_client,
+                    maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
+                    on_issue_read=run.host_issue_read,
+                )
+        except GitHubAppError:
+            logger.info("Chat issue-body images could not be loaded")
+            run.degraded("media_unavailable")
+            issue_attachments = []
+        attachments = [*attachments, *issue_attachments]
+        toolbox_endpoint = os.environ.get(_TOOLBOX_ENDPOINT_ENV, "").strip()
+        mcp_servers = {"github": github_mcp_server}
+        if toolbox_endpoint:
+            mcp_servers["toolbox"] = _toolbox_mcp_server(
+                toolbox_endpoint, context.platform_context.call_id
+            )
+        with run.phase("session_open"):
+            session = await _chat_session(
+                conversation, mcp_servers, [*_NOTIFICATION_TOOLS, request_config_tool], run,
+            )
+        run.set_identifier("session_id", getattr(session, "session_id", None))
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_event(event):
+            run.observe(event)
+            data = event.data
+            if isinstance(data, AssistantMessageDeltaData):
+                queue.put_nowait(event)
+            elif isinstance(data, SessionIdleData):
+                queue.put_nowait(None)
+            elif event.type == SessionEventType.SESSION_ERROR:
+                queue.put_nowait(RuntimeError(getattr(data, "message", "error")))
+
+        async def watch_cancellation():
+            await cancellation_signal.wait()
+            queue.put_nowait(asyncio.CancelledError())
+
+        unsubscribe = session.on(on_event)
+        cancellation_task = asyncio.create_task(watch_cancellation())
+        message = stream.add_output_item_message()
+        yield message.emit_added()
+        text = message.add_text_content()
+        yield text.emit_added()
+        stage = "session"
+        try:
+            if cancellation_signal.is_set():
+                raise asyncio.CancelledError()
+            run.model_sent = True
+            with run.phase("session_send"):
+                await session.send(
+                    _responses_turn(prompt),
+                    attachments=attachments or None,
+                )
+            while True:
+                item = await queue.get()
+                if item is None:
+                    status, error_type = "completed", ""
+                    break
+                if isinstance(item, (Exception, asyncio.CancelledError)):
+                    raise item
+                if item.data.delta_content:
+                    run.visible_output(item)
+                    yield text.emit_delta(item.data.delta_content)
+        except Exception:
+            status, error_type = "failed", "execution_error"
+            _chat_session_ids.pop(conversation, None)
+            logger.warning("Chat session failed; discarded resumable session")
+            yield text.emit_delta("GitHub tool session failed. Start a new turn to retry.")
+
+        yield text.emit_text_done()
+        yield text.emit_done()
+        yield message.emit_done()
+        transport = "completed"
         yield stream.emit_completed()
-        return
-
-    request_config_tool = create_issuelens_config_tool(request_github_client)
-    try:
-        issue_attachments = await issue_image_attachments(
-            prompt,
-            request_github_client,
-            maximum_images=max(0, MAX_ATTACHMENTS - len(attachments)),
-        )
-    except GitHubAppError:
-        logger.info("Chat issue-body images could not be loaded")
-        issue_attachments = []
-    attachments = [*attachments, *issue_attachments]
-
-    conversation = (
-        context.conversation_id
-        or context.platform_context.user_id_key
-        or _ANONYMOUS_CONVERSATION
-    )
-    toolbox_endpoint = os.environ.get(_TOOLBOX_ENDPOINT_ENV, "").strip()
-    mcp_servers = {"github": github_mcp_server}
-    if toolbox_endpoint:
-        mcp_servers["toolbox"] = _toolbox_mcp_server(
-            toolbox_endpoint, context.platform_context.call_id
-        )
-    session = await _chat_session(
-        conversation,
-        mcp_servers,
-        [*_NOTIFICATION_TOOLS, request_config_tool],
-    )
-
-    queue: asyncio.Queue = asyncio.Queue()
-
-    def on_event(event):
-        data = event.data
-        if isinstance(data, AssistantMessageDeltaData):
-            queue.put_nowait(data.delta_content or "")
-        elif isinstance(data, SessionIdleData):
-            queue.put_nowait(None)
-        elif event.type == SessionEventType.SESSION_ERROR:
-            queue.put_nowait(RuntimeError(getattr(data, "message", "error")))
-
-    unsubscribe = session.on(on_event)
-    message = stream.add_output_item_message()
-    yield message.emit_added()
-    text = message.add_text_content()
-    yield text.emit_added()
-    try:
-        await session.send(
-            _responses_turn(prompt),
-            attachments=attachments or None,
-        )
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            if isinstance(item, Exception):
-                raise item
-            if item:
-                yield text.emit_delta(item)
+    except (asyncio.CancelledError, GeneratorExit):
+        if status not in {"completed", "failed", "rejected"}:
+            status, error_type = "cancelled", "cancelled"
+        if guarded_conversation is not None and status != "completed":
+            _chat_session_ids.pop(guarded_conversation, None)
+        raise
     except Exception:
-        _chat_session_ids.pop(conversation, None)
-        logger.info("Chat session failed; discarded resumable session", exc_info=True)
-        yield text.emit_delta(
-            "GitHub tool session failed. Start a new turn to retry."
-        )
+        status, error_type = "failed", "execution_error"
+        raise RuntimeError("Could not initialize the IssueLens chat turn.") from None
     finally:
-        unsubscribe()
-        await _close_session(session)
-
-    yield text.emit_text_done()
-    yield text.emit_done()
-    yield message.emit_done()
-    yield stream.emit_completed()
+        try:
+            _unsubscribe_session(unsubscribe, run)
+            if cancellation_task is not None:
+                cancellation_task.cancel()
+                await asyncio.gather(cancellation_task, return_exceptions=True)
+            if session is not None:
+                with run.phase("session_close"):
+                    if not await _close_session(session):
+                        run.degraded("cleanup_failed")
+        finally:
+            if guarded_conversation is not None:
+                _active_chat_conversations.discard(guarded_conversation)
+            run.finish(
+                status, stage=stage, error_type=error_type, no_action=no_action,
+                transport_status=transport,
+            )
 
 
 if __name__ == "__main__":
