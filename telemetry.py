@@ -640,8 +640,13 @@ class RunTelemetry:
             name, operation = _tool_name(data)
             args = _get(data, "arguments")
             repo = _repository(_get(args, "repository")) if operation in READ_TOOLS | WRITE_TOOLS | {"issuelens-config"} else None
-            number = _count(_get(args, "issue_number")) or _count(_get(args, "pull_number"))
-            target_kind = "pull_request" if _get(args, "pull_number") and operation in READ_TOOLS else "work_item"
+            if operation == "add_eyes_reaction":
+                reaction_kind = _get(args, "target_kind")
+                number = _count(_get(args, "target_id")) if reaction_kind in ("issue", "pull_request") else None
+                target_kind = reaction_kind if number else "work_item"
+            else:
+                number = _count(_get(args, "issue_number")) or _count(_get(args, "pull_number"))
+                target_kind = "pull_request" if _get(args, "pull_number") and operation in READ_TOOLS else "work_item"
             if repo and number:
                 target_kind = self.item_types.get((repo, number), target_kind)
             if repo:
@@ -816,7 +821,7 @@ class RunTelemetry:
             "tools_started": sum(agent.tools_started for agent in agents.values()),
             "tools_completed": sum(agent.tools_completed for agent in agents.values()),
             "tools_failed": sum(agent.tools_failed for agent in agents.values()),
-            "agents_started": max(0, len(agents) - 1),
+            "agents_started": sum(identity not in {"root", "unattributed"} for identity in agents),
             "write_operations_succeeded": self.write_operations,
             "notification_submissions": self.notification_submissions,
             "telemetry_incomplete": bool(self.quality),

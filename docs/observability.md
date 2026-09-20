@@ -152,6 +152,9 @@ runs cannot be assumed to be either issues or PRs.
 Wiki writes additionally require the tool's `updated` or `no-change` status;
 transport success with an unknown status is incomplete evidence, not a
 confirmed write.
+For `add_eyes_reaction`, `target_id` identifies an issue/PR number only when
+`target_kind` is `issue` or `pull_request`. Reactions to comments remain
+repository-level associations; their comment IDs are not issue/PR numbers.
 
 ## Logical schema and table scope
 
@@ -190,7 +193,8 @@ The terminal snapshot includes:
 | `model_request_sent` | Boolean indicating the host attempted to send the model turn; not proof the provider accepted it, nor a count of individual model API calls. Missing values remain unknown. |
 | `duration_s`, optional `first_root_output_s`, `first_final_output_s` | Host-observed elapsed seconds; missing observations stay null. |
 | `usage_status`, `usage_calls`, token fields and `<tokenfield>_calls` | Live usage observations and per-field coverage. Status: `complete`, `partial`, `unavailable`, `not_applicable`. |
-| `tools_started`, `tools_completed`, `tools_failed`, `agents_started`, `model_failures`, `model_retries` | Observed lifecycle counts, not inferred from model narration. |
+| `tools_started`, `tools_completed`, `tools_failed`, `model_failures`, `model_retries` | Observed lifecycle counts, not inferred from model narration. |
+| `agents_started` | Distinct tracked subagents, excluding the root and synthetic `unattributed` bucket. The bucket retains unknown usage, but is not a distinct observed subagent. |
 | `write_operations_succeeded`, `notification_submissions` | Confirmed operation/submission observations, not guaranteed state changes or downstream delivery. |
 | `attribution_complete`, `telemetry_incomplete`, `incomplete_<boundedreason>` | Ownership and collection quality; absent flags are unknown, not false. |
 | Optional `context_tokens_peak`, `context_token_limit` | Context pressure from `session.usage_info`, not billable token usage. |

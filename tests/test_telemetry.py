@@ -345,6 +345,7 @@ class TelemetryTests(unittest.TestCase):
         root = next(f for f in self.backend.facts("issuelens.run.agent") if f["role"] == "issuelens")
         self.assertNotIn("input_tokens", root)
         self.assertEqual(result["input_tokens"], 105)
+        self.assertEqual(result["agents_started"], 0)
         self.assertFalse(result["attribution_complete"])
         self.assertNotIn("PRIVATE@CANARY", str(self.backend.events))
 
@@ -361,6 +362,24 @@ class TelemetryTests(unittest.TestCase):
         self.assertLessEqual(len(self.run.agents), self.run.MAX_AGENTS)
         self.assertEqual(result["input_tokens"], 100)
         self.assertEqual(result["agents_started"], 1)
+
+    def test_overflow_usage_does_not_inflate_the_count_of_tracked_subagents(self):
+        self.run.MAX_AGENTS = 2
+        self.start_agent("task1", "plan", "worker")
+        self.run.observe(event("assistant.usage", {
+            "model": "gpt-test", "inputTokens": 10, "outputTokens": 2,
+        }, actor="worker"))
+        self.run.observe(event("assistant.usage", {
+            "model": "gpt-test", "inputTokens": 5, "outputTokens": 1,
+        }, actor="overflow"))
+        self.end_agent("task1", "plan", "worker")
+        result = self.complete()
+        self.assertEqual(result["agents_started"], 1)
+        self.assertEqual(result["input_tokens"], 15)
+        self.assertFalse(result["attribution_complete"])
+        bucket = next(fact for fact in self.backend.facts("issuelens.run.agent")
+                      if fact["agent_run_id"] == "unattributed")
+        self.assertEqual(bucket["input_tokens"], 5)
 
     def test_first_output_excludes_lifecycle_hidden_nested_and_empty_content(self):
         def message(identifier, phase, text, actor=None):
@@ -399,6 +418,50 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(len(facts), 3)
         self.assertEqual(next(f for f in facts if f["repository"] == "org/repo")["operations"], 2)
         self.assertEqual(next(f for f in facts if f["repository"] == "pr/repo")["target_kind"], "pull_request")
+
+    def test_reaction_targets_use_issue_and_pull_request_numbers(self):
+        expected = set()
+        for kind, number in (("issue", 42), ("pull_request", 43)):
+            self.run.observe(event("tool.execution_start", {
+                "toolCallId": kind, "toolName": "github-add_eyes_reaction",
+                "arguments": {"repository": "Org/Repo", "target_kind": kind, "target_id": number},
+            }))
+            self.tool_end(kind, id=999)
+            for relationship in ("attempted", "write_succeeded"):
+                expected.add(("org/repo", kind, number, relationship))
+        result = self.complete()
+        targets = self.backend.facts("issuelens.run.target")
+        self.assertEqual({
+            (fact["repository"], fact["target_kind"], fact["number"], fact["relationship"])
+            for fact in targets
+        }, expected)
+        self.assertTrue(all(fact["operations"] == 1 for fact in targets))
+        self.assertEqual(result["write_operations_succeeded"], 2)
+
+    def test_comment_reaction_ids_are_not_issue_or_pull_request_numbers(self):
+        for kind in ("issue_comment", "pull_request_review_comment"):
+            self.run.observe(event("tool.execution_start", {
+                "toolCallId": kind, "toolName": "github-add_eyes_reaction",
+                "arguments": {"repository": "Org/Repo", "target_kind": kind, "target_id": 98765},
+            }))
+            self.tool_end(kind, id=999)
+        result = self.complete()
+        targets = self.backend.facts("issuelens.run.target")
+        self.assertTrue(targets)
+        self.assertTrue(all(fact["target_kind"] == "repository" and fact["number"] == 0 for fact in targets))
+        self.assertEqual(result["write_operations_succeeded"], 2)
+
+    def test_failed_reaction_retains_typed_attempt_without_confirming_a_write(self):
+        self.run.observe(event("tool.execution_start", {
+            "toolCallId": "reaction", "toolName": "github-add_eyes_reaction",
+            "arguments": {"repository": "Org/Repo", "target_kind": "pull_request", "target_id": 42},
+        }))
+        self.tool_end("reaction", success=False)
+        result = self.complete()
+        target, = self.backend.facts("issuelens.run.target")
+        self.assertEqual((target["target_kind"], target["number"], target["relationship"]),
+                         ("pull_request", 42, "attempted"))
+        self.assertEqual(result["write_operations_succeeded"], 0)
 
     def test_search_results_do_not_count_individual_issues(self):
         self.run.observe(event("tool.execution_start", {
@@ -517,6 +580,7 @@ class TelemetryTests(unittest.TestCase):
         for reason in ("tool_limit", "target_limit", "message_limit", "model_limit", "agent_limit"):
             self.assertGreater(result[f"incomplete_{reason}"], 0, reason)
         self.assertEqual(result["input_tokens"], 305)
+        self.assertEqual(result["agents_started"], 0)
         self.assertTrue(result["telemetry_incomplete"])
 
     def test_unknown_agent_is_not_attributed_to_root(self):
@@ -526,6 +590,7 @@ class TelemetryTests(unittest.TestCase):
         root = next(f for f in self.backend.facts("issuelens.run.agent") if f["role"] == "issuelens")
         self.assertNotIn("input_tokens", root)
         self.assertEqual(result["input_tokens"], 5)
+        self.assertEqual(result["agents_started"], 1)
 
     def test_export_rejection_is_reported_without_raising(self):
         self.backend.reject_events = True
