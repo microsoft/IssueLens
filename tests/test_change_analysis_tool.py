@@ -18,9 +18,11 @@ from change_analysis import MAX_FOCUS_BYTES, AnalysisLimits
 from telemetry import RunTelemetry, Settings
 
 if __package__:
-    from .test_telemetry import RecordingBackend
+    from .test_change_analysis import HEAD, REPOSITORY, FakeModel, FakeSource
+    from .test_telemetry import Clock, RecordingBackend
 else:
-    from test_telemetry import RecordingBackend
+    from test_change_analysis import HEAD, REPOSITORY, FakeModel, FakeSource
+    from test_telemetry import Clock, RecordingBackend
 
 
 SECRET = "PRIVATE-DIFF-CANARY"
@@ -299,6 +301,111 @@ class ChangeAnalysisToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.client.stops, 1)
         self.assertTrue(all(not pathlib.Path(path).exists() for path in self.directories))
         self.assertEqual(self.service.tasks, set())
+
+    async def test_controller_budget_excludes_queue_runtime_and_mcp_setup(self):
+        for reader_seconds, expected_budget in ((30, 40), (70, None)):
+            with self.subTest(reader_seconds=reader_seconds):
+                clock = Clock()
+                factory = self.service.client_factory
+
+                @asynccontextmanager
+                async def slot():
+                    clock.value += 10
+                    yield
+
+                async def start_runtime(directory):
+                    clock.value += 40
+                    return await factory(directory)
+
+                @asynccontextmanager
+                async def reader(server, run):
+                    clock.value += reader_seconds
+                    yield self.read
+
+                report = {"status": "complete", "repository": "owner/repo"}
+                analyze = AsyncMock(return_value=report)
+                with (
+                    patch.object(bridge, "time", SimpleNamespace(monotonic=clock)),
+                    patch.object(bridge, "_analysis_slots", slot()),
+                    patch.object(bridge, "analyze_change", new=analyze),
+                ):
+                    service = bridge.ChangeAnalysisService(
+                        SERVER, start_runtime, self.run, reader_factory=reader,
+                        limits=AnalysisLimits(max_seconds=120),
+                    )
+                    self.addAsyncCleanup(service.close)
+                    response = await service.tool().handler(ToolInvocation(arguments={
+                        "repository": "owner/repo", "commit_sha": HEAD,
+                    }))
+                if expected_budget is None:
+                    self.assertEqual(response.error, "analysis_failed")
+                    analyze.assert_not_awaited()
+                else:
+                    self.assertEqual(response.result_type, "success")
+                    analyze.assert_awaited_once()
+                    self.assertEqual(analyze.call_args.kwargs["limits"].max_seconds, expected_budget)
+        self.assertEqual(self.client.stops, 2)
+        self.assertTrue(all(not pathlib.Path(path).exists() for path in self.directories))
+
+    async def test_controller_deadline_preserves_partial_results_after_setup(self):
+        source = FakeSource({"reviewed.py": "+reviewed\n", "waiting.py": "+waiting\n"})
+        model = FakeModel()
+        cancelled = asyncio.Event()
+        reader_closed = asyncio.Event()
+        factory = self.service.client_factory
+
+        class MappingSession(WorkerSession):
+            async def send_and_wait(self, prompt, *, timeout):
+                await super().send_and_wait(prompt, timeout=timeout)
+                report = await model(json.loads(prompt)["phase"], prompt)
+                return SimpleNamespace(data=SimpleNamespace(content=report))
+
+        session = MappingSession()
+        self.client.sessions = [session]
+
+        async def start_runtime(directory):
+            await asyncio.sleep(0.05)
+            return await factory(directory)
+
+        async def read(name, arguments):
+            if name == "read_diff_chunk" and arguments["path"] == "waiting.py":
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            return await source(name, arguments)
+
+        @asynccontextmanager
+        async def reader(server, run):
+            await asyncio.sleep(0.05)
+            try:
+                yield read
+            finally:
+                await asyncio.sleep(0.03)
+                reader_closed.set()
+
+        service = bridge.ChangeAnalysisService(
+            SERVER, start_runtime, self.run, reader_factory=reader,
+            limits=AnalysisLimits(max_seconds=0.4, concurrency=1),
+        )
+        self.addAsyncCleanup(service.close)
+        response = await asyncio.wait_for(service.tool().handler(ToolInvocation(arguments={
+            "repository": REPOSITORY, "commit_sha": HEAD,
+        })), timeout=2)
+        self.assertEqual(response.result_type, "success", response.text_result_for_llm)
+        result = json.loads(response.text_result_for_llm)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["coverage"]["files_reviewed"], 1)
+        self.assertEqual(result["coverage"]["chunks_reviewed"], 1)
+        self.assertIn("deadline_exceeded", result["coverage"]["unresolved_by_code"])
+        self.assertEqual(result["findings"][0]["citations"][0]["path"], "reviewed.py")
+        self.assertTrue(cancelled.is_set())
+        self.assertTrue(reader_closed.is_set())
+        self.assertEqual((session.aborts, session.disconnects), (0, 1))
+        self.assertEqual(self.client.stops, 1)
+        self.assertTrue(all(not pathlib.Path(path).exists() for path in self.directories))
+        fact, = self.backend.facts("issuelens.analysis.completed")
+        self.assertEqual(fact["status"], "partial")
 
     async def test_host_admission_precedes_runtime_start_and_queue_uses_deadline(self):
         entered = asyncio.Event()

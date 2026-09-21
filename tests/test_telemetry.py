@@ -220,6 +220,33 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(result["input_tokens"], 100)
         self.assertEqual(result["incomplete_analysis_usage_unavailable"], 1)
 
+    def test_worker_usage_does_not_mask_missing_root_usage(self):
+        self.run.analysis_worker_start("analysis:worker", "map")
+        self.run.analysis_worker_sent("analysis:worker")
+        self.run.analysis_worker_event("analysis:worker", self.usage())
+        self.run.analysis_worker_finish("analysis:worker", success=True)
+        result = self.complete()
+        self.assertEqual(result["usage_status"], "partial")
+        self.assertEqual(result["usage_calls"], 1)
+        self.assertEqual((result["input_tokens"], result["output_tokens"]), (100, 20))
+        self.assertEqual(self.run.root.usage.calls, 0)
+        worker, = self.backend.facts("issuelens.analysis.worker")
+        self.assertEqual(worker["usage_calls"], 1)
+
+    def test_worker_and_observed_zero_root_usage_are_complete(self):
+        self.run.analysis_worker_start("analysis:worker", "map")
+        self.run.analysis_worker_sent("analysis:worker")
+        self.run.analysis_worker_event("analysis:worker", self.usage(apiCallId="shared-id"))
+        self.run.analysis_worker_finish("analysis:worker", success=True)
+        self.run.observe(self.usage(apiCallId="shared-id", inputTokens=0, outputTokens=0))
+        result = self.complete()
+        self.assertEqual(result["usage_status"], "complete")
+        self.assertEqual(result["usage_calls"], 2)
+        self.assertEqual((result["input_tokens"], result["output_tokens"]), (100, 20))
+        self.assertEqual(result["input_tokens_calls"], 2)
+        self.assertEqual(result["output_tokens_calls"], 2)
+        self.assertEqual(self.run.root.usage.calls, 1)
+
     def test_actual_sdk_events_use_timedelta_timing(self):
         self.clock.value = 3
         self.run.observe(SessionEvent(

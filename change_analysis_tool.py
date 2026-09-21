@@ -289,17 +289,24 @@ class ChangeAnalysisService:
             remaining = self.deadline - time.monotonic()
             if remaining <= 0:
                 raise AnalysisRuntimeError("analysis_deadline")
-            limits = replace(self.limits, max_seconds=min(remaining, self.limits.max_seconds))
-            async with asyncio.timeout(remaining):
+            async with asyncio.timeout(remaining) as setup_timeout:
                 async with _analysis_slots:
                     remaining = self.deadline - time.monotonic()
                     if remaining <= 0:
                         raise AnalysisRuntimeError("analysis_deadline")
-                    limits = replace(limits, max_seconds=min(remaining, limits.max_seconds))
                     with tempfile.TemporaryDirectory(prefix="issuelens-analysis-") as directory:
                         client, provider, model = await self.client_factory(directory)
                         try:
                             async with self.reader_factory(self.server, self.run) as read:
+                                remaining = self.deadline - time.monotonic()
+                                if remaining <= 0:
+                                    raise AnalysisRuntimeError("analysis_deadline")
+                                limits = replace(
+                                    self.limits, max_seconds=min(remaining, self.limits.max_seconds),
+                                )
+                                # The controller owns timeout recovery and preserves partial coverage.
+                                setup_timeout.reschedule(None)
+
                                 async def complete(phase: str, prompt: str) -> str:
                                     return await complete_batch(
                                         client, provider, model, self.run, phase, prompt, limits,

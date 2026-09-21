@@ -270,7 +270,7 @@ Default controller limits are defined in `AnalysisLimits` in
 
 | Boundary | Default limit |
 | --- | --- |
-| Analysis time | 900 seconds, shared by at most two analysis attempts per turn; queue time counts |
+| Analysis time | 900 seconds, shared by at most two analysis attempts per turn; queue and setup time count |
 | Individual model call | 120 seconds |
 | Worker input | 8,000 UTF-8 bytes including a 1,024-byte fixed-context reserve |
 | `focus` guidance | 768 ASCII JSON-encoded bytes, including quotes and escapes; rejected before worker startup |
@@ -283,6 +283,8 @@ Default controller limits are defined in `AnalysisLimits` in
 The input/output byte budgets are conservative admission bounds, not measured
 token counts or cost estimates. Unknown output from failed attempts consumes a
 reserved allowance. Reducers combine 2-8 size-checked reports, never raw diffs.
+After runtime and MCP setup, the controller receives only the remaining turn
+budget and owns timeout recovery, preserving partial findings and coverage.
 Deadlines are cooperative; cleanup may extend past the analysis deadline.
 
 The underlying readers support blobs up to 4 MiB and explicitly report binary

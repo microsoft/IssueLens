@@ -991,7 +991,7 @@ class RunTelemetry:
         duration = max(0, self.clock() - self.started)
         usage_status = "not_applicable" if not self.model_sent else "unavailable"
         if self.usage.calls:
-            usage_status = "complete" if all(
+            usage_status = "complete" if self.root.usage.calls and all(
                 self.usage.present.get(name) == self.usage.calls for name in ("input_tokens", "output_tokens")
             ) and not self.model_failures and not any(
                 reason in self.quality for reason in {

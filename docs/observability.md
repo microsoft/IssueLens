@@ -70,6 +70,9 @@ worker summaries, and continuation payloads are excluded from telemetry.
 Observed usage is not a cost estimate; missing SDK usage remains missing.
 An attempted worker without observed usage marks `analysis_usage_unavailable`
 and prevents the parent run from claiming complete usage coverage.
+Complete run usage also requires a root-agent usage observation. Worker or
+subagent usage alone remains partial, retaining observed token totals without
+masking missing parent-model accounting.
 
 The separate native Copilot CLI exporter is disabled
 to avoid duplicate telemetry. A CLI OTLP/collector route is follow-on work, not
