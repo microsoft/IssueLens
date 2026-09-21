@@ -39,6 +39,11 @@ in `azure.yaml`, as appropriate for the deployment path:
   value: release-2026-09
 ```
 
+Complete run usage requires a root-agent usage observation. Subagent usage
+alone remains partial, retaining observed token totals without masking missing
+parent-model accounting. An explicitly observed zero-token root call counts as
+an observation; absent usage is not zero.
+
 The separate native Copilot CLI exporter is disabled
 to avoid duplicate telemetry. A CLI OTLP/collector route is follow-on work, not
 an additional prerequisite or an already-verified integration. This MVP does

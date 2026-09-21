@@ -29,6 +29,7 @@ _API_VERSION = "2026-03-10"
 _MAX_RESULT_BYTES = 100_000
 _MAX_WIKI_RESULT_BYTES = 6 * 64 * 1024 + 4096
 _MAX_HTTP_RESPONSE_BYTES = 128 * 1024
+_MAX_COMMIT_HTTP_RESPONSE_BYTES = 1024 * 1024
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_QUERY_CHARS = 512
 _MAX_SEARCH_FILES = 64
@@ -59,6 +60,7 @@ _GITHUB_REDIRECT_HOST_PATTERN = re.compile(
 _SEARCH_QUALIFIER = re.compile(
     r"(?i)(?:^|[^A-Za-z0-9_])[-+]?[A-Za-z][A-Za-z0-9_-]*:"
 )
+CommitDetail = Literal["none", "stats", "full_patch"]
 ReactionTarget = Literal[
     "issue",
     "pull_request",
@@ -348,7 +350,7 @@ class GitHubClient:
             "GET", repository,
             f"/pulls/{_positive(pull_number, 'pull_number')}/files",
             permissions={"pull_requests": "read"},
-            params=_pagination(per_page, page),
+            params=_pagination(per_page, page, max_page=3000),
         )
 
     async def list_pull_request_commits(
@@ -381,10 +383,18 @@ class GitHubClient:
             params=_pagination(per_page, page),
         )
 
-    async def get_commit(self, repository: str, sha: str) -> Any:
+    async def get_commit(
+        self, repository: str, sha: str, *,
+        detail: CommitDetail = "stats", per_page: int = 30, page: int = 1,
+    ) -> Any:
+        """Read one commit file page, omitting patches unless explicitly requested."""
+        if detail not in ("none", "stats", "full_patch"):
+            raise GitHubAppError("detail must be none, stats, or full_patch")
         return await self._request(
             "GET", repository, f"/commits/{_sha(sha)}",
             permissions={"contents": "read"},
+            params=_pagination(per_page, page, max_page=3000),
+            _commit_detail=detail,
         )
 
     async def compare_commits(self, repository: str, base: str, head: str) -> Any:
@@ -456,19 +466,16 @@ class GitHubClient:
         except GitHubAppError:
             credential = None
         content_read_auth = _ContentReadAuth(repository, credential)
-        commit = await self._request(
-            "GET", repository, f"/commits/{quote(ref, safe='')}",
-            permissions={"contents": "read"}, content_read_auth=content_read_auth,
-            _client=client,
+        commit = await self._resolve_search_commit(
+            repository, ref, content_read_auth=content_read_auth, client=client,
         )
         if (
             not isinstance(commit, Mapping)
-            or not isinstance(commit.get("commit"), Mapping)
-            or not isinstance(commit["commit"].get("tree"), Mapping)
+            or not isinstance(commit.get("tree"), Mapping)
         ):
             raise GitHubAppError("GitHub returned an invalid search commit")
         resolved_ref = _search_oid(commit.get("sha"))
-        tree_sha = _search_oid(commit["commit"]["tree"].get("sha"))
+        tree_sha = _search_oid(commit["tree"].get("sha"))
         if _SEARCH_OID_PATTERN.fullmatch(ref) and ref.lower() != resolved_ref:
             raise GitHubAppError("GitHub returned a different search commit")
         tree = await self._request(
@@ -551,6 +558,79 @@ class GitHubClient:
         if len(json.dumps(result, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
             raise GitHubAppError("GitHub search result is too large; reduce per_page")
         return result
+
+    async def _resolve_search_commit(
+        self, repository: str, ref: str, *,
+        content_read_auth: _ContentReadAuth, client: httpx.AsyncClient,
+    ) -> Any:
+        """Resolve branches/tags without ever requesting patch-bearing commits."""
+        async def read(path: str, params: Mapping[str, Any] | None = None) -> Any:
+            return await self._request(
+                "GET", repository, path, permissions={"contents": "read"},
+                content_read_auth=content_read_auth, _client=client, params=params,
+            )
+
+        if _SEARCH_OID_PATTERN.fullmatch(ref):
+            return await read(f"/git/commits/{ref.lower()}")
+        if ref == "HEAD":
+            metadata = await read("")
+            if not isinstance(metadata, Mapping):
+                raise GitHubAppError("GitHub returned invalid repository metadata")
+            ref = _ref(metadata.get("default_branch"))
+        if ref.startswith(("refs/heads/", "refs/tags/")):
+            candidates = [ref.removeprefix("refs/")]
+        else:
+            candidates = [f"heads/{ref}", f"tags/{ref}"]
+        reference = None
+        for index, candidate in enumerate(candidates):
+            namespace, name = candidate.split("/", 1)
+            try:
+                reference = await read(f"/git/ref/{namespace}/{quote(name, safe='')}")
+            except GitHubAppError as error:
+                cause = error.__cause__
+                if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 404:
+                    if index + 1 < len(candidates):
+                        continue
+                    if re.fullmatch(r"[0-9a-fA-F]{7,39}", ref):
+                        # The one-item commit *list* is metadata-only, unlike
+                        # /commits/{ref}; retain legacy abbreviated-SHA inputs.
+                        commits = await read("/commits", {"sha": ref, "per_page": 1})
+                        if not isinstance(commits, list) or len(commits) != 1 or not isinstance(commits[0], Mapping):
+                            raise GitHubAppError("GitHub returned invalid search commit metadata")
+                        resolved = _search_oid(commits[0].get("sha"))
+                        if not resolved.startswith(ref.lower()):
+                            raise GitHubAppError("GitHub returned a different search commit")
+                        reference = {"object": {"type": "commit", "sha": resolved}}
+                        break
+                raise
+            if (
+                not isinstance(reference, Mapping)
+                or reference.get("ref") != f"refs/{candidate}"
+                or not isinstance(reference.get("object"), Mapping)
+            ):
+                raise GitHubAppError("GitHub returned an invalid search ref")
+            break
+        target = reference["object"]
+        seen = set()
+        for _ in range(9):
+            sha = _search_oid(target.get("sha"))
+            kind = target.get("type")
+            if kind == "commit":
+                commit = await read(f"/git/commits/{sha}")
+                if not isinstance(commit, Mapping) or _search_oid(commit.get("sha")) != sha:
+                    raise GitHubAppError("GitHub returned a different search commit")
+                return commit
+            if kind != "tag" or sha in seen or len(seen) >= 8:
+                raise GitHubAppError("Search ref does not resolve to a commit within the tag limit")
+            seen.add(sha)
+            tag = await read(f"/git/tags/{sha}")
+            if (
+                not isinstance(tag, Mapping) or _search_oid(tag.get("sha")) != sha
+                or not isinstance(tag.get("object"), Mapping)
+            ):
+                raise GitHubAppError("GitHub returned an invalid search tag")
+            target = tag["object"]
+        raise GitHubAppError("Search ref exceeds the tag resolution limit")
 
     async def list_merged_pull_requests(
         self, repository: str, *, base: str, since: str | None = None,
@@ -945,6 +1025,7 @@ class GitHubClient:
         write: bool = False,
         content_read_auth: _ContentReadAuth | None = None,
         _client: httpx.AsyncClient | None = None,
+        _commit_detail: CommitDetail | None = None,
     ) -> Any:
         repository = self._authorize(repository, write=write)
         if _client is not None and content_read_auth is None:
@@ -1005,9 +1086,13 @@ class GitHubClient:
                 ) as response:
                     response.raise_for_status()
                     content = bytearray()
+                    limit = (
+                        _MAX_COMMIT_HTTP_RESPONSE_BYTES
+                        if _commit_detail is not None else _MAX_HTTP_RESPONSE_BYTES
+                    )
                     async for chunk in response.aiter_bytes():
                         content.extend(chunk)
-                        if len(content) > _MAX_HTTP_RESPONSE_BYTES:
+                        if len(content) > limit:
                             raise GitHubAppError(
                                 "GitHub response is too large; narrow the request"
                             )
@@ -1031,6 +1116,20 @@ class GitHubClient:
         except (httpx.HTTPError, ValueError) as error:
             raise GitHubAppError("GitHub API request failed") from error
 
+        if _commit_detail is not None:
+            if not isinstance(payload, dict):
+                raise GitHubAppError("GitHub returned an invalid commit")
+            if _commit_detail == "none":
+                payload.pop("stats", None)
+                payload.pop("files", None)
+            elif _commit_detail == "stats":
+                files = payload.get("files")
+                if not isinstance(files, list) or any(not isinstance(item, dict) for item in files):
+                    raise GitHubAppError("GitHub returned an invalid commit file list")
+                payload["files"] = [
+                    {key: value for key, value in item.items() if key != "patch"}
+                    for item in files
+                ]
         if len(json.dumps(payload, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
             raise GitHubAppError("GitHub response is too large; narrow the request")
         return payload
@@ -1087,11 +1186,11 @@ def _search_line_matches(text: str, query: str) -> list[dict[str, Any]]:
     return matches
 
 
-def _pagination(per_page: int, page: int) -> dict[str, int]:
+def _pagination(per_page: int, page: int, *, max_page: int = 100) -> dict[str, int]:
     if type(per_page) is not int or not 1 <= per_page <= 100:
         raise GitHubAppError("per_page must be an integer from 1 to 100")
-    if type(page) is not int or not 1 <= page <= 100:
-        raise GitHubAppError("page must be an integer from 1 to 100")
+    if type(page) is not int or not 1 <= page <= max_page:
+        raise GitHubAppError(f"page must be an integer from 1 to {max_page}")
     return {"per_page": per_page, "page": page}
 
 

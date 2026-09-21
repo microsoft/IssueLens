@@ -125,6 +125,33 @@ class TelemetryTests(unittest.TestCase):
         model, = self.backend.facts("issuelens.run.model")
         self.assertEqual(model["input_tokens"], 200)
 
+    def test_subagent_usage_does_not_mask_missing_root_usage(self):
+        self.start_agent("task1", "triage", "child")
+        self.run.observe(event("assistant.usage", {
+            "model": "gpt-test", "inputTokens": 100, "outputTokens": 20,
+        }, actor="child"))
+        self.end_agent("task1", "triage", "child")
+        result = self.complete()
+        self.assertEqual(result["usage_status"], "partial")
+        self.assertEqual(result["usage_calls"], 1)
+        self.assertEqual((result["input_tokens"], result["output_tokens"]), (100, 20))
+        self.assertEqual(self.run.root.usage.calls, 0)
+
+    def test_subagent_and_observed_zero_root_usage_are_complete(self):
+        self.start_agent("task1", "triage", "child")
+        self.run.observe(event("assistant.usage", {
+            "apiCallId": "shared-id", "model": "gpt-test", "inputTokens": 100, "outputTokens": 20,
+        }, actor="child"))
+        self.end_agent("task1", "triage", "child")
+        self.run.observe(self.usage(apiCallId="shared-id", inputTokens=0, outputTokens=0))
+        result = self.complete()
+        self.assertEqual(result["usage_status"], "complete")
+        self.assertEqual(result["usage_calls"], 2)
+        self.assertEqual((result["input_tokens"], result["output_tokens"]), (100, 20))
+        self.assertEqual(result["input_tokens_calls"], 2)
+        self.assertEqual(result["output_tokens_calls"], 2)
+        self.assertEqual(self.run.root.usage.calls, 1)
+
     def test_actual_sdk_events_use_timedelta_timing(self):
         self.clock.value = 3
         self.run.observe(SessionEvent(

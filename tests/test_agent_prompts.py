@@ -7,6 +7,25 @@ ROOT = pathlib.Path(__file__).parents[1]
 
 
 class AgentPromptTests(unittest.TestCase):
+    def test_change_analysis_is_read_only_and_preserves_job_ownership(self):
+        skill = (ROOT / "skills" / "change-analysis" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("ordinary tool/model turns", skill)
+        self.assertIn("list_pull_request_files", skill)
+        self.assertIn('get_commit(detail="full_patch", per_page=1, page=1)', skill)
+        self.assertIn("restart at `page=1`", skill)
+        self.assertIn("re-read PR metadata", skill)
+        self.assertIn("unsupported content", skill)
+        self.assertIn("does not change role ownership", skill)
+        self.assertIn("itself authorizes no write", skill)
+        self.assertIn("multi-commit rebase merge", skill)
+        self.assertIn("not automatically the whole PR", skill)
+        for name in ("triage", "plan", "team-memory"):
+            prompt = (ROOT / "agents" / f"{name}.md").read_text(encoding="utf-8")
+            self.assertIn("change-analysis", prompt)
+        global_prompt = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8")
+        self.assertIn("not a new job owner", global_prompt)
+        self.assertIn("existing bundled GitHub MCP reads", global_prompt)
+
     def test_runtime_prompt_is_separate_from_contributor_instructions(self):
         self.assertTrue((ROOT / "agents" / "issuelens.md").is_file())
         self.assertFalse(any(

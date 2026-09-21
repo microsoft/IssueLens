@@ -74,7 +74,15 @@ access:
 
 With a supplied `ref`, `search_repository_content` scans an immutable snapshot:
 at most 64 regular files, 256 KiB of eligible content (64 KiB per file), and
-66 content API requests (one commit, one tree, and up to 64 blobs). App
+66 content API requests for a full SHA (one lightweight `/git/commits` object,
+one tree, and up to 64 blobs). Branch/tag inputs resolve through fixed
+`/git/ref/heads`, `/git/ref/tags`, and at most eight `/git/tags` reads before the
+immutable commit-object read: at most ten additional requests, still inside
+the same scan deadline. `HEAD` first reads the repository's default branch.
+Search never downloads the patch-bearing `/commits/{ref}` response.
+Abbreviated SHA inputs remain supported using a bounded, metadata-only
+one-item commit list after branch/tag lookup misses, then the full Git commit
+object; this is not the patch-bearing commit-detail endpoint. App
 authentication lookup/minting is performed once per scan; initial authentication
 overhead is additional and is not counted in those 66 content requests. One
 HTTP client is reused for all content requests in a scan, never shared across
@@ -87,6 +95,48 @@ result is retained only for that scan; no negative authentication cache survives
 the scan. Anonymous fallback remains read-only and never authorizes writes.
 Without `ref`, search uses GitHub's indexed default-branch code search with its
 existing single-request 30-second HTTP timeout, not the scan budget.
+
+### Paged PR and commit reads
+
+Large changes use existing tools and ordinary Copilot tool/model turns, not
+custom diff readers or an analysis runtime.
+
+`get_commit(repository, sha, detail="stats", per_page=30, page=1)` adopts the
+[official GitHub MCP detail semantics](https://github.com/github/github-mcp-server/blob/85598ba6e1256f7ebf4867b95d63b833c4549264/pkg/github/repositories.go#L29-L126):
+
+- `none`: omit `files` and aggregate `stats`.
+- `stats` (the new default): keep file metadata but omit every `patch`.
+- `full_patch`: include available patches; request small pages for large changes.
+
+IssueLens retains its `repository` and snake-case pagination parameters, SHA
+validation, and REST commit metadata including parents and tree identity.
+This is supported control alignment, not drop-in compatibility with every
+upstream tool or response projection. Existing callers needing patches must
+now explicitly request `full_patch`. Aggregate commit stats describe the
+commit, not an individual page; do not add them again for every page.
+
+Commit-detail downloads have a **1 MiB** streamed HTTP ceiling so metadata
+projection can process responses above the ordinary **128 KiB** HTTP limit.
+Projection precedes the unchanged **100,000-byte ASCII JSON result ceiling**.
+Other REST tools retain their existing limits. Oversized input or output
+fails explicitly; no file or patch is silently truncated to fit.
+
+`list_pull_request_files` keeps its list response and includes available
+patches. Reduce `per_page` after a size error, down to 1. When changing page
+size, restart at page 1 and deduplicate after confirming source identity;
+otherwise the changed offsets can omit files. Both file pagers accept
+`per_page=1..100` and `page=1..3000`, allowing small pages beyond the ordinary
+100-page limit. Empty or short pages end enumeration, but GitHub still caps
+each inventory at 3,000 files. PR commit lists have a separate 250-commit cap;
+`compare_commits` exposes at most 300 files and has no pagination here.
+
+PR file pages cannot be pinned to a SHA. The capability skill checks PR
+base/head SHAs and changed-file counts before and after paging, and requires
+re-establishing evidence if they changed. Commit pages and `get_file` context
+reads should use full verified SHAs. Missing patches, binary content,
+oversized individual files, and API caps remain explicit limitations.
+`get_file` still supports only bounded UTF-8 files up to 64 KiB; no automatic
+resource-link download or arbitrary range-read support is implied.
 
 Wiki tools always take `repository` as the **source project**, even when its
 memory is stored in another repository's wiki. The shared package policy parser

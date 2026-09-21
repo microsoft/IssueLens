@@ -143,6 +143,141 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(self.provider.calls[-1], ("microsoft/IssueLens", {"contents": "read"}))
 
+    def commit_client(self, patch="+new\n", *, file_count=1):
+        payload = {
+            "sha": "a" * 40,
+            "commit": {"message": "Change source", "tree": {"sha": "b" * 40}},
+            "parents": [{"sha": "c" * 40}],
+            "stats": {"additions": file_count, "deletions": 0, "total": file_count},
+            "files": [{
+                "sha": "d" * 40, "filename": f"src/file-{index}.py",
+                "status": "modified", "additions": 1, "deletions": 0, "changes": 1,
+                "patch": patch,
+            } for index in range(file_count)],
+        }
+
+        def handler(request):
+            self.requests.append(request)
+            return httpx.Response(200, json=payload)
+
+        return GitHubClient(self.provider, transport=httpx.MockTransport(handler)), payload
+
+    async def test_commit_defaults_to_stats_without_losing_source_identity(self):
+        client, payload = self.commit_client()
+        result = await client.get_commit("microsoft/IssueLens", payload["sha"])
+        self.assertEqual(result["sha"], payload["sha"])
+        self.assertEqual(result["parents"], payload["parents"])
+        self.assertEqual(result["commit"]["tree"], payload["commit"]["tree"])
+        self.assertEqual(result["stats"], payload["stats"])
+        self.assertEqual(result["files"], [{
+            key: value for key, value in payload["files"][0].items() if key != "patch"
+        }])
+        self.assertEqual(dict(self.requests[0].url.params), {"per_page": "30", "page": "1"})
+        self.assertEqual(self.provider.calls, [("microsoft/IssueLens", {"contents": "read"})])
+
+    async def test_commit_none_and_full_patch_keep_the_requested_detail(self):
+        client, payload = self.commit_client()
+        for detail in ("none", "stats", "full_patch"):
+            with self.subTest(detail=detail):
+                result = await client.get_commit(
+                    "microsoft/IssueLens", payload["sha"], detail=detail, per_page=1, page=2,
+                )
+                self.assertEqual(dict(self.requests[-1].url.params), {"per_page": "1", "page": "2"})
+                self.assertEqual(result["parents"], payload["parents"])
+                if detail == "none":
+                    self.assertNotIn("files", result)
+                    self.assertNotIn("stats", result)
+                elif detail == "stats":
+                    self.assertNotIn("patch", result["files"][0])
+                else:
+                    self.assertEqual(result, payload)
+        self.assertEqual(len(self.requests), 3)
+
+    async def test_commit_projection_handles_large_transport_without_enlarging_model_results(self):
+        client, payload = self.commit_client("+source\n" * 10000, file_count=5)
+        self.assertGreater(len(json.dumps(payload).encode()), 128 * 1024)
+        for detail in ("none", "stats"):
+            with self.subTest(detail=detail):
+                result = await client.get_commit("microsoft/IssueLens", payload["sha"], detail=detail)
+                self.assertLess(len(json.dumps(result, ensure_ascii=True).encode()), 100_000)
+                self.assertNotIn("+source", json.dumps(result))
+        with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await client.get_commit("microsoft/IssueLens", payload["sha"], detail="full_patch")
+        with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await client.get_repository("microsoft/IssueLens")
+
+    async def test_commit_download_stays_bounded_even_when_files_are_omitted(self):
+        client, payload = self.commit_client("x" * (1024 * 1024 + 1))
+        with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await client.get_commit("microsoft/IssueLens", payload["sha"], detail="none")
+
+    async def test_commit_patch_budget_counts_json_escapes(self):
+        client, payload = self.commit_client("\u00e9" * 20000)
+        with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await client.get_commit("microsoft/IssueLens", payload["sha"], detail="full_patch")
+        stats = await client.get_commit("microsoft/IssueLens", payload["sha"])
+        self.assertNotIn("patch", stats["files"][0])
+
+    async def test_commit_controls_are_validated_before_authentication(self):
+        cases = [
+            {"detail": "diff"}, {"detail": None}, {"detail": []},
+            {"per_page": 0}, {"per_page": 101}, {"per_page": True},
+            {"page": 0}, {"page": 3001}, {"page": True},
+        ]
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(GitHubAppError):
+                    await self.client().get_commit("microsoft/IssueLens", "a" * 40, **arguments)
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.requests, [])
+
+    async def test_file_pagination_supports_small_pages_beyond_the_old_page_limit(self):
+        client, payload = self.commit_client()
+        await client.get_commit("microsoft/IssueLens", payload["sha"], per_page=1, page=3000)
+        await client.list_pull_request_files("microsoft/IssueLens", 34, per_page=1, page=3000)
+        self.assertTrue(all(request.url.params["page"] == "3000" for request in self.requests))
+        with self.assertRaisesRegex(GitHubAppError, "page"):
+            await client.list_pull_request_files("microsoft/IssueLens", 34, per_page=1, page=3001)
+        with self.assertRaisesRegex(GitHubAppError, "page"):
+            await client.list_issues("microsoft/IssueLens", page=101)
+        self.assertEqual(len(self.requests), 2)
+
+    async def test_large_pr_patches_are_readable_through_existing_single_file_pages(self):
+        files = [{
+            "filename": f"src/file-{index}.py", "status": "modified",
+            "patch": "+source line\n" * (6000 if index == 0 else 1000),
+        } for index in range(23)]
+
+        def handler(request):
+            self.requests.append(request)
+            self.assertEqual(request.url.path, "/repos/microsoft/IssueLens/pulls/34/files")
+            per_page, page = int(request.url.params["per_page"]), int(request.url.params["page"])
+            start = (page - 1) * per_page
+            return httpx.Response(200, json=files[start:start + per_page])
+
+        client = GitHubClient(self.provider, transport=httpx.MockTransport(handler))
+        with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await client.list_pull_request_files("microsoft/IssueLens", 34)
+        collected = []
+        for page in range(1, len(files) + 2):
+            result = await client.list_pull_request_files("microsoft/IssueLens", 34, per_page=1, page=page)
+            self.assertLessEqual(len(json.dumps(result, ensure_ascii=True).encode()), 100_000)
+            collected.extend(result)
+        self.assertEqual(result, [])
+        self.assertEqual(collected, files)
+        self.assertTrue(all(permissions == {"pull_requests": "read"} for _, permissions in self.provider.calls))
+
+    async def test_missing_or_oversized_individual_patches_are_not_fabricated_or_truncated(self):
+        client, payload = self.commit_client()
+        payload["files"][0].pop("patch")
+        result = await client.get_commit("microsoft/IssueLens", payload["sha"], detail="full_patch")
+        self.assertNotIn("patch", result["files"][0])
+        payload["files"][0]["patch"] = "x" * 100_000
+        with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await client.get_commit(
+                "microsoft/IssueLens", payload["sha"], detail="full_patch", per_page=1,
+            )
+
     async def test_tree_ref_is_one_encoded_path_component(self):
         for recursive in (False, True):
             with self.subTest(recursive=recursive):

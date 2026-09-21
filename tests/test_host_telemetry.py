@@ -465,6 +465,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertEqual(session.send_calls, [(PROMPT_SECRET, None)])
         self.assertEqual(self.client.create_calls[0]["tools"], [self.config_tool])
+        self.assertEqual(self.client.create_calls[0]["large_output"], {"max_size_bytes": 128 * 1024})
         summary = self.summary()
         self.assertEqual((summary["input_tokens"], summary["output_tokens"]), (16, 5))
         self.assertEqual((summary["tools_completed"], summary["agents_started"]), (2, 1))

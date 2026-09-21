@@ -156,6 +156,7 @@ _TRIAGE_AGENT: CustomAgentConfig = {
         "label-issue",
         "assign-issue",
         "notify",
+        "change-analysis",
     ],
     "infer": True,
 }
@@ -188,6 +189,7 @@ _PLAN_AGENT: CustomAgentConfig = {
         "label-issue",
         "assign-issue",
         "notify",
+        "change-analysis",
     ],
     "infer": True,
 }
@@ -200,7 +202,7 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
         "customization and bounded MCP wiki read/write tools."
     ),
     "prompt": _load_prompt(_agents_dir / "team-memory.md"),
-    "skills": ["issuelens-config", "team-memory"],
+    "skills": ["issuelens-config", "team-memory", "change-analysis"],
     "tools": [
         "issuelens-config",
         "github-get_repository",
@@ -385,6 +387,8 @@ def _session_options(
     return {
         "on_permission_request": PermissionHandler.approve_all,
         "streaming": True,
+        # Keep bounded PR/commit pages inline; agents cannot read SDK spill files.
+        "large_output": {"max_size_bytes": 128 * 1024},
         "working_directory": _working_dir,
         # Skills and all agent prompts are loaded explicitly so local and hosted
         # behavior is identical.

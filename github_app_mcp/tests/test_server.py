@@ -129,6 +129,35 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             )
         ])
 
+    async def test_commit_detail_and_pagination_are_discoverable_and_forwarded(self):
+        github = FakeGitHubClient()
+        server = create_server(cast(GitHubClient, github))
+        async with Client(server) as client:
+            tools = await client.list_tools()
+            default = await client.call_tool("get_commit", {
+                "repository": "microsoft/IssueLens", "sha": "a" * 40,
+            })
+            full = await client.call_tool("get_commit", {
+                "repository": "microsoft/IssueLens", "sha": "a" * 40,
+                "detail": "full_patch", "per_page": 1, "page": 101,
+            })
+        self.assertFalse(default.is_error)
+        self.assertFalse(full.is_error)
+        tool = next(tool for tool in tools.tools if tool.name == "get_commit")
+        properties = tool.input_schema["properties"]
+        self.assertEqual(properties["detail"]["default"], "stats")
+        self.assertEqual(set(properties["detail"]["enum"]), {"none", "stats", "full_patch"})
+        self.assertEqual(properties["per_page"]["maximum"], 100)
+        self.assertEqual(properties["page"]["maximum"], 3000)
+        self.assertEqual(github.calls, [
+            ("get_commit", ("microsoft/IssueLens", "a" * 40), {
+                "detail": "stats", "per_page": 30, "page": 1,
+            }),
+            ("get_commit", ("microsoft/IssueLens", "a" * 40), {
+                "detail": "full_patch", "per_page": 1, "page": 101,
+            }),
+        ])
+
     async def test_write_tools_are_registered_only_when_enabled(self):
         server = create_server(cast(
             GitHubClient,
