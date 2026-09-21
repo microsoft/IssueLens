@@ -206,7 +206,6 @@ class TeamMemoryAccessTests(unittest.TestCase):
     def test_maintenance_allowlist_is_explicit_on_sdk_wire(self):
         expected = {
             "issuelens-config",
-            "analyze-change",
             "github-get_repository", "github-list_issues", "github-get_issue",
             "github-list_issue_comments", "github-get_issue_comment", "github-search_issues",
             "github-get_file", "github-get_pull_request", "github-list_pull_request_files",
@@ -214,7 +213,6 @@ class TeamMemoryAccessTests(unittest.TestCase):
             "github-list_pull_request_review_comments", "github-get_commit",
             "github-compare_commits", "github-list_repository_tree",
             "github-search_repository_content", "github-list_merged_pull_requests",
-            "github-list_change_files", "github-read_diff_chunk", "github-read_file_range",
             "github-get_wiki_snapshot", "github-list_wiki_pages", "github-get_wiki_page",
             "github-search_wiki", "github-list_wiki_history", "github-get_wiki_diff",
             "wiki-writer-write_wiki_pages",
@@ -243,7 +241,7 @@ class TeamMemoryAccessTests(unittest.TestCase):
             if name.startswith("github-"):
                 self.assertIn(name.removeprefix("github-"), reads)
             else:
-                self.assertIn(name, {"issuelens-config", "analyze-change", "wiki-writer-write_wiki_pages"})
+                self.assertIn(name, {"issuelens-config", "wiki-writer-write_wiki_pages"})
         self.assertTrue(set(allowed).isdisjoint({
             "*", "github-*", "wiki-writer-*", "send-email", "send-teams-notification",
             "github-add_labels", "github-set_assignees", "github-add_issue_comment",

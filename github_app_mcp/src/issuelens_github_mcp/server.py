@@ -8,35 +8,16 @@ from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
-from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from .auth import GitHubAppError, GitHubAppTokenProvider
-from .changes import (
-    DEFAULT_CHANGE_PAGE_BYTES,
-    MAX_CHANGE_BLOB_BYTES,
-    MAX_CHANGE_CURSOR_BYTES,
-    MAX_CHANGE_RESULT_BYTES,
-    MIN_CHANGE_PAGE_BYTES,
-)
 from .config import ConfigurationError, GitHubAppConfig
-from .github import GitHubClient, ReactionTarget
+from .github import CommitDetail, GitHubClient, ReactionTarget
 
 
 _ENABLE_WRITES_ENV = "GITHUB_MCP_ENABLE_WRITES"
-_ChangeRepository = Annotated[str, Field(
-    strict=True, pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]{1,100}$",
-)]
-_ChangeSHA = Annotated[str, Field(strict=True, pattern=r"^[0-9a-fA-F]{40}$")]
-_ChangePath = Annotated[str, Field(strict=True, min_length=1, max_length=240)]
-_ChangeCursor = Annotated[str, Field(strict=True, min_length=1, max_length=MAX_CHANGE_CURSOR_BYTES)]
-_ChangePageBytes = Annotated[int, Field(strict=True, ge=MIN_CHANGE_PAGE_BYTES, le=MAX_CHANGE_RESULT_BYTES)]
-_ChangePerPage = Annotated[int, Field(strict=True, ge=1, le=100)]
-_ChangePullNumber = Annotated[int, Field(strict=True, ge=1, le=2**31 - 1)]
-_ChangeLine = Annotated[int, Field(strict=True, ge=1, le=MAX_CHANGE_BLOB_BYTES)]
-_CHANGE_READ_ANNOTATIONS = ToolAnnotations(
-    read_only_hint=True, destructive_hint=False, idempotent_hint=True, open_world_hint=True,
-)
+_PerPage = Annotated[int, Field(strict=True, ge=1, le=100)]
+_FilePage = Annotated[int, Field(strict=True, ge=1, le=3000)]
 
 
 def create_server(
@@ -161,19 +142,25 @@ def create_server(
 
     @server.tool()
     async def get_file(repository: str, path: str, ref: str | None = None) -> Any:
-        """Read a small UTF-8 file or directory; use read_file_range for larger pinned source."""
+        """Read one UTF-8 file (up to 64 KiB) or directory; use a full commit ref for pinned context."""
         return await github.get_file(repository, path, ref=ref)
 
     @server.tool()
     async def get_pull_request(repository: str, pull_number: int) -> Any:
-        """Read bounded PR metadata; list_change_files pins large change inventories."""
+        """Read bounded PR metadata, including base/head SHAs and changed_files."""
         return await github.get_pull_request(repository, pull_number)
 
     @server.tool()
-    async def list_pull_request_files(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
-        """Read legacy PR file entries including patches within the small-response cap.
+    async def list_pull_request_files(
+        repository: str, pull_number: int, per_page: _PerPage = 30, page: _FilePage = 1,
+    ) -> Any:
+        """Read one page of changed PR files, including available patches.
 
-        For large PRs or patches, use list_change_files and read_diff_chunk instead.
+        For large responses, reduce per_page, down to 1, and restart pagination
+        at page 1 when changing its size. Empty or short pages end enumeration.
+        Missing patches do not mean unchanged files; use pinned get_file reads
+        where supported or report missing evidence. Verify PR SHAs before and
+        after paging because this endpoint cannot pin a commit.
         This REST endpoint has a 3,000-file ceiling; paging does not remove it.
         """
         return await github.list_pull_request_files(repository, pull_number, per_page=per_page, page=page)
@@ -194,121 +181,36 @@ def create_server(
         return await github.list_pull_request_review_comments(repository, pull_number, per_page=per_page, page=page)
 
     @server.tool()
-    async def get_commit(repository: str, sha: str) -> Any:
-        """Read legacy commit details and patches within the small-response cap.
-
-        Use list_change_files(commit_sha=full_sha) and read_diff_chunk for large
-        commits. They use immutable Git objects instead of patch-bearing REST data.
-        """
-        return await github.get_commit(repository, sha)
-
-    @server.tool(annotations=_CHANGE_READ_ANNOTATIONS, structured_output=False)
-    async def list_change_files(
-        repository: _ChangeRepository,
-        pull_number: _ChangePullNumber | None = None,
-        commit_sha: _ChangeSHA | None = None,
-        base_sha: _ChangeSHA | None = None,
-        head_sha: _ChangeSHA | None = None,
-        cursor: _ChangeCursor | None = None,
-        per_page: _ChangePerPage = 50,
+    async def get_commit(
+        repository: str, sha: str, detail: CommitDetail = "stats",
+        per_page: _PerPage = 30, page: _FilePage = 1,
     ) -> Any:
-        """List a pinned change inventory, without patches, in at most 32 KiB JSON pages.
+        """Read a commit with upstream-style detail and file pagination controls.
 
-        Supply exactly one target: a PR number, a full commit SHA, or an explicit
-        full base/head SHA pair. PRs use the true merge base of pinned tips;
-        commits use their first parent (null base for a root commit). snapshot
-        contains snapshot_id, base_sha, head_sha, mode, and pull_number for PRs.
-        Files contain path/status and old/new blob SHA/mode metadata. Renames
-        may be delete/add pairs. Trees are walked nonrecursively, identical
-        subtrees are skipped, and truncated trees fail explicitly; up to 20,000
-        changed files are supported within traversal and download budgets.
-
-        Repeat the SAME original selectors with next_cursor. The cursor pins
-        identity across workers and never silently follows a moved PR. complete
-        means inventory exhaustion only. Use the returned base/head with
-        read_diff_chunk for every file; the snapshot_id is independent of mode.
-        No source or patch body is included here. Fork objects must be readable
-        from this explicit repository; access never expands to the fork.
+        detail=stats (default) returns file metadata without patches; none omits
+        files and aggregate stats; full_patch includes available patches.
+        Commit identity, parents, and tree metadata are retained in every mode.
+        Use a full SHA for stable paging. per_page/page apply to files, not
+        commits; at most 3,000 files are available. Reduce per_page after a size
+        error. A missing patch is not proof of no change. HTTP download is
+        bounded to 1 MiB; the final projected JSON remains at most 100,000 bytes.
         """
-        return await github.list_change_files(
-            repository, pull_number=pull_number, commit_sha=commit_sha,
-            base_sha=base_sha, head_sha=head_sha, cursor=cursor, per_page=per_page,
-        )
-
-    @server.tool(annotations=_CHANGE_READ_ANNOTATIONS, structured_output=False)
-    async def read_diff_chunk(
-        repository: _ChangeRepository,
-        base_sha: _ChangeSHA | None,
-        head_sha: _ChangeSHA,
-        path: _ChangePath,
-        cursor: _ChangeCursor | None = None,
-        max_bytes: _ChangePageBytes = DEFAULT_CHANGE_PAGE_BYTES,
-    ) -> Any:
-        """Read one pinned file's diff with a FINAL serialized JSON byte ceiling.
-
-        Supply list_change_files' full base/head SHAs (null base for a root).
-        max_bytes includes escaped content, IDs, line ranges, and cursor metadata;
-        it must be 1,024-32,768 bytes. Typical analysis callers use 4,096.
-        Continue with next_cursor and unchanged repository, SHAs, and path.
-        chunk_id binds exact offsets and immutable identity. Chunks can split
-        inside a hunk or a giant line without dropping characters. Concatenated
-        unified chunks reconstruct the diff; zero line ranges denote headers or
-        an absent side. An expensive match uses replacement-old/replacement-new:
-        lossless raw source blocks, not a minimal patch. Concatenate each side's
-        fragments independently. No entire diff needs to reach the model.
-
-        status is text, binary, or unsupported (with reason). Nontext notices
-        finish enumeration, not evidence coverage. Symlinks/submodules are never
-        followed. Blobs are at most 4 MiB each; fixed-route streamed ingress,
-        aggregate byte/request limits, bounded matching, and a session-owned LRU
-        cache apply. Time checks are cooperative, not hard synchronous CPU limits.
-        Cursors are continuation data, never permission to access a repository.
-        """
-        return await github.read_diff_chunk(
-            repository, base_sha, head_sha, path, cursor=cursor, max_bytes=max_bytes,
-        )
-
-    @server.tool(annotations=_CHANGE_READ_ANNOTATIONS, structured_output=False)
-    async def read_file_range(
-        repository: _ChangeRepository,
-        sha: _ChangeSHA,
-        path: _ChangePath,
-        start_line: _ChangeLine = 1,
-        end_line: _ChangeLine = 120,
-        cursor: _ChangeCursor | None = None,
-        max_bytes: _ChangePageBytes = DEFAULT_CHANGE_PAGE_BYTES,
-    ) -> Any:
-        """Read pinned UTF-8 source context, with lossless giant-line continuation.
-
-        sha must be a full commit SHA. Request at most 10,000 inclusive lines.
-        Repeat the same sha/path/requested range with next_cursor; returned line
-        positions describe the actual fragment, and can repeat across pages
-        when a line is split. Empty files/ranges return empty content and 0/0
-        positions explicitly. complete means this requested range has ended,
-        not that the file or a larger analysis has been reviewed.
-
-        max_bytes (1,024-32,768, default 24,576) caps final serialized JSON,
-        including escaped content and metadata. The bounded Git-blob reader
-        does not assume HTTP Range support. Binary/non-UTF-8 content and
-        symlinks/submodules have explicit status/reason and are not followed.
-        """
-        return await github.read_file_range(
-            repository, sha, path, start_line=start_line, end_line=end_line,
-            cursor=cursor, max_bytes=max_bytes,
+        return await github.get_commit(
+            repository, sha, detail=detail, per_page=per_page, page=page,
         )
 
     @server.tool()
     async def compare_commits(repository: str, base: str, head: str) -> Any:
-        """Read a legacy bounded REST comparison, including at most 300 file patches.
+        """Read a bounded REST comparison, including at most 300 file patches.
 
-        Use list_change_files with full base/head SHAs and read_diff_chunk for
-        large or exhaustive comparisons; commit pagination cannot lift this cap.
+        For PR-wide evidence, prefer list_pull_request_files with small pages.
+        This tool cannot paginate or guarantee exhaustive evidence for large changes.
         """
         return await github.compare_commits(repository, base, head)
 
     @server.tool()
     async def list_repository_tree(repository: str, ref: str, recursive: bool = True) -> Any:
-        """Read one bounded Git tree; honor truncated, and use list_change_files for large changes."""
+        """Read one bounded Git tree; honor truncated and use smaller subtree reads when needed."""
         return await github.list_repository_tree(repository, ref, recursive=recursive)
 
     @server.tool()

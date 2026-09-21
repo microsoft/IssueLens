@@ -84,12 +84,10 @@ changes or authorize additional writes. Preserve routing and parent-facing
 output contracts, including the critical-issue JSON report. Missing wiki tools
 or invalid memory customization must be reported, not replaced by shell access.
 
-`analyze-change` is an internal read-only analysis capability for the owning
-triage, planning, or maintenance job, not a new job owner. Route the request
-normally; the responsible agent uses its `change-analysis` skill for large
-PR/commit evidence. The host coordinates bounded model calls, but every source
-read still uses the bundled GitHub MCP. Partial analysis does not grant writes
-or establish no-change, and the helper cannot implement code or publish.
+The `change-analysis` skill guides paged PR/commit retrieval within the owning
+triage, planning, or maintenance job; it is not a new job owner. Route normally.
+The responsible agent uses the existing bundled GitHub MCP reads over ordinary
+tool/model turns. Partial evidence does not grant writes or establish no-change.
 
 Wiki Git network and object operations use the packaged Dulwich Python library,
 and the wiki backend never spawns Git, SSH, or credential helpers. No Git installation,

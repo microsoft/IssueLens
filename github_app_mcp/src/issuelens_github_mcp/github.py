@@ -20,7 +20,6 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 
 from .auth import GitHubAppError, GitHubAppTokenProvider, InstallationCredential, Permissions, validate_repository
-from .changes import ChangeReader, DEFAULT_CHANGE_PAGE_BYTES
 from .policy import IssueLensConfigError, resolve_wiki_repository, validate_wiki_repository
 from .wiki import WikiError, WikiRepository
 
@@ -30,6 +29,7 @@ _API_VERSION = "2026-03-10"
 _MAX_RESULT_BYTES = 100_000
 _MAX_WIKI_RESULT_BYTES = 6 * 64 * 1024 + 4096
 _MAX_HTTP_RESPONSE_BYTES = 128 * 1024
+_MAX_COMMIT_HTTP_RESPONSE_BYTES = 1024 * 1024
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_QUERY_CHARS = 512
 _MAX_SEARCH_FILES = 64
@@ -60,6 +60,7 @@ _GITHUB_REDIRECT_HOST_PATTERN = re.compile(
 _SEARCH_QUALIFIER = re.compile(
     r"(?i)(?:^|[^A-Za-z0-9_])[-+]?[A-Za-z][A-Za-z0-9_-]*:"
 )
+CommitDetail = Literal["none", "stats", "full_patch"]
 ReactionTarget = Literal[
     "issue",
     "pull_request",
@@ -102,7 +103,6 @@ class GitHubClient:
         self._token_provider = token_provider
         self._writes_enabled = writes_enabled
         self._transport = transport
-        self._changes = ChangeReader(token_provider, transport)
 
     @property
     def writes_enabled(self) -> bool:
@@ -350,7 +350,7 @@ class GitHubClient:
             "GET", repository,
             f"/pulls/{_positive(pull_number, 'pull_number')}/files",
             permissions={"pull_requests": "read"},
-            params=_pagination(per_page, page),
+            params=_pagination(per_page, page, max_page=3000),
         )
 
     async def list_pull_request_commits(
@@ -383,35 +383,19 @@ class GitHubClient:
             params=_pagination(per_page, page),
         )
 
-    async def get_commit(self, repository: str, sha: str) -> Any:
+    async def get_commit(
+        self, repository: str, sha: str, *,
+        detail: CommitDetail = "stats", per_page: int = 30, page: int = 1,
+    ) -> Any:
+        """Read one commit file page, omitting patches unless explicitly requested."""
+        if detail not in ("none", "stats", "full_patch"):
+            raise GitHubAppError("detail must be none, stats, or full_patch")
         return await self._request(
             "GET", repository, f"/commits/{_sha(sha)}",
             permissions={"contents": "read"},
+            params=_pagination(per_page, page, max_page=3000),
+            _commit_detail=detail,
         )
-
-    async def list_change_files(
-        self, repository: str, pull_number: int | None = None,
-        commit_sha: str | None = None, base_sha: str | None = None,
-        head_sha: str | None = None, cursor: str | None = None, per_page: int = 50,
-    ) -> dict[str, Any]:
-        """List pinned Git-tree changes without downloading REST file patches."""
-        return await self._changes.list_change_files(
-            repository, pull_number, commit_sha, base_sha, head_sha, cursor, per_page,
-        )
-
-    async def read_diff_chunk(
-        self, repository: str, base_sha: str | None, head_sha: str, path: str,
-        cursor: str | None = None, max_bytes: int = DEFAULT_CHANGE_PAGE_BYTES,
-    ) -> dict[str, Any]:
-        """Read one serialized-byte-bounded page of an immutable file comparison."""
-        return await self._changes.read_diff_chunk(repository, base_sha, head_sha, path, cursor, max_bytes)
-
-    async def read_file_range(
-        self, repository: str, sha: str, path: str, start_line: int = 1,
-        end_line: int = 120, cursor: str | None = None, max_bytes: int = DEFAULT_CHANGE_PAGE_BYTES,
-    ) -> dict[str, Any]:
-        """Read pinned UTF-8 source context, including lossless long-line pages."""
-        return await self._changes.read_file_range(repository, sha, path, start_line, end_line, cursor, max_bytes)
 
     async def compare_commits(self, repository: str, base: str, head: str) -> Any:
         return await self._request(
@@ -1041,6 +1025,7 @@ class GitHubClient:
         write: bool = False,
         content_read_auth: _ContentReadAuth | None = None,
         _client: httpx.AsyncClient | None = None,
+        _commit_detail: CommitDetail | None = None,
     ) -> Any:
         repository = self._authorize(repository, write=write)
         if _client is not None and content_read_auth is None:
@@ -1101,9 +1086,13 @@ class GitHubClient:
                 ) as response:
                     response.raise_for_status()
                     content = bytearray()
+                    limit = (
+                        _MAX_COMMIT_HTTP_RESPONSE_BYTES
+                        if _commit_detail is not None else _MAX_HTTP_RESPONSE_BYTES
+                    )
                     async for chunk in response.aiter_bytes():
                         content.extend(chunk)
-                        if len(content) > _MAX_HTTP_RESPONSE_BYTES:
+                        if len(content) > limit:
                             raise GitHubAppError(
                                 "GitHub response is too large; narrow the request"
                             )
@@ -1127,6 +1116,20 @@ class GitHubClient:
         except (httpx.HTTPError, ValueError) as error:
             raise GitHubAppError("GitHub API request failed") from error
 
+        if _commit_detail is not None:
+            if not isinstance(payload, dict):
+                raise GitHubAppError("GitHub returned an invalid commit")
+            if _commit_detail == "none":
+                payload.pop("stats", None)
+                payload.pop("files", None)
+            elif _commit_detail == "stats":
+                files = payload.get("files")
+                if not isinstance(files, list) or any(not isinstance(item, dict) for item in files):
+                    raise GitHubAppError("GitHub returned an invalid commit file list")
+                payload["files"] = [
+                    {key: value for key, value in item.items() if key != "patch"}
+                    for item in files
+                ]
         if len(json.dumps(payload, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
             raise GitHubAppError("GitHub response is too large; narrow the request")
         return payload
@@ -1183,11 +1186,11 @@ def _search_line_matches(text: str, query: str) -> list[dict[str, Any]]:
     return matches
 
 
-def _pagination(per_page: int, page: int) -> dict[str, int]:
+def _pagination(per_page: int, page: int, *, max_page: int = 100) -> dict[str, int]:
     if type(per_page) is not int or not 1 <= per_page <= 100:
         raise GitHubAppError("per_page must be an integer from 1 to 100")
-    if type(page) is not int or not 1 <= page <= 100:
-        raise GitHubAppError("page must be an integer from 1 to 100")
+    if type(page) is not int or not 1 <= page <= max_page:
+        raise GitHubAppError(f"page must be an integer from 1 to {max_page}")
     return {"per_page": per_page, "page": page}
 
 

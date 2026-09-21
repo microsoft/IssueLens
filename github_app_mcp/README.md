@@ -67,9 +67,6 @@ access:
 | `list_pull_request_reviews` | Pull requests: read |
 | `list_pull_request_review_comments` | Pull requests: read |
 | `get_commit` | Contents: read |
-| `list_change_files` | Contents: read; separately Pull requests: read when initially resolving a PR |
-| `read_diff_chunk` | Contents: read |
-| `read_file_range` | Contents: read |
 | `compare_commits` | Contents: read |
 | `list_repository_tree` | Contents: read |
 | `search_repository_content` | Contents: read |
@@ -99,130 +96,47 @@ the scan. Anonymous fallback remains read-only and never authorizes writes.
 Without `ref`, search uses GitHub's indexed default-branch code search with its
 existing single-request 30-second HTTP timeout, not the scan budget.
 
-### Large immutable changes
+### Paged PR and commit reads
 
-The three change readers are read-only IssueLens extensions, not renamed
-upstream tools. The legacy `get_commit`, PR-file listing, comparison, and
-`get_file` contracts remain unchanged. Their **128 KiB HTTP / 100,000-byte JSON
-limits are not raised**. Smaller REST pages cannot fix one enormous patch, and
-REST PR-files/comparison inventories have 3,000/300-file ceilings.
+Large changes use existing tools and ordinary Copilot tool/model turns, not
+custom diff readers or an analysis runtime.
 
-1. `list_change_files(repository, pull_number=None, commit_sha=None,
-   base_sha=None, head_sha=None, cursor=None, per_page=50)` requires exactly one
-   target: PR number, full commit SHA, or an explicit full base/head pair.
-   Commits compare against their **first parent**, including merge commits; a
-   root commit has a null base. PRs pin both tips and compute their true merge
-   base through a bounded commit-graph walk. Multiple merge bases, inaccessible
-   fork objects, and exhausted graph budgets fail rather than substituting the
-   base-branch tip or widening repository access.
+`get_commit(repository, sha, detail="stats", per_page=30, page=1)` adopts the
+[official GitHub MCP detail semantics](https://github.com/github/github-mcp-server/blob/85598ba6e1256f7ebf4867b95d63b833c4549264/pkg/github/repositories.go#L29-L126):
 
-   The result is `{repository, snapshot, files, next_cursor, complete}`.
-   `snapshot` contains `{snapshot_id, base_sha, head_sha, mode}` and, for PRs,
-   `pull_number`. Modes are `pull_request`, `commit`, and `compare`.
-   `snapshot_id` hashes the case-insensitive repository, resolved base/head, and
-   format version, **not the caller's mode**. Each file contains
-   `{path, status, old_blob_sha, new_blob_sha, old_mode, new_mode}`. Status is
-   `added`, `removed`, `modified`, or `type_changed`; renames may be explicit
-   remove/add pairs. For mode `160000`, the object SHA is a gitlink's commit,
-   not a text blob.
+- `none`: omit `files` and aggregate `stats`.
+- `stats` (the new default): keep file metadata but omit every `patch`.
+- `full_patch`: include available patches; request small pages for large changes.
 
-   Directory/file replacements use remove/add entries for the file at the
-   transition path and the affected descendants. Diff reads use the same
-   identities: the directory side of a replacement is absent, and a descendant
-   cannot exist below a non-directory ancestor. Links are never followed;
-   direct directory-only diff targets remain explicitly unsupported.
+IssueLens retains its `repository` and snake-case pagination parameters, SHA
+validation, and REST commit metadata including parents and tree identity.
+This is supported control alignment, not drop-in compatibility with every
+upstream tool or response projection. Existing callers needing patches must
+now explicitly request `full_patch`. Aggregate commit stats describe the
+commit, not an individual page; do not add them again for every page.
 
-   Inventories walk immutable, nonrecursive Git trees, skipping equal subtree
-   hashes. They do not download patches and are not limited to 3,000 files.
-   A truncated tree fails explicitly. Pages contain at most `per_page` entries
-   (1–100), reduced further if needed to fit 32 KiB. `complete` means inventory
-   exhaustion, not analysis completion. Repeat the **same original selectors**
-   with `next_cursor`; a PR cursor retains its original tips and merge base
-   instead of following a subsequently moved PR. Compare returned snapshot IDs
-   before combining evidence.
+Commit-detail downloads have a **1 MiB** streamed HTTP ceiling so metadata
+projection can process responses above the ordinary **128 KiB** HTTP limit.
+Projection precedes the unchanged **100,000-byte ASCII JSON result ceiling**.
+Other REST tools retain their existing limits. Oversized input or output
+fails explicitly; no file or patch is silently truncated to fit.
 
-2. `read_diff_chunk(repository, base_sha, head_sha, path, cursor=None,
-   max_bytes=24576)` takes that pinned comparison and one path. `base_sha` is
-   required but nullable for a root. It returns `{repository, snapshot_id,
-   path, chunk_id, content, old_start, old_end, new_start, new_end,
-   representation, status, next_cursor, complete, old_blob_sha, new_blob_sha}`.
-   Nontext results also contain `reason`.
+`list_pull_request_files` keeps its list response and includes available
+patches. Reduce `per_page` after a size error, down to 1. When changing page
+size, restart at page 1 and deduplicate after confirming source identity;
+otherwise the changed offsets can omit files. Both file pagers accept
+`per_page=1..100` and `page=1..3000`, allowing small pages beyond the ordinary
+100-page limit. Empty or short pages end enumeration, but GitHub still caps
+each inventory at 3,000 files. PR commit lists have a separate 250-commit cap;
+`compare_commits` exposes at most 300 files and has no pagination here.
 
-   `max_bytes` (1,024–32,768) bounds the **final serialized JSON result**,
-   including escaping, line ranges, IDs, and continuation metadata; the MCP
-   JSON text is also tested against this ceiling. Protocol framing is separate.
-   Use approximately 4,096 bytes for analysis batches. A very long path or
-   repository name can require more than the minimum to fit metadata.
-   The backend does not send a complete diff to the model.
-
-   `representation="unified"` chunks concatenate exactly into one unified diff.
-   Chunks can split inside a hunk or line; line ranges are inclusive, may repeat
-   for continued line fragments, and are `0/0` for an absent side or headers.
-   Fine matching exceeding its work allowance instead emits
-   `replacement-old` followed by `replacement-new`: **lossless raw old/new
-   source blocks**, not a minimal patch. Concatenate each side's fragments
-   separately to reconstruct the original contents. No newline is invented or
-   dropped. Only the last file fragment has a null `next_cursor`.
-
-   `status` is `text`, `binary`, or `unsupported`. Binary data, non-UTF-8 or
-   unsupported blob encodings, symlinks, submodules, directories, and blobs
-   above the size limit have explicit notices/reasons, never "unchanged" text.
-   Links are not followed. A finished nontext notice has `complete=true`,
-   meaning the disposition was returned, **not that its contents were analyzed**.
-
-3. `read_file_range(repository, sha, path, start_line=1, end_line=120,
-   cursor=None, max_bytes=24576)` reads surrounding pinned UTF-8 source using
-   the same blob reader. `sha` must be a full commit SHA; the inclusive request
-   may span at most 10,000 lines. It returns `{repository, sha, path, chunk_id,
-   content, start_line, end_line, next_cursor, complete, status}` plus `reason`
-   for nontext content. Returned positions describe actual source fragments.
-   Empty files and ranges beyond EOF return empty text with explicit `0/0`
-   positions. Giant lines continue losslessly across pages. Repeat the
-   **original** requested line range with each cursor, not the returned
-   fragment's positions. `complete` refers to that requested range, not all
-   source context. No HTTP Range support is assumed.
-
-All SHAs in these three tools are full, 40-character GitHub SHA-1 identities.
-Blob sizes, base64, and the actual Git blob hash are checked before text is
-used. Chunk IDs and cursors bind repository, snapshot, path/blob identity,
-format version, and exact character offsets. Cursors use a deterministic
-integrity checksum and are portable across workers; they are **not signatures,
-credentials, or grants of access**. Each call re-establishes operation-scoped
-App access. Anonymous fallback verifies current public repository metadata
-before it can reuse cached source from an earlier authorized call. No tokens
-occur in cursor payloads, cache keys, or results.
-
-The separate change reader streams only fixed repository `/git/trees/{sha}`
-and `/git/blobs/{sha}` routes with a larger ingress budget. Commit/PR metadata
-retains a 128 KiB HTTP cap. Redirects, arbitrary URLs/queries, ambient
-credentials, Git/shell subprocesses, and worktree checkouts are not used.
-Budgets fail explicitly, not with a misleading partial inventory:
-
-| Boundary / constant in `changes.py` | Limit |
-|---|---|
-| `MAX_CHANGE_BLOB_BYTES` | 4 MiB decoded per blob |
-| `MAX_CHANGE_OBJECT_HTTP_BYTES` | 8 MiB per tree/blob JSON response |
-| `MAX_CHANGE_OPERATION_BYTES` / `MAX_CHANGE_OPERATION_REQUESTS` | 64 MiB / 1,024 requests per tool call |
-| `MAX_CHANGE_SESSION_BYTES` / `MAX_CHANGE_SESSION_REQUESTS` | 512 MiB / 16,384 requests per client lifetime |
-| `MAX_CHANGE_SECONDS` | 60 seconds per call, including lock wait/authentication; cooperative CPU checks |
-| `MAX_CHANGE_FILES` | 20,000 changed paths |
-| `MAX_CHANGE_TREE_ENTRIES` / `MAX_CHANGE_TREES` / `MAX_CHANGE_DEPTH` | 100,000 entries / 1,024 distinct trees / 64 path components |
-| `MAX_CHANGE_GRAPH_COMMITS` / `MAX_CHANGE_PARENTS` | 512 commit-graph nodes / 64 parents per commit |
-| `MAX_CHANGE_CACHE_BYTES` / `MAX_CHANGE_CACHE_ENTRIES` | 64 MiB accounted memory / 512 LRU entries |
-| `CHANGE_CACHE_TTL_SECONDS` | 300 seconds, also bounded by the owning client/session lifetime |
-| `MAX_DIFF_MATCH_LINES` / `MAX_DIFF_MATCH_CELLS` | 2,000 lines per side / 250,000 line-pair cells |
-| `MAX_DIFF_MATCH_INPUT_BYTES` / `MAX_DIFF_MATCH_WORK` | 256 KiB combined matching input / 16 MiB character-by-line work estimate |
-| `MIN_CHANGE_PAGE_BYTES` / `DEFAULT_CHANGE_PAGE_BYTES` / `MAX_CHANGE_RESULT_BYTES` | 1,024 / 24,576 / 32,768 serialized bytes |
-| `MAX_CHANGE_CURSOR_BYTES` / `MAX_FILE_RANGE_LINES` | 2,048 cursor characters / 10,000 requested source lines |
-
-Authentication lookup/minting overhead is additional to content request/byte
-counts, but remains inside the call's cooperative time budget. Checks and
-cancellation bound network work; they are **not hard CPU deadlines**.
-Immutable objects, manifests, and computed diff representations share the
-session-owned LRU cache, avoiding repeated blob downloads and comparisons for
-every 4 KiB page. Eviction or a new worker may require refetching, never a
-different snapshot. The cache contains no credentials and uses no files or
-persistent storage; only counters and immutable evidence live with the client.
+PR file pages cannot be pinned to a SHA. The capability skill checks PR
+base/head SHAs and changed-file counts before and after paging, and requires
+re-establishing evidence if they changed. Commit pages and `get_file` context
+reads should use full verified SHAs. Missing patches, binary content,
+oversized individual files, and API caps remain explicit limitations.
+`get_file` still supports only bounded UTF-8 files up to 64 KiB; no automatic
+resource-link download or arbitrary range-read support is implied.
 
 Wiki tools always take `repository` as the **source project**, even when its
 memory is stored in another repository's wiki. The shared package policy parser

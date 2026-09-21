@@ -125,119 +125,24 @@ class TelemetryTests(unittest.TestCase):
         model, = self.backend.facts("issuelens.run.model")
         self.assertEqual(model["input_tokens"], 200)
 
-    def test_analysis_workers_are_attributed_without_retaining_child_messages(self):
-        self.start_agent("owner-tool", "team-memory", "maintenance")
-        self.tool_start(
-            "analysis-tool", "analyze-change", actor="maintenance",
-            pull_number=34, issue_number=None,
-        )
-        for identifier in ("analysis:first", "analysis:second"):
-            self.run.analysis_worker_start(identifier, "map", "analysis-tool")
-            usage = self.usage(apiCallId="reused-in-different-session", content="PRIVATE-DIFF")
-            self.run.analysis_worker_event(identifier, usage)
-            self.run.analysis_worker_event(identifier, usage)
-            self.run.analysis_worker_event(identifier, event(
-                "assistant.message_delta", {"deltaContent": "PRIVATE-DIFF"},
-            ))
-            self.run.analysis_worker_finish(identifier, success=True)
-        self.tool_end("analysis-tool", actor="maintenance", status="complete")
-        self.end_agent("owner-tool", "team-memory", "maintenance")
-        result = self.complete()
-        self.assertEqual(result["usage_calls"], 2)
-        self.assertEqual(result["input_tokens"], 200)
-        self.assertEqual(result["analysis_workers_started"], 2)
-        self.assertEqual(result["analysis_workers_completed"], 2)
-        self.assertEqual(result["agents_started"], 1)
-        self.assertNotIn("first_root_output_s", result)
-        self.assertEqual(self.run.analysis_workers, {})
-        workers = self.backend.facts("issuelens.analysis.worker")
-        self.assertEqual({worker["parent_agent_id"] for worker in workers}, {"maintenance"})
-        self.assertNotIn("PRIVATE-DIFF", str(self.backend.events))
-        self.assertTrue(any(
-            target["target_kind"] == "pull_request" and target["number"] == 34
-            and target["relationship"] == "read"
-            for target in self.backend.facts("issuelens.run.target")
-        ))
-
-    def test_analysis_read_and_result_facts_export_only_allowlisted_data(self):
-        self.run.analysis_read(
-            "read_diff_chunk", "Org/Repo", success=True, duration=0.5, result_bytes=4096,
-        )
-        self.run.analysis_read(
-            "read_file_range", "Org/Repo", success=False, duration=0.25, result_bytes=0,
-        )
-        self.run.analysis_result({
-            "repository": "Org/Repo", "status": "partial",
-            "summary": "PRIVATE-DIFF", "cursor": "PRIVATE-DIFF",
-            "coverage": {
-                "files_reviewed": 2, "files_discovered": 4, "files_incomplete": 2,
-                "inventory_complete": True, "output_limited": False,
-                "unresolved": ["PRIVATE-DIFF"],
-            },
-            "counters": {
-                "model_calls": 3, "model_retries": 1, "model_output_budget_bytes": 8192,
-                "api_token": "PRIVATE-DIFF",
-            },
-        })
-        result = self.complete()
-        self.assertEqual(result["analysis_reads"], 2)
-        self.assertEqual(result["analysis_reads_failed"], 1)
-        self.assertEqual((result["tools_started"], result["tools_completed"], result["tools_failed"]),
-                         (2, 2, 1))
-        self.assertEqual(result["analysis_result_bytes"], 4096)
-        self.assertEqual(result["analysis_jobs_partial"], 1)
-        fact, = self.backend.facts("issuelens.analysis.completed")
-        self.assertEqual(fact["files_incomplete"], 2)
-        self.assertEqual(fact["model_retries"], 1)
-        self.assertEqual(fact["model_output_budget_bytes"], 8192)
-        self.assertTrue(fact["inventory_complete"])
-        self.assertFalse(fact["output_limited"])
-        self.assertEqual((fact["files_reviewed"], fact["model_calls"]), (2, 3))
-        self.assertNotIn("PRIVATE-DIFF", str(self.backend.events))
-        targets = self.backend.facts("issuelens.run.target")
-        self.assertEqual([(value["repository"], value["relationship"]) for value in targets],
-                         [("org/repo", "read")])
-
-    def test_unfinished_analysis_workers_close_without_failing_parent_session(self):
-        self.run.analysis_worker_start("analysis:worker", "reduce")
-        self.run.analysis_worker_event("analysis:worker", event(
-            "model.call_failure", {"statusCode": 429, "errorMessage": "PRIVATE-DIFF"},
-        ))
-        result = self.complete()
-        self.assertEqual(result["model_failures"], 1)
-        self.assertEqual(result["analysis_workers_failed"], 1)
-        self.assertTrue(result["telemetry_incomplete"])
-        self.assertEqual(result["execution_status"], "completed")
-        self.assertNotIn("PRIVATE-DIFF", str(self.backend.events))
-
-    def test_missing_worker_usage_does_not_make_parent_usage_complete(self):
-        self.run.observe(self.usage())
-        self.run.analysis_worker_start("analysis:worker", "map")
-        self.run.analysis_worker_sent("analysis:worker")
-        self.run.analysis_worker_finish("analysis:worker", success=False)
-        result = self.complete()
-        self.assertEqual(result["usage_status"], "partial")
-        self.assertEqual(result["input_tokens"], 100)
-        self.assertEqual(result["incomplete_analysis_usage_unavailable"], 1)
-
-    def test_worker_usage_does_not_mask_missing_root_usage(self):
-        self.run.analysis_worker_start("analysis:worker", "map")
-        self.run.analysis_worker_sent("analysis:worker")
-        self.run.analysis_worker_event("analysis:worker", self.usage())
-        self.run.analysis_worker_finish("analysis:worker", success=True)
+    def test_subagent_usage_does_not_mask_missing_root_usage(self):
+        self.start_agent("task1", "triage", "child")
+        self.run.observe(event("assistant.usage", {
+            "model": "gpt-test", "inputTokens": 100, "outputTokens": 20,
+        }, actor="child"))
+        self.end_agent("task1", "triage", "child")
         result = self.complete()
         self.assertEqual(result["usage_status"], "partial")
         self.assertEqual(result["usage_calls"], 1)
         self.assertEqual((result["input_tokens"], result["output_tokens"]), (100, 20))
         self.assertEqual(self.run.root.usage.calls, 0)
-        worker, = self.backend.facts("issuelens.analysis.worker")
-        self.assertEqual(worker["usage_calls"], 1)
 
-    def test_worker_and_observed_zero_root_usage_are_complete(self):
-        self.run.analysis_worker_start("analysis:worker", "map")
-        self.run.analysis_worker_sent("analysis:worker")
-        self.run.analysis_worker_event("analysis:worker", self.usage(apiCallId="shared-id"))
-        self.run.analysis_worker_finish("analysis:worker", success=True)
+    def test_subagent_and_observed_zero_root_usage_are_complete(self):
+        self.start_agent("task1", "triage", "child")
+        self.run.observe(event("assistant.usage", {
+            "apiCallId": "shared-id", "model": "gpt-test", "inputTokens": 100, "outputTokens": 20,
+        }, actor="child"))
+        self.end_agent("task1", "triage", "child")
         self.run.observe(self.usage(apiCallId="shared-id", inputTokens=0, outputTokens=0))
         result = self.complete()
         self.assertEqual(result["usage_status"], "complete")

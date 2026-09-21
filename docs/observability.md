@@ -39,40 +39,10 @@ in `azure.yaml`, as appropriate for the deployment path:
   value: release-2026-09
 ```
 
-### Bounded change-analysis accounting
-
-`analyze-change` links its isolated model sessions to the current `run_id`.
-`issuelens.analysis.worker` records a worker/attempt ID, map/reduce/context
-phase, parent agent identity, duration, outcome, and observed usage. Its usage
-is included once in the run/model totals. Worker facts are separate from
-`issuelens.run.agent`; native sub-agent counts do not pretend these host-managed
-workers are SDK delegation events. Include both fact types when reconciling
-exclusive agent/worker usage with a run.
-
-`issuelens.analysis.completed` records only allowlisted numeric coverage and
-budget counters, inventory/output-limit flags, complete/partial/blocked status,
-and repository identity. Counts distinguish reviewed/incomplete files, unresolved
-context requests, unincorporated reports, invalid reports, and model retries.
-`model_output_budget_bytes` includes reserved allowances for failed or cancelled
-calls whose output is unknown; it is not the same as observed output or billed
-tokens.
-Terminal run facts also include analysis worker, read, byte, and outcome counts.
-Internal MCP reads contribute repository read associations and tool-duration
-spans/metrics without retaining thousands of raw tool results. Run-level tool
-counts include these reads; subtract `analysis_reads` when reconciling with
-native agent-only tool facts. Worker retries count
-inference usage again but do not count the same source chunk twice as coverage.
-
-Worker text is never forwarded as parent assistant output. Invocations use
-SSE heartbeat comments and Responses use `response.in_progress` liveness events
-during idle gaps; neither advances user-visible TTFT. Prompts, source diffs,
-worker summaries, and continuation payloads are excluded from telemetry.
-Observed usage is not a cost estimate; missing SDK usage remains missing.
-An attempted worker without observed usage marks `analysis_usage_unavailable`
-and prevents the parent run from claiming complete usage coverage.
-Complete run usage also requires a root-agent usage observation. Worker or
-subagent usage alone remains partial, retaining observed token totals without
-masking missing parent-model accounting.
+Complete run usage requires a root-agent usage observation. Subagent usage
+alone remains partial, retaining observed token totals without masking missing
+parent-model accounting. An explicitly observed zero-token root call counts as
+an observation; absent usage is not zero.
 
 The separate native Copilot CLI exporter is disabled
 to avoid duplicate telemetry. A CLI OTLP/collector route is follow-on work, not

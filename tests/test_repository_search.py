@@ -119,6 +119,8 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request.url.host, "api.github.com")
         if request.url.path == "/search/code":
             return httpx.Response(200, json=self.indexed)
+        if request.url.path.casefold() == f"/repos/{REPOSITORY}".casefold():
+            return self.overrides.get("", httpx.Response(200, json={"default_branch": "main"}))
         prefix = f"/repos/{REPOSITORY}/"
         self.assertTrue(request.url.path.casefold().startswith(prefix.casefold()))
         route = request.url.path[len(prefix):]
@@ -602,6 +604,95 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.requests[0].extensions["timeout"], {
             "connect": 30, "read": 30, "write": 30, "pool": 30,
         })
+
+    async def test_pinned_search_never_downloads_patch_bearing_commit_details(self):
+        self.add_file("source.txt", b"needle")
+        self.overrides[f"commits/{OLD_COMMIT}"] = httpx.Response(200, json={
+            "sha": OLD_COMMIT, "files": [{"filename": "large.txt", "patch": "x" * 400_000}],
+        })
+        with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await self.client.get_commit(REPOSITORY, OLD_COMMIT, detail="full_patch")
+        self.requests.clear()
+        result = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+        self.assertEqual(result["resolved_ref"], OLD_COMMIT)
+        self.assertEqual(result["total_count"], 1)
+        self.assertEqual(len(self.requests), 3)
+        self.assertEqual(self.requests[0].url.path, f"/repos/{REPOSITORY}/git/commits/{OLD_COMMIT}")
+
+    async def test_search_resolves_lightweight_and_nested_annotated_tags(self):
+        self.add_file("source.txt", b"needle")
+        tags = ["1" * 40, "2" * 40]
+        self.overrides.update({
+            "git/ref/tags/v1": httpx.Response(200, json={
+                "ref": "refs/tags/v1", "object": {"type": "tag", "sha": tags[0]},
+            }),
+            f"git/tags/{tags[0]}": httpx.Response(200, json={
+                "sha": tags[0], "object": {"type": "tag", "sha": tags[1]},
+            }),
+            f"git/tags/{tags[1]}": httpx.Response(200, json={
+                "sha": tags[1], "object": {"type": "commit", "sha": OLD_COMMIT},
+            }),
+            "git/ref/tags/v2": httpx.Response(200, json={
+                "ref": "refs/tags/v2", "object": {"type": "commit", "sha": OLD_COMMIT},
+            }),
+        })
+        for ref in ("v1", "refs/tags/v2"):
+            with self.subTest(ref=ref):
+                self.requests.clear()
+                result = await self.client.search_repository_content(REPOSITORY, "needle", ref=ref)
+                self.assertEqual(result["resolved_ref"], OLD_COMMIT)
+                self.assertEqual(result["total_count"], 1)
+                self.assertFalse(any("/commits/" in request.url.path and "/git/" not in request.url.path
+                                     for request in self.requests))
+        self.assertEqual(self.requests[0].url.path, f"/repos/{REPOSITORY}/git/ref/tags/v2")
+
+    async def test_search_abbreviated_sha_uses_metadata_then_verified_git_object(self):
+        self.overrides["commits"] = httpx.Response(200, json=[{"sha": OLD_COMMIT}])
+        short = OLD_COMMIT[:9]
+        result = await self.client.search_repository_content(REPOSITORY, "needle", ref=short)
+        self.assertEqual(result["resolved_ref"], OLD_COMMIT)
+        self.assertEqual(dict(self.requests[2].url.params), {"sha": short, "per_page": "1"})
+        self.assertEqual(self.requests[3].url.path, f"/repos/{REPOSITORY}/git/commits/{OLD_COMMIT}")
+        self.overrides["commits"] = httpx.Response(200, json=[{"sha": NEW_COMMIT}])
+        with self.assertRaisesRegex(GitHubAppError, "different search commit"):
+            await self.client.search_repository_content(REPOSITORY, "needle", ref=short)
+
+    async def test_search_head_uses_default_branch_and_limits_tag_depth(self):
+        result = await self.client.search_repository_content(REPOSITORY, "needle", ref="HEAD")
+        self.assertEqual(result["resolved_ref"], NEW_COMMIT)
+        self.assertEqual([request.url.path for request in self.requests[:3]], [
+            f"/repos/{REPOSITORY}", f"/repos/{REPOSITORY}/git/ref/heads/main",
+            f"/repos/{REPOSITORY}/git/commits/{NEW_COMMIT}",
+        ])
+        tags = [f"{index:040x}" for index in range(10)]
+        self.overrides["git/ref/tags/deep"] = httpx.Response(200, json={
+            "ref": "refs/tags/deep", "object": {"type": "tag", "sha": tags[0]},
+        })
+        for first, second in zip(tags, tags[1:]):
+            self.overrides[f"git/tags/{first}"] = httpx.Response(200, json={
+                "sha": first, "object": {"type": "tag", "sha": second},
+            })
+        self.requests.clear()
+        with self.assertRaisesRegex(GitHubAppError, "tag limit"):
+            await self.client.search_repository_content(REPOSITORY, "needle", ref="refs/tags/deep")
+        self.assertEqual(len(self.requests), 9)
+
+    async def test_bad_ref_identity_and_tag_cycles_do_not_fall_back_to_indexed_search(self):
+        self.overrides["git/ref/heads/main"] = httpx.Response(200, json={
+            "ref": "refs/heads/other", "object": {"type": "commit", "sha": OLD_COMMIT},
+        })
+        with self.assertRaisesRegex(GitHubAppError, "invalid search ref"):
+            await self.client.search_repository_content(REPOSITORY, "needle", ref="main")
+        tag = "1" * 40
+        self.overrides["git/ref/tags/cycle"] = httpx.Response(200, json={
+            "ref": "refs/tags/cycle", "object": {"type": "tag", "sha": tag},
+        })
+        self.overrides[f"git/tags/{tag}"] = httpx.Response(200, json={
+            "sha": tag, "object": {"type": "tag", "sha": tag},
+        })
+        with self.assertRaisesRegex(GitHubAppError, "tag limit"):
+            await self.client.search_repository_content(REPOSITORY, "needle", ref="refs/tags/cycle")
+        self.assertFalse(any(request.url.path == "/search/code" for request in self.requests))
 
     async def test_invalid_queries_are_rejected_before_authentication(self):
         queries = (

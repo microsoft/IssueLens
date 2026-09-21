@@ -11,7 +11,7 @@ from collections import deque
 from contextlib import ExitStack
 from pathlib import Path
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import Mock, patch
 
 from azure.ai.agentserver.responses import (
     CreateResponse,
@@ -136,7 +136,7 @@ def sse_frames(chunks):
     text = "".join(chunk.decode() if isinstance(chunk, bytes) else chunk for chunk in chunks)
     frames = []
     for frame in text.split("\n\n"):
-        if not frame or frame.startswith(":"):
+        if not frame:
             continue
         lines = dict(line.split(": ", 1) for line in frame.splitlines())
         frames.append((lines.get("event", "message"), json.loads(lines["data"])))
@@ -448,76 +448,6 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.copilot_constructor.assert_not_called()
         self.assertEqual(self.backend.events, [])
 
-    async def test_analysis_runtime_uses_empty_mode_and_ephemeral_directory(self):
-        worker = Mock()
-        worker.start = AsyncMock()
-        worker.stop = AsyncMock(return_value=[])
-        with (
-            patch.object(self.host, "_byok_provider", return_value=(None, "offline-model")),
-            patch.dict(os.environ, {"GITHUB_TOKEN": "model-token"}),
-            patch.object(self.host, "CopilotClient", return_value=worker) as factory,
-        ):
-            result = await self.host._new_analysis_client("private-worker-directory")
-        self.assertEqual(result, (worker, None, "offline-model"))
-        self.assertEqual(factory.call_args.kwargs["mode"], "empty")
-        self.assertEqual(factory.call_args.kwargs["base_directory"], "private-worker-directory")
-        self.assertFalse(factory.call_args.kwargs["use_logged_in_user"])
-        worker.start.assert_awaited_once()
-        self.assertIs(self.host._client, self.client)
-
-    async def test_invocation_heartbeats_do_not_count_as_assistant_output(self):
-        session = self.session([])
-        with patch.object(self.host, "_HEARTBEAT_SECONDS", 0.002):
-            response = await self.invocation()
-            consumer = self.start_consumer(response.body_iterator)
-            await session.sent.wait()
-            await asyncio.sleep(0.02)
-            self.assertIsNone(self.runs[0].first_output)
-            for item in answer():
-                session.emit(item)
-            chunks = await consumer
-        self.assertTrue(any(chunk.startswith(b": keep-alive") for chunk in chunks))
-        self.assertEqual(sse_frames(chunks)[-1][0], "done")
-        self.assert_closed(session)
-
-    async def test_analysis_runtime_start_failure_still_stops_the_private_client(self):
-        worker = Mock()
-        worker.start = AsyncMock(side_effect=RuntimeError("initialization failed"))
-        worker.stop = AsyncMock(side_effect=TimeoutError("PRIVATE-CLEANUP-ERROR"))
-        worker.force_stop = AsyncMock()
-        with (
-            patch.object(self.host, "_byok_provider", return_value=(None, "offline-model")),
-            patch.dict(os.environ, {"GITHUB_TOKEN": "model-token"}),
-            patch.object(self.host, "CopilotClient", return_value=worker),
-            self.assertLogs("change_analysis_tool", level="WARNING") as logs,
-            self.assertRaisesRegex(RuntimeError, "initialization failed"),
-        ):
-            await self.host._new_analysis_client("private-worker-directory")
-        worker.stop.assert_awaited_once()
-        worker.force_stop.assert_awaited_once()
-        self.assertNotIn("PRIVATE-CLEANUP-ERROR", repr(logs.output))
-        self.assertIs(self.host._client, self.client)
-
-    async def test_responses_liveness_does_not_emit_worker_text_or_advance_ttft(self):
-        session = self.session([])
-        with patch.object(self.host, "_HEARTBEAT_SECONDS", 0.002):
-            consumer = self.start_consumer(self.chat_stream())
-            await session.sent.wait()
-            await asyncio.sleep(0.02)
-            self.assertIsNone(self.runs[0].first_output)
-            for item in answer():
-                session.emit(item)
-            events = await consumer
-        frames = sse_frames([encode_sse_event(item) for item in events])
-        self.assertGreater(sum(name == "response.in_progress" for name, _ in frames), 1)
-        self.assertEqual(frames[-1][0], "response.completed")
-        self.assertEqual(frames[-1][1]["response"]["output"][0]["content"][0]["text"],
-                         "Offline answer.")
-        tools = self.client.create_calls[0]["tools"]
-        self.assertEqual(tools[-1].name, "analyze-change")
-        self.assertTrue(tools[-1].handler.__self__.closed)
-        self.assert_closed(session)
-
     async def test_invocations_preserve_raw_sdk_sse_and_account_for_delegated_work(self):
         events = delegated_turn()
         session = self.session(events)
@@ -534,10 +464,8 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             "done", {"invocation_id": "invocation1", "session_id": "session1"},
         ))
         self.assertEqual(session.send_calls, [(PROMPT_SECRET, None)])
-        tools = self.client.create_calls[0]["tools"]
-        self.assertEqual(tools[0], self.config_tool)
-        self.assertEqual(tools[1].name, "analyze-change")
-        self.assertTrue(tools[1].handler.__self__.closed)
+        self.assertEqual(self.client.create_calls[0]["tools"], [self.config_tool])
+        self.assertEqual(self.client.create_calls[0]["large_output"], {"max_size_bytes": 128 * 1024})
         summary = self.summary()
         self.assertEqual((summary["input_tokens"], summary["output_tokens"]), (16, 5))
         self.assertEqual((summary["tools_completed"], summary["agents_started"]), (2, 1))

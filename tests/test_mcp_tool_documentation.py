@@ -36,7 +36,6 @@ WIKI_READ_TOOLS = {
     "get_wiki_snapshot", "list_wiki_pages", "get_wiki_page",
     "search_wiki", "list_wiki_history", "get_wiki_diff",
 }
-CHANGE_READ_TOOLS = {"list_change_files", "read_diff_chunk", "read_file_range"}
 WRITE_TOOLS = {
     "add_labels", "set_assignees", "add_issue_comment", "add_eyes_reaction",
     "write_wiki_pages",
@@ -99,14 +98,10 @@ class MCPToolDocumentationTests(unittest.TestCase):
         rest_reads = registered - WIKI_READ_TOOLS - WRITE_TOOLS
         documented = self.read_table("| Tool | Preferred App permission |")
         self.assertEqual(set(documented), rest_reads)
-        self.assertEqual({key: value for key, value in documented.items() if key not in CHANGE_READ_TOOLS}, {
+        self.assertEqual(documented, {
             tool: (PERMISSION_LABELS[permission],)
             for tool, permission in REST_READ_PERMISSIONS.items()
         })
-        for tool in CHANGE_READ_TOOLS:
-            self.assertIn("Contents: read", documented[tool][0])
-            self.assertNotIn("write", documented[tool][0].lower())
-        self.assertIn("Pull requests: read", documented["list_change_files"][0])
 
     def test_rest_endpoint_permissions_match_expected_contract(self):
         for tool, permission in REST_READ_PERMISSIONS.items():
@@ -132,9 +127,7 @@ class MCPToolDocumentationTests(unittest.TestCase):
 
     def test_shared_reads_separate_wiki_tools_from_gated_writes(self):
         shared_reads = registered_tool_names(self.server_factory.body)
-        self.assertEqual(
-            shared_reads, set(REST_READ_PERMISSIONS) | WIKI_READ_TOOLS | CHANGE_READ_TOOLS,
-        )
+        self.assertEqual(shared_reads, set(REST_READ_PERMISSIONS) | WIKI_READ_TOOLS)
         registered = registered_tool_names(ast.walk(self.server_factory))
         self.assertEqual(registered - shared_reads, WRITE_TOOLS)
         documented = self.read_table("| Tool | Purpose | Required App permission |")
