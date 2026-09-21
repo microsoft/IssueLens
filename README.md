@@ -188,9 +188,10 @@ and compact tool activity, without raw event JSON or tool payloads. Publication
 is configurable through `output-mode` and `summary-mode`; use activity/status
 or quiet/none when the log audience should not see agent text.
 `needs-review`, failures, invalid results, and incomplete streams fail the job.
-The existing bounded GitHub readers can also reject oversized PR metadata or
-source responses. Such runs fail without weakening read limits or reporting
-unverified maintenance success.
+Legacy whole-response readers can still reject oversized metadata or patches.
+For change evidence, the agent uses the bounded analysis path below instead of
+repeating those requests. Unsupported content or exhausted analysis budgets
+remain explicit limitations, never unverified maintenance success.
 
 Different PRs have independent concurrency groups so a later merge cannot
 replace another PR's pending run. Jobs may overlap or finish out of merge order:
@@ -231,6 +232,63 @@ are not proof of publication. Sensitive/conflicting changes require human review
   Wiki retrieval is read-only; separately authorized maintenance uses only the
   `team-memory` agent-local writer.
 6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
+
+### Large PR and commit analysis
+
+The `triage`, `plan`, and `team-memory` agents preload `change-analysis` and can
+call the read-only `analyze-change` tool. It accepts the explicit repository
+and one PR number, full commit SHA, or full base/head SHA pair. A commit is
+compared with its first parent. Whole-PR work uses the PR comparison; a final
+rebase-merge commit alone can omit earlier PR commits. Post-merge claims still
+require verification at the authoritative merged SHA.
+
+The controller uses a separate read-only bundled MCP connection to page change
+metadata, diff chunks, and pinned source ranges. Missing or oversized GitHub
+patches do not imply unchanged files: the backend can compare pinned Git
+objects and return bounded text pages. The legacy general-purpose HTTP limit
+is not globally removed, and new reads retain App repository/permission scopes.
+
+Each small evidence batch runs in a fresh, tool-less Copilot session within an
+ephemeral empty-mode runtime. Workers use the configured inference provider,
+not a new model service. They cannot write, run shell commands, notify, or
+delegate. Hierarchical reduction returns only a bounded evidence-linked report
+to the owning agent; raw diff pages do not accumulate in a resumed conversation.
+
+`complete`, `partial`, and `blocked` describe analysis coverage, not successful
+publication or authorization. All required chunks need validated reports;
+unsupported files, missing context, and budget stops remain visible. The
+owning agent applies the existing policy and write safeguards. No new durable
+queue, proposal store, deployment setting, or telemetry opt-out is introduced.
+Both protocols send liveness events while waiting, and request cleanup cancels
+outstanding analysis work. One analysis runtime is admitted per host process,
+with up to two inference workers; queued requests share their own existing
+analysis deadline. Counts and deadlines are finite; a large change
+outside the supported budget is reported as incomplete, not silently skipped.
+
+Default controller limits are defined in `AnalysisLimits` in
+`change_analysis.py`; callers cannot override them through tool arguments.
+
+| Boundary | Default limit |
+| --- | --- |
+| Analysis time | 900 seconds, shared by at most two analysis attempts per turn; queue time counts |
+| Individual model call | 120 seconds |
+| Worker input | 8,000 UTF-8 bytes including a 1,024-byte fixed-context reserve |
+| Diff/source page and worker report | 4,096 serialized bytes each |
+| Model calls / chunks / source calls | 2,048 / 2,048 / 10,000 |
+| Changed files | 5,000 |
+| Cumulative source / model input / model output | 32 MiB / 32 MiB / 8 MiB |
+| Final report | 24,000 serialized bytes |
+
+The input/output byte budgets are conservative admission bounds, not measured
+token counts or cost estimates. Unknown output from failed attempts consumes a
+reserved allowance. Reducers combine 2-8 size-checked reports, never raw diffs.
+Deadlines are cooperative; cleanup may extend past the analysis deadline.
+
+The underlying readers support blobs up to 4 MiB and explicitly report binary
+or unsupported content. Expensive matching uses lossless before/after blocks,
+not a claim that every line was added or removed. See the
+[MCP read contracts and resource limits](github_app_mcp/README.md) for backend
+limits, cursor semantics, and remove/add rename handling.
 
 ## Observability
 

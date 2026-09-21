@@ -69,6 +69,7 @@ from copilot.session_events import (
 )
 from copilot.tools import Tool, ToolInvocation, ToolResult
 
+from change_analysis_tool import ChangeAnalysisService, stop_analysis_runtime
 from github_app_mcp.src.issuelens_github_mcp.auth import (
     GitHubAppError,
     GitHubAppTokenProvider,
@@ -113,6 +114,7 @@ if not os.environ.get("APPLICATIONINSIGHTS_CONNECTION_STRING"):
 
 _client: CopilotClient | None = None
 _client_lock = asyncio.Lock()
+_HEARTBEAT_SECONDS = 15
 _agents_dir = _project_dir / "agents"
 _skills_dir = str(_project_dir / "skills")
 _working_dir = (
@@ -156,6 +158,7 @@ _TRIAGE_AGENT: CustomAgentConfig = {
         "label-issue",
         "assign-issue",
         "notify",
+        "change-analysis",
     ],
     "infer": True,
 }
@@ -188,6 +191,7 @@ _PLAN_AGENT: CustomAgentConfig = {
         "label-issue",
         "assign-issue",
         "notify",
+        "change-analysis",
     ],
     "infer": True,
 }
@@ -200,9 +204,10 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
         "customization and bounded MCP wiki read/write tools."
     ),
     "prompt": _load_prompt(_agents_dir / "team-memory.md"),
-    "skills": ["issuelens-config", "team-memory"],
+    "skills": ["issuelens-config", "team-memory", "change-analysis"],
     "tools": [
         "issuelens-config",
+        "analyze-change",
         "github-get_repository",
         "github-list_issues",
         "github-get_issue",
@@ -220,6 +225,9 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
         "github-list_repository_tree",
         "github-search_repository_content",
         "github-list_merged_pull_requests",
+        "github-list_change_files",
+        "github-read_diff_chunk",
+        "github-read_file_range",
         "github-get_wiki_snapshot",
         "github-list_wiki_pages",
         "github-get_wiki_page",
@@ -350,6 +358,28 @@ async def _ensure_client() -> CopilotClient:
         await client.start()
         _client = client
         return _client
+
+
+async def _new_analysis_client(
+    directory: str,
+) -> tuple[CopilotClient, ProviderConfig | None, str | None]:
+    """Use an ephemeral empty-mode runtime, never the resumable parent client."""
+    provider, model = _byok_provider()
+    token = os.environ.get("GITHUB_TOKEN")
+    if provider is None and not token:
+        raise RuntimeError("Change analysis requires configured model authentication.")
+    client = CopilotClient(
+        mode="empty", base_directory=directory, working_directory=directory,
+        use_logged_in_user=False,
+        github_token=token if provider is None else None,
+        env=copilot_environment(),
+    )
+    try:
+        await client.start()
+    except BaseException:
+        await stop_analysis_runtime(client)
+        raise
+    return client, provider, model
 
 
 def _build_mcp_servers() -> dict:
@@ -582,6 +612,7 @@ async def _stream_response(
         run.admit()
     session = None
     unsubscribe = None
+    analysis = None
     status, stage, transport = "cancelled", "setup", "interrupted"
     error_type = "stream_interrupted"
     try:
@@ -596,6 +627,7 @@ async def _stream_response(
             return
         request_github_client = _new_host_github_client()
         request_config_tool = create_issuelens_config_tool(request_github_client)
+        analysis = ChangeAnalysisService(mcp_servers["github"], _new_analysis_client, run)
         try:
             with run.phase("media_load"):
                 issue_attachments = await issue_image_attachments(
@@ -610,7 +642,9 @@ async def _stream_response(
         attachments = [*attachments, *issue_attachments]
         with run.phase("session_open"):
             session = await client.create_session(
-                **_session_options(mcp_servers, [*_NOTIFICATION_TOOLS, request_config_tool])
+                **_session_options(
+                    mcp_servers, [*_NOTIFICATION_TOOLS, request_config_tool, analysis.tool()],
+                )
             )
         session_id = getattr(session, "session_id", None)
         run.set_identifier("session_id", session_id)
@@ -631,7 +665,11 @@ async def _stream_response(
         with run.phase("session_send"):
             await session.send(prompt, attachments=attachments or None)
         while True:
-            item = await queue.get()
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_SECONDS)
+            except TimeoutError:
+                yield b": keep-alive\n\n"
+                continue
             if item is None:
                 status, error_type = "completed", ""
                 break
@@ -654,6 +692,8 @@ async def _stream_response(
     finally:
         try:
             _unsubscribe_session(unsubscribe, run)
+            if analysis is not None:
+                await analysis.close()
             if session is not None:
                 with run.phase("session_close"):
                     if not await _close_session(session):
@@ -856,6 +896,7 @@ async def handle_chat(
     session = None
     unsubscribe = None
     cancellation_task = None
+    analysis = None
     guarded_conversation = None
     status, stage, transport = "cancelled", "setup", "interrupted"
     error_type, no_action = "stream_interrupted", False
@@ -919,6 +960,7 @@ async def handle_chat(
             yield stream.emit_completed()
             return
         request_config_tool = create_issuelens_config_tool(request_github_client)
+        analysis = ChangeAnalysisService(github_mcp_server, _new_analysis_client, run)
         try:
             with run.phase("media_load"):
                 issue_attachments = await issue_image_attachments(
@@ -939,7 +981,8 @@ async def handle_chat(
             )
         with run.phase("session_open"):
             session = await _chat_session(
-                conversation, mcp_servers, [*_NOTIFICATION_TOOLS, request_config_tool], run,
+                conversation, mcp_servers,
+                [*_NOTIFICATION_TOOLS, request_config_tool, analysis.tool()], run,
             )
         run.set_identifier("session_id", getattr(session, "session_id", None))
         queue: asyncio.Queue = asyncio.Queue()
@@ -975,7 +1018,11 @@ async def handle_chat(
                     attachments=attachments or None,
                 )
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=_HEARTBEAT_SECONDS)
+                except TimeoutError:
+                    yield stream.emit_in_progress()
+                    continue
                 if item is None:
                     status, error_type = "completed", ""
                     break
@@ -1007,6 +1054,8 @@ async def handle_chat(
     finally:
         try:
             _unsubscribe_session(unsubscribe, run)
+            if analysis is not None:
+                await analysis.close()
             if cancellation_task is not None:
                 cancellation_task.cancel()
                 await asyncio.gather(cancellation_task, return_exceptions=True)

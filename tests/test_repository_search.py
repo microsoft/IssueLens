@@ -72,8 +72,8 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         }
         self.refs = {"release/topic": OLD_COMMIT, "main": NEW_COMMIT}
         self.commits = {
-            OLD_COMMIT: {"sha": OLD_COMMIT, "commit": {"tree": {"sha": OLD_TREE}}},
-            NEW_COMMIT: {"sha": NEW_COMMIT, "commit": {"tree": {"sha": NEW_TREE}}},
+            OLD_COMMIT: {"sha": OLD_COMMIT, "tree": {"sha": OLD_TREE}},
+            NEW_COMMIT: {"sha": NEW_COMMIT, "tree": {"sha": NEW_TREE}},
         }
         self.indexed = {"items": [{"path": "current-main.txt"}], "total_count": 1}
         self.client = GitHubClient(
@@ -126,11 +126,19 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
             if isinstance(self.overrides[route], Exception):
                 raise self.overrides[route]
             return self.overrides[route]
-        if route.startswith("commits/"):
-            ref = route.removeprefix("commits/")
-            commit = self.commits.get(self.refs.get(ref, ref).lower())
+        if route.startswith("git/ref/heads/"):
+            ref = route.removeprefix("git/ref/heads/")
+            sha = self.refs.get(ref)
             if self.advance_ref_on_resolve:
                 self.refs["release/topic"] = NEW_COMMIT
+            return httpx.Response(200, json={
+                "ref": f"refs/heads/{ref}", "object": {"type": "commit", "sha": sha},
+            }) if sha is not None else httpx.Response(404)
+        if route.startswith("git/ref/tags/"):
+            return httpx.Response(404)
+        if route.startswith("git/commits/"):
+            ref = route.removeprefix("git/commits/")
+            commit = self.commits.get(ref.lower())
             return httpx.Response(200, json=commit) if commit is not None else httpx.Response(404)
         if route.startswith("git/trees/"):
             self.assertEqual(request.url.params["recursive"], "1")
@@ -256,7 +264,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         last_blob = self.add_file("z.txt", b"needle last file")
         clients = self.track_clients()
         routes = {
-            "commit": (f"commits/{OLD_COMMIT}", 1),
+            "commit": (f"git/commits/{OLD_COMMIT}", 1),
             "tree": (f"git/trees/{OLD_TREE}", 2),
             "blob": (f"git/blobs/{last_blob}", 4),
             "body": (f"git/blobs/{last_blob}", 4),
@@ -320,7 +328,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         original_get_token = self.provider.get_token
         routes = {
             "auth": (None, 0),
-            "commit": (f"commits/{OLD_COMMIT}", 1),
+            "commit": (f"git/commits/{OLD_COMMIT}", 1),
             "tree": (f"git/trees/{OLD_TREE}", 2),
             "blob": (f"git/blobs/{last_blob}", 4),
             "body": (f"git/blobs/{last_blob}", 4),
@@ -431,7 +439,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                         with self.assertRaises(TimeoutError) as raised:
                             await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
                 else:
-                    self.overrides[f"commits/{OLD_COMMIT}"] = failure
+                    self.overrides[f"git/commits/{OLD_COMMIT}"] = failure
                     with self.assertRaises(TimeoutError) as raised:
                         await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
                 self.assertIs(raised.exception, failure)
@@ -462,7 +470,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(self.requests, [])
             for route, params in (
-                (f"commits/{OLD_COMMIT}", None),
+                (f"git/commits/{OLD_COMMIT}", None),
                 (f"git/trees/{OLD_TREE}", {"recursive": "1"}),
             ):
                 await self.client._request(
@@ -522,7 +530,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
 
         async def handler(request):
             nonlocal started_count
-            if request.url.path.endswith(f"/commits/{OLD_COMMIT}"):
+            if request.url.path.endswith(f"/git/commits/{OLD_COMMIT}"):
                 started_count += 1
                 if started_count == 2:
                     both_started.set()
@@ -565,7 +573,8 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["items"][0]["matches"][0]["line_number"], 2)
         self.assertEqual(
             [request.url.path for request in self.requests],
-            [f"/repos/{REPOSITORY}/commits/release/topic",
+            [f"/repos/{REPOSITORY}/git/ref/heads/release/topic",
+             f"/repos/{REPOSITORY}/git/commits/{OLD_COMMIT}",
              f"/repos/{REPOSITORY}/git/trees/{OLD_TREE}",
              f"/repos/{REPOSITORY}/git/blobs/{old_blob}"],
         )
@@ -635,13 +644,13 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         for status in (301, 403, 404, 422, 500):
             with self.subTest(status=status):
                 self.requests.clear()
-                self.overrides["commits/release/topic"] = httpx.Response(
+                self.overrides["git/ref/heads/release/topic"] = httpx.Response(
                     status, text="secret-response-sentinel", headers={"Location": "https://other.example"}
                 )
                 with self.assertRaises(GitHubAppError) as raised:
                     await self.client.search_repository_content(REPOSITORY, "needle", ref="release/topic")
                 self.assertNotIn("secret-response-sentinel", str(raised.exception))
-                self.assertEqual(len(self.requests), 1)
+                self.assertEqual(len(self.requests), 2 if status == 404 else 1)
                 self.assertNotEqual(self.requests[0].url.path, "/search/code")
 
     async def test_pagination_reuses_resolved_commit_after_branch_moves(self):
@@ -796,7 +805,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_scan_does_not_retain_anonymous_auth(self):
         blob_sha = self.add_file("file.txt", b"needle")
-        routes = (f"commits/{OLD_COMMIT}", f"git/trees/{OLD_TREE}", f"git/blobs/{blob_sha}")
+        routes = (f"git/commits/{OLD_COMMIT}", f"git/trees/{OLD_TREE}", f"git/blobs/{blob_sha}")
         for completed, route in enumerate(routes, start=1):
             for failure in (httpx.Response(404), httpx.ReadError("secret-response-sentinel")):
                 with self.subTest(route=route, failure=type(failure).__name__):
@@ -824,7 +833,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_content_errors_keep_auth_mode_and_never_fall_back(self):
         clients = self.track_clients()
         blob_sha = self.add_file("file.txt", b"needle")
-        routes = (f"commits/{OLD_COMMIT}", f"git/trees/{OLD_TREE}", f"git/blobs/{blob_sha}")
+        routes = (f"git/commits/{OLD_COMMIT}", f"git/trees/{OLD_TREE}", f"git/blobs/{blob_sha}")
         for available in (True, False):
             self.provider.available = available
             for completed, route in enumerate(routes, start=1):
@@ -873,7 +882,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                     expected_auth = None if repository == other_repository and not other_installed else f"Bearer fake-{repository}-token"
                     self.assertEqual(request.headers.get("Authorization"), expected_auth)
                     route = request.url.path.removeprefix(f"/repos/{repository}/")
-                    if route == f"commits/{OLD_COMMIT}":
+                    if route == f"git/commits/{OLD_COMMIT}":
                         started[repository].set()
                         other = other_repository if repository == REPOSITORY else REPOSITORY
                         await asyncio.wait_for(started[other].wait(), timeout=2)
@@ -1045,11 +1054,11 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_malformed_commit_payloads_fail_safely(self):
         valid = copy.deepcopy(self.commits[OLD_COMMIT])
         for payload in (
-            [], {}, {"sha": OLD_COMMIT, "commit": []},
-            {"sha": OLD_COMMIT, "commit": {"tree": None}},
+            [], {}, {"sha": OLD_COMMIT, "tree": []},
+            {"sha": OLD_COMMIT, "tree": None},
             {**valid, "sha": "short"}, {**valid, "sha": NEW_COMMIT},
             {**valid, "sha": [OLD_COMMIT]},
-            {**valid, "commit": {"tree": {"sha": "../secret-response-sentinel"}}},
+            {**valid, "tree": {"sha": "../secret-response-sentinel"}},
         ):
             with self.subTest(payload=payload):
                 self.requests.clear()

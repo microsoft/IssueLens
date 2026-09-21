@@ -41,12 +41,15 @@ READ_TOOLS = frozenset({
     "list_repository_tree", "search_repository_content", "list_merged_pull_requests",
     "get_wiki_snapshot", "list_wiki_pages", "get_wiki_page", "search_wiki",
     "list_wiki_history", "get_wiki_diff",
+    "list_change_files", "read_diff_chunk", "read_file_range",
 })
 WRITE_TOOLS = frozenset({
     "add_labels", "set_assignees", "add_issue_comment", "add_eyes_reaction",
     "write_wiki_pages",
 })
-LOCAL_TOOLS = frozenset({"task", "issuelens-config", "send-email", "send-teams-notification"})
+LOCAL_TOOLS = frozenset({
+    "task", "issuelens-config", "send-email", "send-teams-notification", "analyze-change",
+})
 Scalar = str | int | float | bool
 Attributes = dict[str, Scalar]
 
@@ -198,6 +201,15 @@ class ToolCall:
     finished: bool = False
 
 
+@dataclass
+class AnalysisWorker:
+    agent: Agent
+    phase: str
+    seen: set[str] = field(default_factory=set)
+    calls: set[tuple[str, str]] = field(default_factory=set)
+    model_sent: bool = False
+
+
 class RunTelemetry:
     MAX_EVENTS = 8192
     MAX_TOOLS = 1024
@@ -247,6 +259,8 @@ class RunTelemetry:
         self.context_tokens_peak = 0
         self.context_token_limit = 0
         self.context_usage_observed = False
+        self.analysis_workers: dict[str, AnalysisWorker] = {}
+        self.analysis_counts: dict[str, int] = {}
         self.identifiers: Attributes = {}
         for key, value in (identifiers or {}).items():
             if key in {"invocation_id", "response_id", "conversation_id", "session_id"}:
@@ -327,6 +341,173 @@ class RunTelemetry:
         repo = _repository(repository)
         if not self.finished and repo and _count(number):
             self._target(repo, self.item_types.get((repo, number), "work_item"), number, "read")
+
+    def _analysis_count(self, name: str, value: int = 1) -> None:
+        self.analysis_counts[name] = self.analysis_counts.get(name, 0) + value
+
+    def analysis_worker_start(
+        self, identifier: str, phase: str, parent_tool_call_id: str = "",
+    ) -> None:
+        if self.finished:
+            return
+        if _identifier(identifier) is None or phase not in {"map", "reduce", "context"}:
+            self._lost("invalid_analysis_worker")
+            return
+        if identifier in self.analysis_workers or len(self.analysis_workers) >= 4:
+            self._lost("analysis_worker_limit")
+            return
+        parents = [
+            tool for (_, call_id), tool in self.tools.items()
+            if call_id == parent_tool_call_id and tool.operation == "analyze-change"
+        ]
+        parent = parents[0].owner if len(parents) == 1 else self.root
+        span = self.backend.span("invoke_agent change-analysis", {
+            **self._span_attributes("invoke_agent"),
+            "issuelens.agent.role": "change-analysis",
+            "issuelens.analysis.worker_id": identifier,
+            "issuelens.analysis.phase": phase,
+            "issuelens.parent_agent_id": parent.identity,
+        }, parent=parents[0].span if len(parents) == 1 else self.span,
+            start_ns=self.wall_clock())
+        agent = Agent(identifier, "change-analysis", span, self.clock(), parent.identity)
+        self.analysis_workers[identifier] = AnalysisWorker(agent, phase)
+        self._analysis_count("analysis_workers_started")
+
+    def analysis_worker_event(self, identifier: str, event: Any) -> None:
+        """Account for child inference without retaining or forwarding child text."""
+        worker = self.analysis_workers.get(identifier)
+        if self.finished or worker is None:
+            return
+        try:
+            kind = _get(event, "type")
+            kind = getattr(kind, "value", kind)
+            if kind not in {"assistant.usage", "assistant.turn_retry", "model.call_failure"}:
+                return
+            identity = _identifier(_get(event, "id"))
+            if identity is None:
+                self._lost("missing_event_id")
+                return
+            if identity in worker.seen:
+                return
+            if len(worker.seen) >= 128:
+                self._lost("event_limit")
+                return
+            worker.seen.add(identity)
+            data = _get(event, "data")
+            if kind == "assistant.usage":
+                worker.model_sent = True
+                self._record_usage(worker.agent, data, calls=worker.calls)
+            elif kind == "assistant.turn_retry":
+                self.retries += 1
+                self._metric("issuelens.model.retries", 1)
+            else:
+                self.model_failures += 1
+                self._metric("issuelens.model.failures", 1, error_type=self._error_code(data))
+                self._event("issuelens.run.error", {
+                    "stage": "analysis", "error_type": self._error_code(data),
+                    "worker_id": identifier, "phase": worker.phase,
+                })
+        except Exception:
+            self._lost("invalid_event")
+
+    def analysis_worker_sent(self, identifier: str) -> None:
+        worker = self.analysis_workers.get(identifier)
+        if worker is not None and not self.finished:
+            worker.model_sent = True
+            self.model_sent = True
+
+    def analysis_worker_finish(self, identifier: str, *, success: bool) -> None:
+        worker = self.analysis_workers.pop(identifier, None)
+        if worker is None:
+            return
+        agent = worker.agent
+        duration = max(0, self.clock() - agent.started)
+        if not success:
+            agent.span.set_status(StatusCode.ERROR)
+        if worker.model_sent and not agent.usage.calls:
+            self._lost("analysis_usage_unavailable")
+        agent.span.end(end_time=self.wall_clock())
+        self._analysis_count("analysis_workers_completed")
+        if not success:
+            self._analysis_count("analysis_workers_failed")
+        self._event("issuelens.analysis.worker", {
+            "worker_id": identifier, "phase": worker.phase,
+            "parent_agent_id": agent.parent,
+            "status": "completed" if success else "failed", "duration_s": duration,
+            **agent.usage.attributes(),
+        })
+        self._metric("gen_ai.invoke_agent.duration", duration,
+                     role="change-analysis", status="completed" if success else "failed")
+
+    def analysis_read(
+        self, operation: str, repository: Any, *, success: bool,
+        duration: float, result_bytes: int,
+    ) -> None:
+        if self.finished or operation not in {"list_change_files", "read_diff_chunk", "read_file_range"}:
+            return
+        self._analysis_count("analysis_reads")
+        if not success:
+            self._analysis_count("analysis_reads_failed")
+        if (size := _count(result_bytes)) is not None:
+            self._analysis_count("analysis_result_bytes", size)
+        if success and (repo := _repository(repository)):
+            self._target(repo, "repository", 0, "read")
+        if math.isfinite(duration) and duration >= 0:
+            end_ns = self.wall_clock()
+            span = self.backend.span(f"execute_tool github-{operation}", {
+                **self._span_attributes("execute_tool"),
+                "issuelens.agent.role": "change-analysis",
+                "gen_ai.tool.name": f"github-{operation}",
+            }, parent=self.span, start_ns=max(self.started_ns, end_ns - int(duration * 1e9)))
+            if not success:
+                span.set_status(StatusCode.ERROR)
+                span.set_attribute("error.type", "analysis_read_failed")
+            span.end(end_time=end_ns)
+            self._metric("gen_ai.execute_tool.duration", duration, tool=f"github-{operation}",
+                         role="change-analysis", status="completed" if success else "failed")
+
+    def analysis_result(self, result: Mapping[str, Any]) -> None:
+        if self.finished:
+            return
+        status = result.get("status")
+        if status not in {"complete", "partial", "blocked"}:
+            self._lost("invalid_analysis_result")
+            return
+        self._analysis_count(f"analysis_jobs_{status}")
+        attributes: Attributes = {"status": status}
+        if (repo := _repository(result.get("repository"))) is not None:
+            attributes["repository"] = repo
+        allowed = {
+            "files_discovered", "files_exhausted", "files_reviewed", "files_incomplete",
+            "chunks_discovered", "chunks_reviewed", "fragments_required",
+            "fragments_delivered", "fragments_reviewed", "context_requests",
+            "context_requests_resolved", "context_requests_unresolved",
+            "context_chunks_discovered", "context_chunks_reviewed", "reports_produced",
+            "reports_in_summary", "reports_unincorporated", "unresolved_count",
+            "findings_omitted", "citations_omitted", "source_calls", "model_calls",
+            "model_retries", "map_calls", "context_calls", "reduce_calls",
+            "model_input_bytes", "model_output_bytes", "model_output_budget_bytes", "source_bytes",
+            "largest_prompt_bytes", "largest_report_bytes", "rejected_source_responses",
+            "rejected_model_responses", "invalid_model_reports", "model_errors",
+            "diff_chunk_reads", "context_chunk_reads",
+        }
+        for category in ("coverage", "counters"):
+            values = result.get(category)
+            if isinstance(values, Mapping):
+                for key in allowed:
+                    if (value := _count(values.get(key))) is not None:
+                        attributes[key] = value
+                for key in ("inventory_complete", "output_limited"):
+                    if type(value := values.get(key)) is bool:
+                        attributes[key] = value
+        self._event("issuelens.analysis.completed", attributes)
+
+    def analysis_failure(self) -> None:
+        if not self.finished:
+            self._analysis_count("analysis_jobs_blocked")
+            self._event("issuelens.run.error", {
+                "stage": "analysis", "error_type": "analysis_failed",
+            })
 
     @contextmanager
     def activate(self) -> Iterator[None]:
@@ -584,12 +765,15 @@ class RunTelemetry:
 
     def _usage(self, actor: str, data: Any) -> None:
         owner = self._owner(actor, data)
+        self._record_usage(owner, data, calls=self.calls)
+
+    def _record_usage(self, owner: Agent, data: Any, *, calls: set[tuple[str, str]]) -> None:
         call_id = _identifier(_get(data, "api_call_id"))
         if call_id is not None:
             key = (owner.identity, call_id)
-            if key in self.calls:
+            if key in calls:
                 return
-            self.calls.add(key)
+            calls.add(key)
         model = _identifier(_get(data, "model")) or "unknown"
         if model not in self.models and len(self.models) >= self.MAX_MODELS:
             model = "other"
@@ -639,14 +823,14 @@ class RunTelemetry:
                 return
             name, operation = _tool_name(data)
             args = _get(data, "arguments")
-            repo = _repository(_get(args, "repository")) if operation in READ_TOOLS | WRITE_TOOLS | {"issuelens-config"} else None
+            repo = _repository(_get(args, "repository")) if operation in READ_TOOLS | WRITE_TOOLS | {"issuelens-config", "analyze-change"} else None
             if operation == "add_eyes_reaction":
                 reaction_kind = _get(args, "target_kind")
                 number = _count(_get(args, "target_id")) if reaction_kind in ("issue", "pull_request") else None
                 target_kind = reaction_kind if number else "work_item"
             else:
                 number = _count(_get(args, "issue_number")) or _count(_get(args, "pull_number"))
-                target_kind = "pull_request" if _get(args, "pull_number") and operation in READ_TOOLS else "work_item"
+                target_kind = "pull_request" if _get(args, "pull_number") and operation in READ_TOOLS | {"analyze-change"} else "work_item"
             if repo and number:
                 target_kind = self.item_types.get((repo, number), target_kind)
             if repo:
@@ -694,6 +878,8 @@ class RunTelemetry:
             self.notification_submissions += 1
         repo = tool.repository
         if repo is None:
+            return
+        if tool.operation == "analyze-change" and metadata.get("status") not in {"complete", "partial"}:
             return
         kind = tool.kind
         if tool.operation == "get_repository" and _repository(metadata.get("full_name")) == repo:
@@ -762,6 +948,9 @@ class RunTelemetry:
         if transport_status not in {"completed", "interrupted", "rejected", "unknown"}:
             raise ValueError("Unsupported transport status")
         self.finished = True
+        for identifier in tuple(self.analysis_workers):
+            self._lost("unfinished_analysis_worker")
+            self.analysis_worker_finish(identifier, success=False)
         if self.session_failed and status == "completed":
             status = "failed"
             error_type = "execution_error"
@@ -805,7 +994,9 @@ class RunTelemetry:
             usage_status = "complete" if all(
                 self.usage.present.get(name) == self.usage.calls for name in ("input_tokens", "output_tokens")
             ) and not self.model_failures and not any(
-                reason in self.quality for reason in {"invalid_event", "event_limit", "missing_event_id"}
+                reason in self.quality for reason in {
+                    "invalid_event", "event_limit", "missing_event_id", "analysis_usage_unavailable",
+                }
             ) else "partial"
         effects = self.write_operations + self.notification_submissions
         outcome = "no_action" if no_action else "unknown"
@@ -818,14 +1009,15 @@ class RunTelemetry:
             "usage_status": usage_status, "attribution_complete": attribution_complete,
             "model_request_sent": self.model_sent,
             "model_failures": self.model_failures, "model_retries": self.retries,
-            "tools_started": sum(agent.tools_started for agent in agents.values()),
-            "tools_completed": sum(agent.tools_completed for agent in agents.values()),
-            "tools_failed": sum(agent.tools_failed for agent in agents.values()),
+            "tools_started": sum(agent.tools_started for agent in agents.values()) + self.analysis_counts.get("analysis_reads", 0),
+            "tools_completed": sum(agent.tools_completed for agent in agents.values()) + self.analysis_counts.get("analysis_reads", 0),
+            "tools_failed": sum(agent.tools_failed for agent in agents.values()) + self.analysis_counts.get("analysis_reads_failed", 0),
             "agents_started": sum(identity not in {"root", "unattributed"} for identity in agents),
             "write_operations_succeeded": self.write_operations,
             "notification_submissions": self.notification_submissions,
             "telemetry_incomplete": bool(self.quality),
             **self.usage.attributes(),
+            **self.analysis_counts,
             **{f"incomplete_{reason}": count for reason, count in self.quality.items()},
         }
         if self.first_output is not None:

@@ -108,6 +108,12 @@ constraints, prior partial implementations, and the tests that currently
 define expected behavior. Prefer current executable behavior and tests over
 issue prose or historical assumptions.
 
+For PR or commit evidence, follow the preloaded `change-analysis` skill and use
+`analyze-change` rather than accumulating full patches in this conversation.
+Retain its pinned source references and check coverage. Resolve specific
+cross-file uncertainties through bounded source reads; incomplete evidence
+must remain an explicit planning limitation.
+
 If source or test access is unavailable, or the available tools cannot locate
 enough relevant code, identify the missing evidence and set readiness to
 `needs-clarification` or `blocked` as appropriate. Do not invent affected files,

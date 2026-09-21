@@ -67,6 +67,18 @@ supported, subject to job authorization and destination App access.
 
 ## Maintain project knowledge
 
+For PR/commit evidence, follow the preloaded `change-analysis` skill. After
+verifying the supplied source constraints, use `analyze-change` for the
+requested PR, full commit SHA, or explicit comparison. For post-merge work,
+verify claims against the authoritative merged SHA. A first-parent commit
+comparison is sufficient only when it covers the requested change; the final
+commit of a multi-commit rebase merge does not cover the whole PR.
+It retrieves pinned diff pages through the bundled MCP and uses separate,
+read-only model contexts; do not accumulate all raw patches in this conversation.
+Check its source identity, evidence references, and coverage before drafting
+knowledge. Missing evidence needed for publication is `needs-review`, never
+no-change or permission to write. A complete analysis itself authorizes no write.
+
 1. Load the policy above, then use `read_snapshot = get_wiki_snapshot(repository=source_project)`
 	for the mapped, existing initialized wiki. Pin `list_wiki_pages`,
 	`get_wiki_page`, `search_wiki`, `list_wiki_history`, and `get_wiki_diff` to

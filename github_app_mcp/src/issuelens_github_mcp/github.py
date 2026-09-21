@@ -20,6 +20,7 @@ from urllib.parse import quote, urljoin, urlparse
 import httpx
 
 from .auth import GitHubAppError, GitHubAppTokenProvider, InstallationCredential, Permissions, validate_repository
+from .changes import ChangeReader, DEFAULT_CHANGE_PAGE_BYTES
 from .policy import IssueLensConfigError, resolve_wiki_repository, validate_wiki_repository
 from .wiki import WikiError, WikiRepository
 
@@ -101,6 +102,7 @@ class GitHubClient:
         self._token_provider = token_provider
         self._writes_enabled = writes_enabled
         self._transport = transport
+        self._changes = ChangeReader(token_provider, transport)
 
     @property
     def writes_enabled(self) -> bool:
@@ -387,6 +389,30 @@ class GitHubClient:
             permissions={"contents": "read"},
         )
 
+    async def list_change_files(
+        self, repository: str, pull_number: int | None = None,
+        commit_sha: str | None = None, base_sha: str | None = None,
+        head_sha: str | None = None, cursor: str | None = None, per_page: int = 50,
+    ) -> dict[str, Any]:
+        """List pinned Git-tree changes without downloading REST file patches."""
+        return await self._changes.list_change_files(
+            repository, pull_number, commit_sha, base_sha, head_sha, cursor, per_page,
+        )
+
+    async def read_diff_chunk(
+        self, repository: str, base_sha: str | None, head_sha: str, path: str,
+        cursor: str | None = None, max_bytes: int = DEFAULT_CHANGE_PAGE_BYTES,
+    ) -> dict[str, Any]:
+        """Read one serialized-byte-bounded page of an immutable file comparison."""
+        return await self._changes.read_diff_chunk(repository, base_sha, head_sha, path, cursor, max_bytes)
+
+    async def read_file_range(
+        self, repository: str, sha: str, path: str, start_line: int = 1,
+        end_line: int = 120, cursor: str | None = None, max_bytes: int = DEFAULT_CHANGE_PAGE_BYTES,
+    ) -> dict[str, Any]:
+        """Read pinned UTF-8 source context, including lossless long-line pages."""
+        return await self._changes.read_file_range(repository, sha, path, start_line, end_line, cursor, max_bytes)
+
     async def compare_commits(self, repository: str, base: str, head: str) -> Any:
         return await self._request(
             "GET", repository,
@@ -456,19 +482,16 @@ class GitHubClient:
         except GitHubAppError:
             credential = None
         content_read_auth = _ContentReadAuth(repository, credential)
-        commit = await self._request(
-            "GET", repository, f"/commits/{quote(ref, safe='')}",
-            permissions={"contents": "read"}, content_read_auth=content_read_auth,
-            _client=client,
+        commit = await self._resolve_search_commit(
+            repository, ref, content_read_auth=content_read_auth, client=client,
         )
         if (
             not isinstance(commit, Mapping)
-            or not isinstance(commit.get("commit"), Mapping)
-            or not isinstance(commit["commit"].get("tree"), Mapping)
+            or not isinstance(commit.get("tree"), Mapping)
         ):
             raise GitHubAppError("GitHub returned an invalid search commit")
         resolved_ref = _search_oid(commit.get("sha"))
-        tree_sha = _search_oid(commit["commit"]["tree"].get("sha"))
+        tree_sha = _search_oid(commit["tree"].get("sha"))
         if _SEARCH_OID_PATTERN.fullmatch(ref) and ref.lower() != resolved_ref:
             raise GitHubAppError("GitHub returned a different search commit")
         tree = await self._request(
@@ -551,6 +574,79 @@ class GitHubClient:
         if len(json.dumps(result, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
             raise GitHubAppError("GitHub search result is too large; reduce per_page")
         return result
+
+    async def _resolve_search_commit(
+        self, repository: str, ref: str, *,
+        content_read_auth: _ContentReadAuth, client: httpx.AsyncClient,
+    ) -> Any:
+        """Resolve branches/tags without ever requesting patch-bearing commits."""
+        async def read(path: str, params: Mapping[str, Any] | None = None) -> Any:
+            return await self._request(
+                "GET", repository, path, permissions={"contents": "read"},
+                content_read_auth=content_read_auth, _client=client, params=params,
+            )
+
+        if _SEARCH_OID_PATTERN.fullmatch(ref):
+            return await read(f"/git/commits/{ref.lower()}")
+        if ref == "HEAD":
+            metadata = await read("")
+            if not isinstance(metadata, Mapping):
+                raise GitHubAppError("GitHub returned invalid repository metadata")
+            ref = _ref(metadata.get("default_branch"))
+        if ref.startswith(("refs/heads/", "refs/tags/")):
+            candidates = [ref.removeprefix("refs/")]
+        else:
+            candidates = [f"heads/{ref}", f"tags/{ref}"]
+        reference = None
+        for index, candidate in enumerate(candidates):
+            namespace, name = candidate.split("/", 1)
+            try:
+                reference = await read(f"/git/ref/{namespace}/{quote(name, safe='')}")
+            except GitHubAppError as error:
+                cause = error.__cause__
+                if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 404:
+                    if index + 1 < len(candidates):
+                        continue
+                    if re.fullmatch(r"[0-9a-fA-F]{7,39}", ref):
+                        # The one-item commit *list* is metadata-only, unlike
+                        # /commits/{ref}; retain legacy abbreviated-SHA inputs.
+                        commits = await read("/commits", {"sha": ref, "per_page": 1})
+                        if not isinstance(commits, list) or len(commits) != 1 or not isinstance(commits[0], Mapping):
+                            raise GitHubAppError("GitHub returned invalid search commit metadata")
+                        resolved = _search_oid(commits[0].get("sha"))
+                        if not resolved.startswith(ref.lower()):
+                            raise GitHubAppError("GitHub returned a different search commit")
+                        reference = {"object": {"type": "commit", "sha": resolved}}
+                        break
+                raise
+            if (
+                not isinstance(reference, Mapping)
+                or reference.get("ref") != f"refs/{candidate}"
+                or not isinstance(reference.get("object"), Mapping)
+            ):
+                raise GitHubAppError("GitHub returned an invalid search ref")
+            break
+        target = reference["object"]
+        seen = set()
+        for _ in range(9):
+            sha = _search_oid(target.get("sha"))
+            kind = target.get("type")
+            if kind == "commit":
+                commit = await read(f"/git/commits/{sha}")
+                if not isinstance(commit, Mapping) or _search_oid(commit.get("sha")) != sha:
+                    raise GitHubAppError("GitHub returned a different search commit")
+                return commit
+            if kind != "tag" or sha in seen or len(seen) >= 8:
+                raise GitHubAppError("Search ref does not resolve to a commit within the tag limit")
+            seen.add(sha)
+            tag = await read(f"/git/tags/{sha}")
+            if (
+                not isinstance(tag, Mapping) or _search_oid(tag.get("sha")) != sha
+                or not isinstance(tag.get("object"), Mapping)
+            ):
+                raise GitHubAppError("GitHub returned an invalid search tag")
+            target = tag["object"]
+        raise GitHubAppError("Search ref exceeds the tag resolution limit")
 
     async def list_merged_pull_requests(
         self, repository: str, *, base: str, since: str | None = None,

@@ -70,6 +70,11 @@ Preserve existing assignees whenever assignment was requested.
 
 ## Repository evidence
 
+For PR or commit evidence, follow the preloaded `change-analysis` skill and use
+`analyze-change` to keep large diffs out of this conversation. Check its pinned
+source, coverage, and limitations; a partial analysis cannot prove an absent
+bug or completed fix.
+
 Use targeted repository source and test inspection whenever a material triage
 conclusion depends on current implementation state. This is required when
 deciding whether a bug or feature already exists, whether an issue is still

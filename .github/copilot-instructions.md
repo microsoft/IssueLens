@@ -79,11 +79,19 @@ protocol for chat.
     `attachments` contains validated inline Copilot `blob` attachments.
   - **`POST /responses`** — chat (playground, Teams, any Responses client).
     The conversation's Copilot session is resumed each turn.
-  - **Session-owned GitHub MCP** — every Copilot session starts the bundled
+  - **Session-owned GitHub MCP** — every user-facing Copilot session starts the bundled
     `github_app_mcp` stdio process with the App ID and Key Vault secret URI. The
     process loads the private key lazily, resolves installations, and caches
     short-lived tokens only in memory for its process/session lifetime. A token
     is restricted to one repository and the minimum tool permission set.
+  - **Bounded change analysis** — `analyze-change` coordinates paged source
+    reads through a separate request-owned, read-only bundled MCP connection.
+    Fresh tool-less SDK workers analyze bounded evidence and return validated
+    reports for bounded reduction. They are not new job owners and have no
+    write authority. Raw diffs do not accumulate in parent chat history.
+    `change_analysis.py` owns batching/coverage; `change_analysis_tool.py`
+    owns transport, worker isolation, lifetime, and admission. Partial evidence
+    remains explicit and cannot establish no-change or successful publication.
   - **Issue-body images** — before the model turn, the trusted host loader
     resolves explicit issue URLs or `owner/repository#number` references using
     the protocol's GitHub identity, accepts only allowlisted GitHub-hosted image
@@ -123,7 +131,7 @@ protocol for chat.
     internal `--wiki-writer` mode. Users need no environment flag. The existing
     `GITHUB_MCP_ENABLE_WRITES` remains for triage, not wiki writes.
 - **Skills** (`skills/`): `issuelens-config` (validated repository policy),
-  `find-duplicates`, `label-issue`, `assign-issue`, `notify`, and `team-memory`
+  `find-duplicates`,   `label-issue`, `assign-issue`, `notify`, `change-analysis`, and `team-memory`
   (read-only retrieval preloaded on all agents, including the orchestrator).
 - **Media inputs** — `media_inputs.py` normalizes Responses `input_image` and
   `input_file` content and invocation `blob` attachments into Copilot session

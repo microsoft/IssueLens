@@ -22,6 +22,7 @@ EVENTS = frozenset({
     "issuelens.run.started", "issuelens.run.completed", "issuelens.run.agent",
     "issuelens.run.model", "issuelens.run.target", "issuelens.run.error",
     "issuelens.request.rejected",
+    "issuelens.analysis.worker", "issuelens.analysis.completed",
 })
 HISTOGRAMS = {
     "issuelens.run.duration": "s",
