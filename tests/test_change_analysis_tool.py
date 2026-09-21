@@ -14,7 +14,7 @@ from copilot.tools import ToolInvocation
 from mcp.types import CallToolResult, TextContent
 
 import change_analysis_tool as bridge
-from change_analysis import AnalysisLimits
+from change_analysis import MAX_FOCUS_BYTES, AnalysisLimits
 from telemetry import RunTelemetry, Settings
 
 if __package__:
@@ -220,6 +220,45 @@ class ChangeAnalysisToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.error, "invalid_arguments")
         self.assertEqual(self.directories, [])
         self.assertEqual(self.service.admitted, 0)
+
+    async def test_oversized_escaped_focus_is_rejected_before_runtime_start(self):
+        cases = (
+            "x" * (MAX_FOCUS_BYTES - 1),
+            "\\" * ((MAX_FOCUS_BYTES - 2) // 2 + 1),
+            '"' * ((MAX_FOCUS_BYTES - 2) // 2 + 1),
+            "\n" * ((MAX_FOCUS_BYTES - 2) // 2 + 1),
+            "\u00e9" * ((MAX_FOCUS_BYTES - 2) // 6 + 1),
+            "\U0001f600" * ((MAX_FOCUS_BYTES - 2) // 12 + 1),
+        )
+        analyze = AsyncMock(return_value={"status": "complete"})
+        with patch.object(bridge, "analyze_change", new=analyze):
+            for focus in cases:
+                with self.subTest(focus=repr(focus[:12])):
+                    response = await self.service.tool().handler(ToolInvocation(arguments={
+                        "repository": "owner/repo", "commit_sha": "a" * 40, "focus": focus,
+                    }))
+                    self.assertEqual(response.error, "invalid_arguments")
+                    self.assertEqual(response.result_type, "failure")
+                    self.assertIn(str(MAX_FOCUS_BYTES), response.text_result_for_llm)
+        analyze.assert_not_called()
+        self.assertEqual(self.directories, [])
+        self.assertEqual(self.service.admitted, 0)
+        self.read.assert_not_called()
+
+    def test_focus_schema_and_boundary_values_match_controller(self):
+        schema = self.service.tool().parameters["properties"]["focus"]
+        self.assertEqual(schema["maxLength"], MAX_FOCUS_BYTES - 2)
+        self.assertIn(str(MAX_FOCUS_BYTES), schema["description"])
+        for focus in (
+            "", "x" * (MAX_FOCUS_BYTES - 2), "\\" * ((MAX_FOCUS_BYTES - 2) // 2),
+            "\u00e9" * ((MAX_FOCUS_BYTES - 2) // 6),
+            "\U0001f600" * ((MAX_FOCUS_BYTES - 2) // 12),
+        ):
+            with self.subTest(focus=repr(focus[:12])):
+                result = bridge._arguments({
+                    "repository": "owner/repo", "commit_sha": "a" * 40, "focus": focus,
+                })
+                self.assertEqual(result["focus"], focus)
 
     async def test_service_stops_runtime_removes_scratch_and_bounds_invocations(self):
         result = {

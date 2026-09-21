@@ -18,7 +18,13 @@ from copilot import CopilotClient, ProviderConfig
 from copilot.generated.rpc import PermissionDecisionReject
 from copilot.tools import Tool, ToolInvocation, ToolResult
 
-from change_analysis import MODEL_CONTEXT_RESERVE_BYTES, AnalysisLimits, analyze_change
+from change_analysis import (
+    MAX_FOCUS_BYTES,
+    MODEL_CONTEXT_RESERVE_BYTES,
+    AnalysisLimits,
+    analyze_change,
+    validate_focus,
+)
 from github_app_mcp.src.issuelens_github_mcp.auth import (
     GitHubAppError,
     validate_repository,
@@ -101,10 +107,7 @@ def _arguments(value: Any) -> dict[str, Any]:
             result[name] = sha.lower()
     if (base is None) != (head is None):
         raise ValueError("Supply both base_sha and head_sha.")
-    focus = value.get("focus", "")
-    if not isinstance(focus, str) or len(focus) > 2048 or len(focus.encode("utf-8")) > 2048:
-        raise ValueError("focus must be text of at most 2048 UTF-8 bytes.")
-    result["focus"] = focus
+    result["focus"] = validate_focus(value.get("focus", ""))
     return result
 
 
@@ -378,8 +381,12 @@ class ChangeAnalysisService:
                     "base_sha": dict(sha),
                     "head_sha": dict(sha),
                     "focus": {
-                        "type": "string", "maxLength": 2048,
-                        "description": "Bounded analysis guidance; not scope or write authorization.",
+                        "type": "string", "maxLength": MAX_FOCUS_BYTES - 2,
+                        "description": (
+                            f"Analysis guidance limited to {MAX_FOCUS_BYTES} ASCII JSON-encoded "
+                            "bytes, including quotes. Non-ASCII characters are escaped. "
+                            "Not scope or write authorization."
+                        ),
                     },
                 },
                 "required": ["repository"],

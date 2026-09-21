@@ -32,6 +32,9 @@ the wrong comparison does not satisfy the requested coverage.
 capability context. It is not authorization, a new repository selector, or a
 way to change resource limits. Do not put credentials or unrelated private
 knowledge in it.
+The limit is 768 bytes as an ASCII JSON string, including quotes and escapes;
+non-ASCII characters and escaped punctuation can reduce the character allowance.
+Oversized guidance is rejected before starting analysis workers.
 
 The host retrieves evidence only through the bundled read-only GitHub MCP
 tools, analyzes small batches in fresh tool-less Copilot contexts, and returns

@@ -314,7 +314,46 @@ class ChangeTests(unittest.IsolatedAsyncioTestCase):
             ("becomes-dir", "removed"), ("becomes-dir/child", "added"),
             ("becomes-file", "added"), ("becomes-file/child", "removed"),
         ])
+        for item in result["files"]:
+            with self.subTest(path=item["path"]):
+                pages = await self.diff_pages(before, after, item["path"], max_bytes=1024)
+                for page in pages:
+                    self.assertEqual(page["status"], "text")
+                    self.assertEqual(page["snapshot_id"], result["snapshot"]["snapshot_id"])
+                    self.assertEqual(page["old_blob_sha"], item["old_blob_sha"])
+                    self.assertEqual(page["new_blob_sha"], item["new_blob_sha"])
+                content = "".join(page["content"] for page in pages)
+                self.assertIn("+new\n" if item["status"] == "added" else (
+                    "-old\n" if item["path"] == "becomes-dir" else "-new\n"
+                ), content)
         self.assertNotIn(f"/git/trees/{shared}", self.objects.routes())
+
+    async def test_directory_only_diff_targets_remain_explicitly_unsupported(self):
+        before = self.objects.commit(self.objects.tree({}))
+        directory = self.objects.directory(self.objects.tree({
+            "child": self.objects.file("new\n"),
+        }))
+        after = self.objects.commit(self.objects.tree({"dir": directory}), [before])
+        for base in (before, after):
+            with self.subTest(base=base):
+                page = await self.client.read_diff_chunk(REPOSITORY, base, after, "dir")
+                self.assertEqual(page["status"], "unsupported")
+                self.assertEqual(page["reason"], "directory")
+
+    async def test_missing_descendants_never_follow_files_links_or_gitlinks(self):
+        entries = {
+            "file": self.objects.file("not a directory"),
+            "link": self.objects.file("outside/target", mode="120000"),
+            "submodule": {"sha": oid("other-repository"), "mode": "160000", "type": "commit"},
+        }
+        head = self.objects.commit(self.objects.tree(entries))
+        for path in entries:
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(GitHubAppError, "non-directory ancestor"):
+                    await self.client.read_file_range(REPOSITORY, head, f"{path}/child")
+                with self.assertRaisesRegex(GitHubAppError, "does not exist"):
+                    await self.client.read_diff_chunk(REPOSITORY, None, head, f"{path}/child")
+        self.assertFalse(any(route.startswith("/git/blobs/") for route in self.objects.routes()))
 
     async def test_inventory_exceeds_3000_without_patch_endpoint_or_global_cap_change(self):
         item = self.objects.file("small\n")

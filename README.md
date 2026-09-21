@@ -273,6 +273,7 @@ Default controller limits are defined in `AnalysisLimits` in
 | Analysis time | 900 seconds, shared by at most two analysis attempts per turn; queue time counts |
 | Individual model call | 120 seconds |
 | Worker input | 8,000 UTF-8 bytes including a 1,024-byte fixed-context reserve |
+| `focus` guidance | 768 ASCII JSON-encoded bytes, including quotes and escapes; rejected before worker startup |
 | Diff/source page and worker report | 4,096 serialized bytes each |
 | Model calls / chunks / source calls | 2,048 / 2,048 / 10,000 |
 | Changed files | 5,000 |

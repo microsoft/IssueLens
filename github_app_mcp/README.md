@@ -126,6 +126,12 @@ REST PR-files/comparison inventories have 3,000/300-file ceilings.
    remove/add pairs. For mode `160000`, the object SHA is a gitlink's commit,
    not a text blob.
 
+   Directory/file replacements use remove/add entries for the file at the
+   transition path and the affected descendants. Diff reads use the same
+   identities: the directory side of a replacement is absent, and a descendant
+   cannot exist below a non-directory ancestor. Links are never followed;
+   direct directory-only diff targets remain explicitly unsupported.
+
    Inventories walk immutable, nonrecursive Git trees, skipping equal subtree
    hashes. They do not download patches and are not limited to 3,000 files.
    A truncated tree fails explicitly. Pages contain at most `per_page` entries

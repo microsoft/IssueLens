@@ -256,6 +256,18 @@ class ChangeAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(source.calls), 1)
         self.assertEqual(model.calls, [])
 
+    async def test_focus_json_boundaries_are_accepted_without_changing_guidance(self):
+        for focus in (
+            "", "x" * (MAX_FOCUS_BYTES - 2), "\\" * ((MAX_FOCUS_BYTES - 2) // 2),
+            "\u00e9" * ((MAX_FOCUS_BYTES - 2) // 6),
+            "\U0001f600" * ((MAX_FOCUS_BYTES - 2) // 12),
+        ):
+            with self.subTest(focus=repr(focus[:12])):
+                result, _, model = await self.run_analysis(model=FakeModel(capture=True), focus=focus)
+                self.assertEqual(result["status"], "complete", result)
+                for call in model.calls:
+                    self.assertEqual(call["prompt"]["focus"], focus)
+
     async def test_root_commit_uses_explicit_absent_base_and_pinned_head(self):
         def mutate(name, arguments, response):
             if name == "list_change_files":

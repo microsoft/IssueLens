@@ -185,6 +185,17 @@ def _text(value: Any, limit: int, *, empty: bool = False) -> str:
     return value
 
 
+def validate_focus(value: Any) -> str:
+    """Apply the same escaped JSON budget at the tool and controller boundaries."""
+    try:
+        return _text(value, MAX_FOCUS_BYTES, empty=True)
+    except _Invalid:
+        raise ValueError(
+            f"focus must be valid UTF-8 text within {MAX_FOCUS_BYTES} ASCII JSON-encoded "
+            "bytes, including quotes and escapes."
+        ) from None
+
+
 def _number(value: Any, *, minimum: int = 0) -> int:
     if type(value) is not int or not minimum <= value <= 2_147_483_647:
         raise _Invalid("invalid_response")
@@ -400,7 +411,10 @@ class _Controller:
             self.repository = ""
             self.selector = {}
             raise _Invalid("invalid_input")
-        _text(self.focus, MAX_FOCUS_BYTES, empty=True)
+        try:
+            self.focus = validate_focus(self.focus)
+        except ValueError:
+            raise _Invalid("invalid_input") from None
         if self.selector.keys() == {"pull_number"}:
             _number(self.selector["pull_number"], minimum=1)
         elif self.selector.keys() == {"commit_sha"}:

@@ -713,7 +713,10 @@ class ChangeReader:
                 if end <= start:
                     raise GitHubAppError("Change inventory metadata exceeds the result limit")
 
-    async def _entry(self, session: _Session, sha: str | None, path: str) -> _Entry | None:
+    async def _entry(
+        self, session: _Session, sha: str | None, path: str, *,
+        non_tree_as_missing: bool = False,
+    ) -> _Entry | None:
         if sha is None:
             return None
         tree = (await self._commit(session, sha)).tree
@@ -725,6 +728,8 @@ class ChangeReader:
             if index == len(parts) - 1:
                 return entry
             if entry.kind != "tree":
+                if non_tree_as_missing:
+                    return None
                 raise GitHubAppError("Path has a non-directory ancestor; links are never followed")
             tree = entry.sha
         return None
@@ -779,7 +784,14 @@ class ChangeReader:
         cached = self.cache.get(key)
         if cached is not None:
             return cached
-        old, new = await self._entry(session, base, path), await self._entry(session, head, path)
+        old = await self._entry(session, base, path, non_tree_as_missing=True)
+        new = await self._entry(session, head, path, non_tree_as_missing=True)
+        # Match the inventory's remove/add view of directory/file replacements.
+        if old is not None and new is not None:
+            if old.kind == "tree" and new.kind != "tree":
+                old = None
+            elif new.kind == "tree" and old.kind != "tree":
+                new = None
         if old is None and new is None:
             raise GitHubAppError("Path does not exist in either pinned snapshot")
         old_sha, new_sha = old.sha if old else None, new.sha if new else None

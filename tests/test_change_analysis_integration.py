@@ -45,17 +45,23 @@ class SourceFixture:
             old = (f"old_{index}\n" * 250).encode()
             new = (f"{RAW_MARKER}_{index}\n" * new_lines).encode()
             for entries, content in ((before, old), (after, new)):
-                sha = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
-                self.blobs[sha] = content
-                entries.append({
-                    "path": path, "type": "blob", "mode": "100644",
-                    "sha": sha, "size": len(content),
-                })
+                entries.append(self.file(path, content))
         self.commits = {
             BASE: {"sha": BASE, "tree": {"sha": self.tree(before)}, "parents": []},
             HEAD: {"sha": HEAD, "tree": {"sha": self.tree(after)}, "parents": [{"sha": BASE}]},
         }
         self.client = GitHubClient(self, transport=httpx.MockTransport(self.handle))
+
+    def file(self, path, content):
+        sha = hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content).hexdigest()
+        self.blobs[sha] = content
+        return {
+            "path": path, "type": "blob", "mode": "100644",
+            "sha": sha, "size": len(content),
+        }
+
+    def directory(self, path, entries):
+        return {"path": path, "type": "tree", "mode": "040000", "sha": self.tree(entries)}
 
     def tree(self, entries):
         tree = Tree()
@@ -122,13 +128,7 @@ class ChangeAnalysisIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(logger.setLevel, logger.level)
         logger.setLevel(logging.WARNING)
 
-    async def test_oversized_legacy_commit_has_a_complete_bounded_analysis_path(self):
-        source = SourceFixture(file_count=2, new_lines=65000)
-        self.assertGreater(sum(map(len, source.blobs.values())), 2 * 1024 * 1024)
-        self.assertGreater(max(map(len, source.blobs.values())), 1024 * 1024)
-        with self.assertRaisesRegex(GitHubAppError, "too large"):
-            await source.client.get_commit(REPOSITORY, HEAD)
-        source.requests.clear()
+    async def analyze_source(self, source):
         prompts = []
         result_sizes = []
         limits = AnalysisLimits()
@@ -165,6 +165,16 @@ class ChangeAnalysisIntegrationTests(unittest.IsolatedAsyncioTestCase):
             result = await analyze_change(
                 read, model, repository=REPOSITORY, commit_sha=HEAD, limits=limits,
             )
+        return result, prompts
+
+    async def test_oversized_legacy_commit_has_a_complete_bounded_analysis_path(self):
+        source = SourceFixture(file_count=2, new_lines=65000)
+        self.assertGreater(sum(map(len, source.blobs.values())), 2 * 1024 * 1024)
+        self.assertGreater(max(map(len, source.blobs.values())), 1024 * 1024)
+        with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await source.client.get_commit(REPOSITORY, HEAD)
+        source.requests.clear()
+        result, prompts = await self.analyze_source(source)
         self.assertEqual(result["status"], "complete", result)
         self.assertTrue(result["coverage"]["inventory_complete"])
         self.assertEqual(result["coverage"]["files_reviewed"], 2)
@@ -178,6 +188,44 @@ class ChangeAnalysisIntegrationTests(unittest.IsolatedAsyncioTestCase):
             request.url.path == f"/repos/{REPOSITORY}/commits/{HEAD}"
             for request in source.requests
         ))
+
+    async def test_directory_file_transitions_have_complete_analysis_coverage(self):
+        source = SourceFixture(file_count=0)
+        before = [
+            source.file("becomes-dir", b"old root\n" * 1000),
+            source.directory("becomes-file", [
+                source.directory("nested", [
+                    source.file("child.py", b"old nested\n" * 1000),
+                ]),
+            ]),
+        ]
+        after = [
+            source.directory("becomes-dir", [
+                source.directory("nested", [
+                    source.file("child.py", b"new nested\n" * 1000),
+                ]),
+            ]),
+            source.file("becomes-file", b"new root\n" * 1000),
+        ]
+        source.commits[BASE]["tree"]["sha"] = source.tree(before)
+        source.commits[HEAD]["tree"]["sha"] = source.tree(after)
+        result, prompts = await self.analyze_source(source)
+        self.assertEqual(result["status"], "complete", result)
+        self.assertTrue(result["coverage"]["inventory_complete"])
+        self.assertEqual(result["coverage"]["files_discovered"], 4)
+        self.assertEqual(result["coverage"]["files_reviewed"], 4)
+        self.assertEqual(result["coverage"]["unresolved_count"], 0)
+        self.assertEqual(
+            result["coverage"]["chunks_reviewed"], result["coverage"]["chunks_discovered"],
+        )
+        paths = {
+            chunk["path"] for phase, prompt in prompts if phase == "map"
+            for chunk in json.loads(prompt)["chunks"]
+        }
+        self.assertEqual(paths, {
+            "becomes-dir", "becomes-dir/nested/child.py",
+            "becomes-file", "becomes-file/nested/child.py",
+        })
 
     async def test_stdio_bridge_reads_real_mcp_envelopes(self):
         root = pathlib.Path(__file__).resolve().parents[1]
