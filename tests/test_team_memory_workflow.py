@@ -35,10 +35,11 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         cls.steps = cls.job["steps"]
         cls.action_metadata = yaml.load((ACTION_DIR / "action.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
-    def test_trusted_base_trigger_and_manual_target(self):
+    def test_default_branch_push_and_manual_target(self):
         triggers = self.workflow["on"]
         self.assertNotIn("pull_request", triggers)
-        self.assertEqual(triggers["pull_request_target"]["types"], ["closed"])
+        self.assertNotIn("pull_request_target", triggers)
+        self.assertEqual(triggers["push"]["branches"], ["main"])
         target = triggers["workflow_dispatch"]["inputs"]["pull_request_number"]
         self.assertEqual(target["required"], "true")
         self.assertEqual(target["type"], "string")
@@ -81,12 +82,29 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.action_metadata["inputs"]["output-mode"]["default"], "hybrid")
         self.assertEqual(self.action_metadata["inputs"]["summary-mode"]["default"], "full")
 
-    def test_concurrency_does_not_coalesce_different_merged_prs(self):
+    def test_wiki_identity_output_descriptions_do_not_imply_success(self):
+        for name in ("wiki-repository", "wiki-sha"):
+            with self.subTest(output=name):
+                description = self.action_metadata["outputs"][name]["description"]
+                self.assertIn("incomplete push batches", description)
+                self.assertIn("does not imply success", description)
+                self.assertIn("status", description)
+                self.assertIn("step outcome", description)
+                self.assertNotIn("successful maintenance", description)
+
+    def test_concurrency_does_not_coalesce_different_pushes(self):
         group = self.workflow["concurrency"]["group"]
-        self.assertIn("github.event.pull_request.number", group)
+        self.assertIn("github.event.after", group)
         self.assertIn("inputs.pull_request_number", group)
         self.assertEqual(self.workflow["concurrency"]["cancel-in-progress"], "false")
-        self.assertEqual(self.job["timeout-minutes"], "20")
+
+    def test_job_timeout_has_setup_and_receipt_headroom(self):
+        token_seconds, connection_seconds, stream_seconds = 60, 60, 15 * 60
+        phase_seconds = action.DISCOVERY_SECONDS + token_seconds + connection_seconds + stream_seconds
+        self.assertGreaterEqual(int(self.job["timeout-minutes"]) * 60 - phase_seconds, 5 * 60)
+        self.assertEqual(self.job["timeout-minutes"], "30")
+        self.assertIn("30-minute timeout", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("30-minute job timeout", (ACTION_DIR / "README.md").read_text(encoding="utf-8"))
 
     def test_local_caller_loads_only_trusted_action_revision(self):
         checkout, invoke = self.steps
@@ -111,9 +129,10 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         caller = yaml.load(example, Loader=yaml.BaseLoader)
         job = caller["jobs"]["reconcile"]
         self.assertEqual(job["permissions"], self.job["permissions"])
-        self.assertEqual(job["timeout-minutes"], "20")
+        self.assertEqual(job["timeout-minutes"], self.job["timeout-minutes"])
         self.assertIn("ISSUELENS_TEAM_MEMORY_ENABLED", job["if"])
-        self.assertIn("pull_request_target", caller["on"])
+        self.assertIn("push", caller["on"])
+        self.assertNotIn("pull_request_target", caller["on"])
         self.assertNotIn("actions/checkout", example)
         self.assertEqual(len(job["steps"]), 1)
         invocation = job["steps"][0]
@@ -147,6 +166,16 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
                 for field in ("source_repository", "pull_number", "merge_commit_sha"):
                     self.assertNotIn(f"`{field}`", content, f"Caller result schema leaked into {path}")
 
+    def test_multiple_source_guidance_preserves_partial_authorization_and_full_handoff(self):
+        writer = " ".join((ROOT / "agents" / "team-memory.md").read_text(encoding="utf-8").split())
+        orchestrator = " ".join((ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8").split())
+        for requirement in ("dependencies", "verified final state", "explicitly permits partial publication",
+                            "independent, fully verified subset", "including deferred or failed",
+                            "tool-confirmed publication"):
+            self.assertIn(requirement, writer)
+        for requirement in ("complete source list", "partial publication policy", "whole-job success"):
+            self.assertIn(requirement, orchestrator)
+
     def test_workflow_owns_its_request_and_setup_contract(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         request = action.build_team_memory_request({})["input"]
@@ -156,7 +185,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertIn("add reactions/comments", request)
         self.assertIn("requested response format", readme)
         self.assertIn("ISSUELENS_TEAM_MEMORY_ENABLED=true", readme)
-        self.assertIn("pull_request_target: closed", readme)
+        self.assertIn("default-branch pushes", readme)
         self.assertIn("OIDC federation", readme)
         self.assertIn("inspect the mapped wiki/history", readme)
         for path in ("agents/issuelens.md", "agents/team-memory.md", "README.md", "github_app_mcp/README.md",

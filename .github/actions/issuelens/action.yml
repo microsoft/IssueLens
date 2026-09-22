@@ -47,19 +47,25 @@ inputs:
 
 outputs:
   status:
-    description: skipped, completed (stream success only), or validated team-memory updated/no-change.
+    description: skipped, completed (stream success only), or validated team-memory outcome. Incomplete push batches fail the step after recording their outcome.
     value: ${{ steps.submit.outputs.status || steps.preflight.outputs.status }}
   skip-reason:
     description: Reason an ineligible event was skipped before Azure login.
     value: ${{ steps.preflight.outputs.skip-reason }}
   response-path:
-    description: Runner-local UTF-8 final response file for completed issue-loop/task requests; treat contents as untrusted.
+    description: Runner-local UTF-8 final response for completed issue-loop/task requests or validated push-batch reports, including incomplete batches. Treat contents as untrusted.
     value: ${{ steps.submit.outputs.response-path }}
   wiki-repository:
-    description: Resolved wiki repository reported by successful maintenance.
+    description: >-
+      Reported wiki repository from a validated maintenance result, when available,
+      including incomplete push batches. Its presence does not imply success;
+      check status and the step outcome.
     value: ${{ steps.submit.outputs.wiki-repository }}
   wiki-sha:
-    description: Full wiki commit SHA reported by successful maintenance.
+    description: >-
+      Full reported wiki publication or snapshot SHA from a validated maintenance
+      result, when available, including incomplete push batches. Its presence
+      does not imply success; check status and the step outcome.
     value: ${{ steps.submit.outputs.wiki-sha }}
 
 runs:

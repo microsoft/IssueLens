@@ -16,7 +16,7 @@ GitHub App private key is required.
 | `request-type` | Preparation | Result |
 | --- | --- | --- |
 | `issue-loop` | Accept issue opened/reopened, human issue-comment created/edited, or manual issue dispatch. Preserve workflow-owned event metadata; exclude issue/comment bodies and skip PR/bot comments before login. | A completed root agent response, without a required JSON schema. The orchestrator chooses triage, planning, or no action. |
-| `team-memory` | Accept a merged PR into the default branch or a manual merged-PR request. Re-read authoritative repository and PR metadata. | Require the existing structured maintenance result matching source/PR/merge and verified wiki identity. |
+| `team-memory` | Discover and verify merged PRs introduced by a default-branch push, or accept a manual single-PR request. | Require matching source revisions, verified wiki identity for completed work, and one outcome per PR in a push batch. Partial batches retain their receipts but fail the step. |
 | `task` | Require explicit non-empty `input`, bounded to 64 KiB UTF-8. No issue-loop event metadata or maintainer-command authority is synthesized. | A completed root agent response in the requested format. |
 
 All request types validate the caller repository identity and that the caller
@@ -39,8 +39,8 @@ Pin consumers to an immutable SHA, not `main` or a moving tag.
 ```yaml
 name: Update team memory
 on:
-  pull_request_target:
-    types: [closed]
+  push:
+    branches: [main] # Set this to the source repository's default branch.
   workflow_dispatch:
     inputs:
       pull_request_number:
@@ -49,19 +49,16 @@ on:
         type: string
 permissions: {}
 concurrency:
-  group: team-memory-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.run_id }}
+  group: team-memory-${{ github.repository }}-${{ github.event.after || inputs.pull_request_number || github.run_id }}
   cancel-in-progress: false
 jobs:
   reconcile:
     if: >-
       vars.ISSUELENS_TEAM_MEMORY_ENABLED == 'true' &&
-      ((github.event_name == 'workflow_dispatch' &&
-        github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
-       (github.event_name == 'pull_request_target' &&
-        github.event.pull_request.merged == true &&
-        github.event.pull_request.base.ref == github.event.repository.default_branch))
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: read
@@ -82,7 +79,12 @@ jobs:
 
 External callers need no checkout: GitHub downloads the pinned action bundle.
 Any caller workflow filename is supported, but the workflow must run from the
-caller's current default branch. Other events and unmerged PRs are rejected.
+caller's current default branch. Set the trigger's branch filter accordingly;
+the job and preflight independently reject a different default branch.
+Existing `pull_request_target: closed` callers remain supported by the action
+for compatibility, but need an applicable GitHub Actions event policy. The
+recommended push workflow does not depend on that exception. Other events and
+unmerged manual targets are rejected.
 For event adapters the source repository is derived from the caller's GitHub context, not an input
 that could redirect maintenance to another source repository. PR titles, bodies,
 and fork contents are not embedded in the task.
@@ -94,6 +96,86 @@ It uses pinned `actions/checkout` with `ref: github.workflow_sha`, sparse checko
 of the action directory, and `persist-credentials: false`. This checks out the
 trusted workflow revision, never a PR head or merge-test ref. Do not copy that
 local-action step to consumer repositories; use the remote reference above.
+
+### Push Discovery and Partial Publication
+
+One push produces at most one agent invocation, containing the eligible merged
+PRs introduced by that push. Separate pushes are not debounced or combined.
+A normal individual merge therefore still usually produces one invocation.
+
+The preflight uses the trusted event's commit IDs and checks that their unique
+count matches an authoritative fast-forward `before...after` comparison. A
+non-first comparison page supplies range metadata without its first-page file
+diffs. Metadata-only GraphQL lookups group 20 commit identities per request and
+resolve associated PRs, checking repository identity, the current default
+branch, merge state, and full merge SHA. Only PRs whose merge SHA is in this
+push are accepted; repeated associations are deduplicated without hiding a
+changed identity. Titles, bodies, comments, commit messages, and patches are
+not embedded in the task. The latest observed default-branch `source_tip_sha`
+is supplied as additional context to avoid reinstating superseded changes;
+it does not authorize updates for other PRs. The agent retrieves its own
+bounded evidence.
+
+If GraphQL returns an explicit `null` merge commit, preflight re-reads the PR
+through the version-pinned REST API. Its `merge_commit_sha` supplies the final
+rebased commit for rebase merges. The same validation used by manual dispatch
+rechecks PR identity, merge state, source repository, default base branch, and
+full SHA; the merge timestamp must also match GraphQL. The resolved SHA must
+still belong to this push. These lookups are cached once per PR across all
+commit groups, bounded, and subject to the discovery deadline. Missing or
+malformed metadata and failed lookups stop discovery rather than guessing a
+commit or submitting a partial source set.
+
+| Discovery boundary | Limit / behavior |
+| --- | --- |
+| Pushed commit inventory | At most 1,000 unique commits; must match the full comparison count |
+| PR batch | At most 100 verified PRs |
+| Associations per commit | At most 100; a remaining page fails discovery rather than dropping PRs |
+| REST merge-identity lookups | At most 100 distinct PRs, including candidates ultimately outside the push |
+| GitHub response | 4 MiB per request; redirects denied |
+| Discovery time | 180-second cooperative budget, checked around requests; an in-flight request retains its 30-second timeout |
+| Agent input | At most 64 KiB UTF-8 |
+
+Missing or truncated inventories, diverged/forced pushes, new/deleted refs,
+lookup errors, and exceeded limits fail before Azure login. No partial list is
+submitted, because an unknown source set cannot establish independent updates.
+A valid push with no newly merged PRs is skipped with `no_merged_pull_requests`.
+Manual dispatch remains the recovery path for a specific merged PR.
+
+The caller explicitly authorizes partial publication **after discovery**:
+the agent analyzes dependencies and the final source state, then combines only
+independent, fully verified updates into one atomic wiki write. It must defer
+inseparable changes that rely on an unverified PR. Intermediate features
+subsequently removed by the batch must not become current wiki knowledge.
+Unassociated direct-push commits receive no additional write authorization.
+
+The requested push result has `source_repository`, `push_before`, `push_after`,
+`status`, `wiki_repository`, `wiki_sha`, `reason`, and `results`. Both wiki identity
+keys are required. If no PR completed and the identity is unavailable, set both
+values to explicit `null`; do not omit either key. Each result contains
+`pull_number`, `merge_commit_sha`, `status`, and a reason of at most 512 characters.
+Every submitted PR must appear exactly once with its matching SHA:
+
+- `updated`: that PR's complete intended edit was included in tool-confirmed publication.
+- `no-change`: its source and the wiki were verified and no edit is needed.
+- `needs-review` / `failed`: the PR was not safely completed.
+
+Overall `updated` requires every PR to complete and at least one update;
+`no-change` requires all PRs to complete without an update. Mixed complete and
+incomplete outcomes require `partial`. If none complete, the result is
+`needs-review` or `failed`. Missing, duplicate, foreign, or mismatched PR receipts
+are rejected even when the overall status claims success.
+
+An incomplete batch **fails the action**, but first records its validated status,
+runner-local `response-path`, and any reported confirmed wiki identity. The
+summary lists every PR's outcome; full summaries show bounded agent reasons.
+Even when every PR reports `failed`, a validated batch uses the incomplete-batch
+diagnostic, not the unknown-outcome diagnostic reserved for submission or
+completion/result-validation errors.
+This is not a rollback or a claim that nothing was published. The complete JSON
+receipt remains in the response file, subject to the same privacy precautions
+as other agent responses. No automatic retry or artifact upload is performed.
+Manual and legacy single-PR callers retain their existing result format.
 
 ### Issue Loop: Triage and Planning
 
@@ -160,7 +242,7 @@ identity check is not authorization for any additional repositories named by a t
 | `input` | For `task` | Explicit task text, 1-64 KiB UTF-8; do not combine with event adapters. |
 | `issue-number` | For manual `issue-loop` | Positive issue number; automatic events use their containing issue. |
 | `github-token` | No | Defaults to `github.token`; repository read for all types, Issues read for manual issue dispatch, Pull requests read for team memory. |
-| `pull-request-number` | For manual `team-memory` | Positive merged PR number. Automatic events use their own PR number. |
+| `pull-request-number` | For manual `team-memory` | Positive merged PR number. Pushes discover their own complete PR batch. |
 | `azure-client-id` | Yes | Existing Azure OIDC identity's client ID. |
 | `azure-tenant-id` | Yes | Tenant used by Azure login. |
 | `azure-subscription-id` | Yes | Subscription used by Azure login. |
@@ -171,11 +253,11 @@ identity check is not authorization for any additional repositories named by a t
 
 | Output | Meaning |
 | --- | --- |
-| `status` | `skipped` for ineligible issue events; `completed` for a finished issue-loop/task invocation; `updated` or `no-change` for validated team-memory results. Unavailable on failure. |
+| `status` | `skipped` for ineligible events; `completed` for issue-loop/task streams; `updated`/`no-change` for complete maintenance. Validated push batches also expose `partial`, `needs-review`, or `failed` before failing the step. Unavailable for invalid/ambiguous results. |
 | `skip-reason` | Fixed reason for an event skipped before Azure login. |
-| `response-path` | Unique runner-local UTF-8 file containing the final root answer for `issue-loop`/`task`. |
-| `wiki-repository` | Wiki identity from a successful `team-memory` result only. |
-| `wiki-sha` | Full wiki commit SHA from a successful `team-memory` result only. |
+| `response-path` | Unique runner-local UTF-8 final root answer for `issue-loop`/`task`, or the complete validated push-batch JSON receipt, including incomplete batches. |
+| `wiki-repository` | Reported verified wiki identity from a validated maintenance result, when available. Partial does not imply no publication. |
+| `wiki-sha` | Full reported tool-confirmed publication or snapshot SHA, when available in the validated maintenance result. |
 
 **`completed` confirms transport completion, not business success or a successful
 write.** A planning response may ask for clarification or report a blocked task;
@@ -292,8 +374,11 @@ content. Already tracked public messages can still complete normally.
 - The caller declares permissions, opt-in, triggers, timeout, and concurrency;
   a composite action cannot grant job permissions. Preserve the example's gates.
 - Configure the Azure identity's repository/event/ref-scoped OIDC federation
-  and permission to invoke the agent. Issue-loop federation is not proof that
-  both post-merge and manual triggers are covered. No infrastructure is created.
+  and permission to invoke the agent. Verify the actual subject for default-branch
+  `push` and manual dispatch, including immutable repository/owner IDs where
+  enabled. A PR-scoped credential used by `pull_request_target` is not proof that
+  these triggers are covered; do not broaden trust to arbitrary refs. No Azure
+  credential, role, or infrastructure is created or changed by this action.
 - Protect changes to caller workflows and review the pinned action code. Never
   execute PR-head code, untrusted scripts, or dependencies in a credentialed job.
 - Configure wiki policy and destination App permissions on the agent side, then
@@ -313,18 +398,29 @@ response must contain a completed SSE stream and a non-empty final root
 assistant message. Nested sub-agent messages and messages still requesting tools
 are not accepted as final answers. Stream errors and incomplete responses fail
 all request types. Team-memory additionally requires a final JSON result matching
-the source repository, PR, and merge SHA; only `updated` or `no-change` with wiki
-identity and full SHA succeeds. Its `needs-review` or `failed` result fails the
-step. Issue-loop and task results may be plain text, Markdown, or requested JSON.
+the source repository and every submitted PR/merge SHA; push batches also match
+the before/after SHAs. Only complete `updated` or `no-change` with wiki identity
+and full SHA succeeds. Incomplete batches preserve validated receipts before
+failing; invalid or ambiguous responses never become successful receipts.
+Issue-loop and task results may be plain text, Markdown, or requested JSON.
 
 The submission socket timeout is 60 seconds, the cooperative stream budget is
 15 minutes, and the stream is limited to 8 MiB total and 1 MiB per line. Keep a
-20-minute job timeout as in the example. These are not hard real-time guarantees.
+30-minute job timeout for team memory as in the example. The nominal 3-minute
+discovery, 1-minute token acquisition, 1-minute request connection, and 15-minute
+stream budgets already total 20 minutes. The remaining 10 minutes provide
+headroom for checkout, source-repository validation, Azure login, cooperative
+timeout overruns, and saving the receipt and summary. These socket/cooperative
+limits are not hard end-to-end deadlines.
 
-Different PR jobs may overlap or finish out of order. The agent retains its
+Different push jobs (and manual single-PR jobs) may overlap or finish out of order.
+Concurrency is keyed by push SHA rather than only the branch, so GitHub's pending
+run replacement cannot discard a different push's PR batch. The agent retains its
 current-knowledge checks and wiki compare-and-swap safeguards. After an ambiguous
 failure, inspect the target's current state before retrying. For team memory,
-inspect the mapped wiki/history before retrying the same merged PR.
+inspect the mapped wiki/history and per-PR receipts before retrying the same
+batch or manually dispatching incomplete PRs. Previously confirmed updates are
+not rolled back when another PR fails, and replays must not blindly repeat them.
 Content comparison avoids unnecessary writes but does not provide a durable
 queue, guaranteed delivery, or exactly-once execution.
 
