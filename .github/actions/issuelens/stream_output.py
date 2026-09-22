@@ -273,12 +273,14 @@ class StreamRenderer:
     def finish(self, status):
         if self.finished:
             return
-        if status not in {"completed", "updated", "no-change", "failed"}:
+        if status not in {"completed", "updated", "no-change", "partial", "needs-review", "failed"}:
             raise ValueError("Invalid display status")
         for state in self.messages.values():
             self._flush(state, force=True)
         if status == "failed":
             self._line("error", "Invocation failed or its outcome is unknown. Displayed text may be incomplete; inspect the target before retrying.")
+        elif status in {"partial", "needs-review"}:
+            self._line("warning", "Maintenance batch incomplete. Inspect per-PR results and confirmed wiki state before retrying.")
         else:
             self._line("IssueLens", f"Invocation {status}. Stream completion alone does not confirm requested writes.")
         if self.display_truncated and not self.limited:
@@ -291,29 +293,51 @@ class StreamRenderer:
         if mode == "none":
             return ""
         headings = {"completed": "Invocation completed", "updated": "Team memory updated",
-                    "no-change": "Team memory unchanged", "failed": "Invocation failed or outcome unknown"}
+                    "no-change": "Team memory unchanged", "partial": "Team memory batch incomplete",
+                    "needs-review": "Team memory needs review", "failed": "Invocation failed or outcome unknown"}
         report = (
             f"## IssueLens: {headings[status]}\n\n"
             f"| Elapsed | Tool calls observed | Failed tools observed | Model retries |\n"
             f"| --- | ---: | ---: | ---: |\n"
             f"| {self.elapsed:.1f}s | {self.tool_count} | {self.failed_tools} | {self.retries} |\n\n"
         )
-        if status == "failed":
+        batch = wiki is not None and isinstance(wiki.get("results"), list)
+        if status == "failed" and not batch:
             report += "The response did not pass completion/result validation. Partial live text is not a confirmed result. Inspect the target before retrying; a write may already have occurred.\n"
         elif status == "completed":
             report += "Transport completion does not assert that requested writes or business outcomes succeeded. The root answer is retained in a runner-local response file.\n"
         else:
             report += "The maintenance result passed the caller's structured identity and status checks.\n"
+            if status in {"partial", "needs-review", "failed"}:
+                report += "The batch is incomplete and the job fails. Completed PRs do not establish whole-batch success; a confirmed update is not rolled back.\n"
             if wiki is not None:
                 report += "\n| Field | Verified result |\n| --- | --- |\n"
-                for field in ("source_repository", "pull_number", "merge_commit_sha", "wiki_repository", "wiki_sha"):
+                fields = ("source_repository", "push_before", "push_after", "wiki_repository", "wiki_sha") if batch else (
+                    "source_repository", "pull_number", "merge_commit_sha", "wiki_repository", "wiki_sha")
+                for field in fields:
                     value = html.escape(safe_text(str(wiki.get(field, "")), self.secrets), quote=False).replace("|", "&#124;").replace("\n", " ")
                     report += f"| {field} | {value} |\n"
+                if batch:
+                    report += "\n| PR | Merge SHA | Outcome | Agent reason |\n| --- | --- | --- | --- |\n"
+                    for item in wiki["results"]:
+                        cells = [
+                            html.escape(safe_text(str(item.get(field, "")), self.secrets), quote=False)
+                            .replace("|", "&#124;").replace("\n", " ").replace("!", "&#33;")
+                            for field in ("pull_number", "merge_commit_sha", "status")
+                        ]
+                        reason = ""
+                        if mode == "full":
+                            reason = html.escape(safe_text(item.get("reason", ""), self.secrets), quote=False)
+                            reason = reason.replace("|", "&#124;").replace("\n", " ").replace("!", "&#33;")
+                            encoded = reason.encode("utf-8")
+                            reason = encoded[:160].decode("utf-8", errors="ignore") + ("..." if len(encoded) > 160 else "")
+                        report += "| " + " | ".join([*cells, reason]) + " |\n"
+                    report += "\nThe complete per-PR response is retained in the runner-local response-path; it is not automatically uploaded.\n"
         if self.display_truncated:
             report += "\nLive display limits were reached; transport validation continued independently.\n"
         if self.io_failed:
             report += "\nLive display became unavailable; transport validation continued independently.\n"
-        if mode == "full" and status != "failed":
+        if mode == "full" and (status != "failed" or batch):
             answer = text if status == "completed" else (wiki or {}).get("reason")
             if isinstance(answer, str) and answer:
                 available = self.MAX_SUMMARY - len(report.encode("utf-8")) - 512

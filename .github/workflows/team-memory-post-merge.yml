@@ -7,11 +7,11 @@ on:
         description: Merged pull request to reconcile into team memory
         required: true
         type: string
-  pull_request_target:
-    types: [closed]
+  push:
+    branches: [main]
 
 concurrency:
-  group: issue-lens-team-memory-${{ github.repository }}-${{ github.event.pull_request.number || inputs.pull_request_number || github.run_id }}
+  group: issue-lens-team-memory-${{ github.repository }}-${{ github.event.after || inputs.pull_request_number || github.run_id }}
   cancel-in-progress: false
 
 permissions: {}
@@ -20,11 +20,8 @@ jobs:
   reconcile:
     if: >-
       vars.ISSUELENS_TEAM_MEMORY_ENABLED == 'true' &&
-      ((github.event_name == 'workflow_dispatch' &&
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
-       (github.event_name == 'pull_request_target' &&
-      github.event.pull_request.merged == true &&
-      github.event.pull_request.base.ref == github.event.repository.default_branch))
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

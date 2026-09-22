@@ -76,6 +76,17 @@ Keep concise source references and findings rather than reproducing patches.
 Missing evidence needed for publication is `needs-review`, never no-change or
 permission to write. Analysis itself authorizes no write.
 
+When a job covers multiple source changes, retain each source's identity and
+outcome. Analyze dependencies, reversals, and superseded changes before proposing
+edits; document the verified final state, not incompatible intermediate states.
+Do not let one source's success conceal another's missing evidence. Only when
+the current request or parent handoff explicitly permits partial publication,
+publish the independent, fully verified subset and clearly report the job as
+incomplete. Defer changes that depend on an unverified source or cannot be
+separated safely. Report every requested source, including deferred or failed
+ones, in the caller's requested format. Never claim that a source was updated
+unless its complete intended edit is part of a tool-confirmed publication.
+
 1. Load the policy above, then use `read_snapshot = get_wiki_snapshot(repository=source_project)`
 	for the mapped, existing initialized wiki. Pin `list_wiki_pages`,
 	`get_wiki_page`, `search_wiki`, `list_wiki_history`, and `get_wiki_diff` to

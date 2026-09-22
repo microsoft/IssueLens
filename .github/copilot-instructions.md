@@ -297,22 +297,32 @@ trusted event metadata. Per-issue concurrency allows different issues to run
 independently while coalescing bursts for the same issue.
 
 Team-memory postmerge orchestration uses the opt-in
-`.github/workflows/team-memory-post-merge.yml`: trusted-base
-`pull_request_target` closed/merged events and explicit merged-PR manual dispatch
-on the default branch. The shared composite action in `.github/actions/issuelens`
+`.github/workflows/team-memory-post-merge.yml`: default-branch pushes and
+explicit single-PR manual dispatch. The shared composite action in `.github/actions/issuelens`
 owns preflight, pinned Azure OIDC login, and submission through a standalone
 Python helper. External callers pin an action commit and need no checkout;
 this repository's thin caller sparsely loads the local action from the trusted
 `github.workflow_sha`, never a PR head, with credentials not persisted. The
 action checks authoritative GitHub metadata before OIDC login and submits a
-bounded wiki-only job using the issue-loop secrets. Enable it with the repository
+bounded wiki-only job using the issue-loop secrets. For a push, it verifies the
+complete fast-forward commit inventory and discovers all eligible merged PRs
+using bounded GitHub metadata reads before submitting one batch. It fails on
+incomplete discovery rather than silently omitting sources. Different pushes
+have separate concurrency groups; manual dispatch keeps per-PR grouping.
+Verify default-branch Azure OIDC federation when migrating from a PR-scoped subject.
+Enable it with the repository
 variable `ISSUELENS_TEAM_MEMORY_ENABLED=true`, not an agent environment flag.
 The workflow explicitly requests merge revalidation, wiki-only writes, no
 reactions/comments, and a JSON result through its `input`. The generic agent
 preserves wiki policy/privacy/preconditions and the requested response format;
 the caller's schema is not a permanent agent instruction. Only completed
-`updated`/`no-change` results with
-matching source metadata and verified wiki identity succeed. Ambiguous submissions
+`updated`/`no-change` results with matching source metadata and verified wiki
+identity succeed. Push batches explicitly permit publication of independent,
+fully verified PRs while deferring incomplete or dependent changes. Every PR
+must appear exactly once in the result. A partial batch fails the job while
+retaining its per-PR response and any confirmed wiki publication, never implying
+that no write occurred. The batch schema remains caller-owned.
+Ambiguous submissions
 are not retried automatically. Git provides knowledge, history, and conflict
 detection, not a durable job queue or guaranteed exactly-once delivery. Local
 tests do not establish live OIDC federation, hosted writer dispatch, or publication.

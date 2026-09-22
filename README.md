@@ -132,8 +132,11 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   [reusable IssueLens action](.github/actions/issuelens/README.md) with
   `request-type: team-memory`. The guide
   includes a complete example pinned to a reviewed action commit; external
-  consumers need no checkout. It uses `pull_request_target: closed` so merged
-  fork PRs run the trusted base workflow with endpoint credentials. IssueLens's
+  consumers need no checkout. It uses default-branch pushes, including pushes
+  that land fork PRs, so the trusted base workflow has endpoint credentials
+  without a `pull_request_target` policy exception. Set the `push.branches`
+  filter to the source repository's default branch (`main` in this repository).
+  IssueLens's
   own workflow loads only the local action directory from `github.workflow_sha`
   with credentials not persisted. Neither path checks out or executes PR-head
   code. Protect workflow and action changes as privileged code.
@@ -142,7 +145,10 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   invocations endpoint), and `ISSUELENS_AGENT_SCOPE`. The old skeleton's
   `ISSUELENS_AGENT_ENDPOINT` is not used. Configure Azure OIDC federation for
   this repository and the actual workflow event/ref subject, including manual
-  dispatch if used; do not assume issue-loop federation covers both triggers.
+  dispatch if used. Migrating from `pull_request_target` can change the OIDC
+  subject; verify the actual default-branch subject, including immutable
+  repository/owner IDs where enabled. Do not assume the old PR-scoped credential
+  covers `push`, or broaden federation to untrusted refs.
   The identity needs permission to invoke the existing Foundry agent, not
   deployment or GitHub wiki-write credentials. No App private key is stored here.
 3. Use a deployed agent with wiki-maintenance support and source-independent
@@ -153,6 +159,15 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   when ready. This opts into automatic maintenance; it is not an agent
   environment flag or a wiki-destination allowlist. Without it, the job skips
   before acquiring Azure credentials.
+
+Each eligible push produces one invocation containing its verified merged PRs,
+not one invocation per PR. The preflight checks the complete fast-forward
+commit inventory and discovers associated PRs through bounded metadata-only
+GitHub queries. It does not send raw combined diffs to the model. Direct pushes
+without newly merged PRs skip before Azure login. Missing/truncated inventories,
+force pushes, and ambiguous discovery fail without submitting a partial source
+list; use manual PR dispatch to recover. This batches PRs within one push, not
+across separate pushes, so an ordinary one-PR merge still usually produces one run.
 
 Only PRs merged into the current default branch are accepted. Manual **Run
 workflow** requires a positive `pull_request_number` and the default branch;
@@ -181,9 +196,14 @@ formatting does not introduce a new agent protocol.
 The job has a 20-minute timeout and a bounded streamed response. It submits once
 without following redirects or automatically retrying a write-capable request.
 It requires an SSE completion event and a final structured result matching the
-submitted repository, PR, and merge SHA. Only `updated` or `no-change` with a
-verified wiki repository and full SHA succeed. The Actions summary records
-those identities as a table; the default hybrid log streams sanitized agent text
+submitted repository and source revisions. Push results must account for every
+submitted PR exactly once. The agent may publish an independent, fully verified
+subset in one atomic wiki update, while deferring incomplete or dependent changes.
+Mixed completed/incomplete outcomes are `partial`: the job fails for attention,
+but preserves the per-PR response and any confirmed wiki SHA rather than claiming
+that nothing was written. Only all-complete `updated` or `no-change` results
+with a verified wiki repository and full SHA succeed. The Actions summary records
+source identities and per-PR outcomes as tables; the default hybrid log streams sanitized agent text
 and compact tool activity, without raw event JSON or tool payloads. Publication
 is configurable through `output-mode` and `summary-mode`; use activity/status
 or quiet/none when the log audience should not see agent text.
@@ -193,12 +213,13 @@ the agent uses small file pages and targeted source reads instead of repeating
 the same oversized request. Unsupported content and missing evidence remain
 explicit limitations, never unverified maintenance success.
 
-Different PRs have independent concurrency groups so a later merge cannot
-replace another PR's pending run. Jobs may overlap or finish out of merge order:
+Different pushes have independent concurrency groups so a later push cannot
+replace another push's pending run. Manual dispatch retains per-PR grouping.
+Jobs may overlap or finish out of merge order:
 the agent uses pinned evidence, current knowledge, and wiki compare-and-swap to
 avoid overwriting newer edits. This is not a durable queue. After an ambiguous
-failure, inspect the mapped wiki/history before rerunning or manually dispatching
-the PR. Replays compare current content and skip unchanged knowledge; run IDs
+failure or partial publication, inspect the mapped wiki/history and per-PR
+receipt before rerunning or manually dispatching deferred PRs. Replays compare current content and skip unchanged knowledge; run IDs
 are not proof of publication. Sensitive/conflicting changes require human review.
 
 ### Automation — `POST /invocations`

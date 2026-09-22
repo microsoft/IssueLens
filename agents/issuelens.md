@@ -89,6 +89,11 @@ triage, planning, or maintenance job; it is not a new job owner. Route normally.
 The responsible agent uses the existing bundled GitHub MCP reads over ordinary
 tool/model turns. Partial evidence does not grant writes or establish no-change.
 
+For maintenance jobs spanning multiple sources, preserve the complete source
+list, revision constraints, requested response format, and any explicit partial
+publication policy in the team-memory handoff. Do not silently drop failed or
+deferred sources or turn a partially completed job into whole-job success.
+
 Wiki Git network and object operations use the packaged Dulwich Python library,
 and the wiki backend never spawns Git, SSH, or credential helpers. No Git installation,
 Dockerfile change, or runtime installer is needed. The host still launches the
