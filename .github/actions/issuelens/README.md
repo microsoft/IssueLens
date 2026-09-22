@@ -58,7 +58,7 @@ jobs:
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: read
@@ -406,7 +406,12 @@ Issue-loop and task results may be plain text, Markdown, or requested JSON.
 
 The submission socket timeout is 60 seconds, the cooperative stream budget is
 15 minutes, and the stream is limited to 8 MiB total and 1 MiB per line. Keep a
-20-minute job timeout as in the example. These are not hard real-time guarantees.
+30-minute job timeout for team memory as in the example. The nominal 3-minute
+discovery, 1-minute token acquisition, 1-minute request connection, and 15-minute
+stream budgets already total 20 minutes. The remaining 10 minutes provide
+headroom for checkout, source-repository validation, Azure login, cooperative
+timeout overruns, and saving the receipt and summary. These socket/cooperative
+limits are not hard end-to-end deadlines.
 
 Different push jobs (and manual single-PR jobs) may overlap or finish out of order.
 Concurrency is keyed by push SHA rather than only the branch, so GitHub's pending

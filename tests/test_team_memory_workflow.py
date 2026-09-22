@@ -97,7 +97,14 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertIn("github.event.after", group)
         self.assertIn("inputs.pull_request_number", group)
         self.assertEqual(self.workflow["concurrency"]["cancel-in-progress"], "false")
-        self.assertEqual(self.job["timeout-minutes"], "20")
+
+    def test_job_timeout_has_setup_and_receipt_headroom(self):
+        token_seconds, connection_seconds, stream_seconds = 60, 60, 15 * 60
+        phase_seconds = action.DISCOVERY_SECONDS + token_seconds + connection_seconds + stream_seconds
+        self.assertGreaterEqual(int(self.job["timeout-minutes"]) * 60 - phase_seconds, 5 * 60)
+        self.assertEqual(self.job["timeout-minutes"], "30")
+        self.assertIn("30-minute timeout", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("30-minute job timeout", (ACTION_DIR / "README.md").read_text(encoding="utf-8"))
 
     def test_local_caller_loads_only_trusted_action_revision(self):
         checkout, invoke = self.steps
@@ -122,7 +129,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         caller = yaml.load(example, Loader=yaml.BaseLoader)
         job = caller["jobs"]["reconcile"]
         self.assertEqual(job["permissions"], self.job["permissions"])
-        self.assertEqual(job["timeout-minutes"], "20")
+        self.assertEqual(job["timeout-minutes"], self.job["timeout-minutes"])
         self.assertIn("ISSUELENS_TEAM_MEMORY_ENABLED", job["if"])
         self.assertIn("push", caller["on"])
         self.assertNotIn("pull_request_target", caller["on"])

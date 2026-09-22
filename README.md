@@ -193,7 +193,8 @@ Teams conversation, or other delivery surface. Changes to those shared
 instructions require normal deployment approval; changing caller metadata or
 formatting does not introduce a new agent protocol.
 
-The job has a 20-minute timeout and a bounded streamed response. It submits once
+The job has a 30-minute timeout, providing setup and discovery headroom around
+the bounded streamed response. It submits once
 without following redirects or automatically retrying a write-capable request.
 It requires an SSE completion event and a final structured result matching the
 submitted repository and source revisions. Push results must account for every
