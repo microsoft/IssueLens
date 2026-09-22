@@ -82,6 +82,16 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.action_metadata["inputs"]["output-mode"]["default"], "hybrid")
         self.assertEqual(self.action_metadata["inputs"]["summary-mode"]["default"], "full")
 
+    def test_wiki_identity_output_descriptions_do_not_imply_success(self):
+        for name in ("wiki-repository", "wiki-sha"):
+            with self.subTest(output=name):
+                description = self.action_metadata["outputs"][name]["description"]
+                self.assertIn("incomplete push batches", description)
+                self.assertIn("does not imply success", description)
+                self.assertIn("status", description)
+                self.assertIn("step outcome", description)
+                self.assertNotIn("successful maintenance", description)
+
     def test_concurrency_does_not_coalesce_different_pushes(self):
         group = self.workflow["concurrency"]["group"]
         self.assertIn("github.event.after", group)

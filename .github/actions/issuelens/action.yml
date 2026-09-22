@@ -56,10 +56,16 @@ outputs:
     description: Runner-local UTF-8 final response for completed issue-loop/task requests or validated push-batch reports, including incomplete batches. Treat contents as untrusted.
     value: ${{ steps.submit.outputs.response-path }}
   wiki-repository:
-    description: Resolved wiki repository reported by successful maintenance.
+    description: >-
+      Reported wiki repository from a validated maintenance result, when available,
+      including incomplete push batches. Its presence does not imply success;
+      check status and the step outcome.
     value: ${{ steps.submit.outputs.wiki-repository }}
   wiki-sha:
-    description: Full wiki commit SHA reported by successful maintenance.
+    description: >-
+      Full reported wiki publication or snapshot SHA from a validated maintenance
+      result, when available, including incomplete push batches. Its presence
+      does not imply success; check status and the step outcome.
     value: ${{ steps.submit.outputs.wiki-sha }}
 
 runs:
