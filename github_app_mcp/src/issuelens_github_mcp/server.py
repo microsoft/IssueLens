@@ -5,16 +5,19 @@ from __future__ import annotations
 import argparse
 import os
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
+from pydantic import Field
 
 from .auth import GitHubAppError, GitHubAppTokenProvider
 from .config import ConfigurationError, GitHubAppConfig
-from .github import GitHubClient, ReactionTarget
+from .github import CommitDetail, GitHubClient, ReactionTarget
 
 
 _ENABLE_WRITES_ENV = "GITHUB_MCP_ENABLE_WRITES"
+_PerPage = Annotated[int, Field(strict=True, ge=1, le=100)]
+_FilePage = Annotated[int, Field(strict=True, ge=1, le=3000)]
 
 
 def create_server(
@@ -139,39 +142,75 @@ def create_server(
 
     @server.tool()
     async def get_file(repository: str, path: str, ref: str | None = None) -> Any:
-        """Read one bounded UTF-8 file or directory listing from a repository."""
+        """Read one UTF-8 file (up to 64 KiB) or directory; use a full commit ref for pinned context."""
         return await github.get_file(repository, path, ref=ref)
 
     @server.tool()
     async def get_pull_request(repository: str, pull_number: int) -> Any:
+        """Read bounded PR metadata, including base/head SHAs and changed_files."""
         return await github.get_pull_request(repository, pull_number)
 
     @server.tool()
-    async def list_pull_request_files(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+    async def list_pull_request_files(
+        repository: str, pull_number: int, per_page: _PerPage = 30, page: _FilePage = 1,
+    ) -> Any:
+        """Read one page of changed PR files, including available patches.
+
+        For large responses, reduce per_page, down to 1, and restart pagination
+        at page 1 when changing its size. Empty or short pages end enumeration.
+        Missing patches do not mean unchanged files; use pinned get_file reads
+        where supported or report missing evidence. Verify PR SHAs before and
+        after paging because this endpoint cannot pin a commit.
+        This REST endpoint has a 3,000-file ceiling; paging does not remove it.
+        """
         return await github.list_pull_request_files(repository, pull_number, per_page=per_page, page=page)
 
     @server.tool()
     async def list_pull_request_commits(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        """List bounded PR commit metadata (GitHub's 250-commit endpoint ceiling applies)."""
         return await github.list_pull_request_commits(repository, pull_number, per_page=per_page, page=page)
 
     @server.tool()
     async def list_pull_request_reviews(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        """List one bounded page of reviews on an explicit repository's PR."""
         return await github.list_pull_request_reviews(repository, pull_number, per_page=per_page, page=page)
 
     @server.tool()
     async def list_pull_request_review_comments(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
+        """List one bounded page of individual PR review comments, not review threads."""
         return await github.list_pull_request_review_comments(repository, pull_number, per_page=per_page, page=page)
 
     @server.tool()
-    async def get_commit(repository: str, sha: str) -> Any:
-        return await github.get_commit(repository, sha)
+    async def get_commit(
+        repository: str, sha: str, detail: CommitDetail = "stats",
+        per_page: _PerPage = 30, page: _FilePage = 1,
+    ) -> Any:
+        """Read a commit with upstream-style detail and file pagination controls.
+
+        detail=stats (default) returns file metadata without patches; none omits
+        files and aggregate stats; full_patch includes available patches.
+        Commit identity, parents, and tree metadata are retained in every mode.
+        Use a full SHA for stable paging. per_page/page apply to files, not
+        commits; at most 3,000 files are available. Reduce per_page after a size
+        error. A missing patch is not proof of no change. HTTP download is
+        bounded to 1 MiB; the final projected JSON remains at most 100,000 bytes.
+        """
+        return await github.get_commit(
+            repository, sha, detail=detail, per_page=per_page, page=page,
+        )
 
     @server.tool()
     async def compare_commits(repository: str, base: str, head: str) -> Any:
+        """Read a bounded REST comparison, including at most 300 file patches.
+
+        For PR-wide evidence, prefer list_pull_request_files with small pages.
+        This tool cannot paginate or guarantee exhaustive evidence for large changes.
+        """
         return await github.compare_commits(repository, base, head)
 
     @server.tool()
     async def list_repository_tree(repository: str, ref: str, recursive: bool = True) -> Any:
+        """Read one bounded Git tree; honor truncated and use smaller subtree reads when needed."""
         return await github.list_repository_tree(repository, ref, recursive=recursive)
 
     @server.tool()
@@ -182,7 +221,9 @@ def create_server(
         search its regular UTF-8 files for the trimmed, case-insensitive literal
         query within each line, not in paths. No regex or search operators apply.
         At most 64 regular files, 256 KiB eligible content, and 66 content API
-        requests are allowed, plus initial authentication lookup/minting overhead.
+        requests are allowed for a full SHA, plus initial authentication
+        lookup/minting overhead. Branch/tag resolution uses fixed Git-ref/tag
+        routes (up to ten additional requests), never patch-bearing commits.
         One HTTP client is reused for the scan's content requests and closed on
         success, error, cancellation, or deadline expiry. A fixed 60-second overall
         scan time budget covers authentication, response-body reads, and local
@@ -191,7 +232,8 @@ def create_server(
         propagates after cleanup. Files over 64 KiB, binary/non-UTF-8 content, unsupported
         encodings, symlinks, and submodules are skipped explicitly. Truncated
         trees, exhausted scan limits, and malformed responses fail without an
-        indexed fallback. API responses and returned results are capped at 100 KB.
+        indexed fallback. HTTP responses are capped at 128 KiB and returned
+        results at 100,000 bytes.
         Items are sorted by path then paginated; total_count counts matching
         files in the scanned subset. Check incomplete_results and skipped_reasons
         before treating zero matches as exhaustive. Each item has a blob SHA,
@@ -207,6 +249,7 @@ def create_server(
 
     @server.tool()
     async def list_merged_pull_requests(repository: str, base: str, since: str | None = None, per_page: int = 30, page: int = 1) -> Any:
+        """Search one repository's merged PRs for an explicit base branch and optional since time."""
         return await github.list_merged_pull_requests(repository, base=base, since=since, per_page=per_page, page=page)
 
     @server.tool()
@@ -216,7 +259,10 @@ def create_server(
 
     @server.tool()
     async def list_wiki_pages(repository: str, ref: str = "HEAD") -> Any:
-        """List pages in the source project's configured wiki using App access."""
+        """List pages in the source project's configured wiki using App access.
+
+        Returns source_repository, wiki_repository, and the page list in result.
+        """
         return await github.list_wiki_pages(repository, ref)
 
     @server.tool()
@@ -226,19 +272,28 @@ def create_server(
 
     @server.tool()
     async def search_wiki(repository: str, query: str, ref: str = "HEAD") -> Any:
-        """Search the source project's configured wiki using App access."""
+        """Search the source project's configured wiki using App access.
+
+        Returns source_repository, wiki_repository, and the matching page list in result.
+        """
         return await github.search_wiki(repository, query, ref)
 
     @server.tool()
     async def list_wiki_history(
         repository: str, path: str | None = None, limit: int = 30, ref: str = "HEAD"
     ) -> Any:
-        """Read history in the source project's configured wiki using App access."""
+        """Read history in the source project's configured wiki using App access.
+
+        Returns source_repository, wiki_repository, and the commit SHA list in result.
+        """
         return await github.list_wiki_history(repository, path, limit, ref)
 
     @server.tool()
     async def get_wiki_diff(repository: str, base: str, head: str = "HEAD") -> Any:
-        """Diff snapshots in the source project's configured wiki using App access."""
+        """Diff snapshots in the source project's configured wiki using App access.
+
+        Returns source_repository, wiki_repository, and the diff text in result.
+        """
         return await github.get_wiki_diff(repository, base, head)
 
     if github.wiki_writes_enabled:

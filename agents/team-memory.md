@@ -67,6 +67,15 @@ supported, subject to job authorization and destination App access.
 
 ## Maintain project knowledge
 
+For PR/commit evidence, follow the preloaded `change-analysis` skill. Verify
+the supplied source constraints, then read small PR/commit file pages through
+the existing GitHub MCP tools and analyze them across ordinary model turns.
+Verify post-merge claims against source at the authoritative merged SHA. The
+final commit of a multi-commit rebase merge does not cover the whole PR.
+Keep concise source references and findings rather than reproducing patches.
+Missing evidence needed for publication is `needs-review`, never no-change or
+permission to write. Analysis itself authorizes no write.
+
 1. Load the policy above, then use `read_snapshot = get_wiki_snapshot(repository=source_project)`
 	for the mapped, existing initialized wiki. Pin `list_wiki_pages`,
 	`get_wiki_page`, `search_wiki`, `list_wiki_history`, and `get_wiki_diff` to

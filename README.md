@@ -188,9 +188,10 @@ and compact tool activity, without raw event JSON or tool payloads. Publication
 is configurable through `output-mode` and `summary-mode`; use activity/status
 or quiet/none when the log audience should not see agent text.
 `needs-review`, failures, invalid results, and incomplete streams fail the job.
-The existing bounded GitHub readers can also reject oversized PR metadata or
-source responses. Such runs fail without weakening read limits or reporting
-unverified maintenance success.
+GitHub readers can reject oversized metadata or patches. For change evidence,
+the agent uses small file pages and targeted source reads instead of repeating
+the same oversized request. Unsupported content and missing evidence remain
+explicit limitations, never unverified maintenance success.
 
 Different PRs have independent concurrency groups so a later merge cannot
 replace another PR's pending run. Jobs may overlap or finish out of merge order:
@@ -231,6 +232,51 @@ are not proof of publication. Sensitive/conflicting changes require human review
   Wiki retrieval is read-only; separately authorized maintenance uses only the
   `team-memory` agent-local writer.
 6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
+
+### Large PR and commit analysis
+
+The `triage`, `plan`, and `team-memory` agents preload the `change-analysis`
+skill. It guides normal Copilot tool/model turns using existing GitHub reads:
+PR metadata, small `list_pull_request_files` pages, and targeted `get_file`
+reads at verified commit SHAs. A size error prompts smaller pages, down to one
+file per call, with pagination restarted when the page size changes.
+
+`get_commit` now supports upstream-style `detail="none" | "stats" | "full_patch"`
+and file pagination. **The default is `stats`, without patches**; callers that
+need patches must explicitly request `full_patch`. Commit identity, parents,
+and tree metadata remain available. Its transport allowance is separate from
+the projected model-result limit, so discarding patches happens before the
+model-result size check. No custom diff reader, analysis controller, or
+additional SDK runtime is involved.
+
+| Boundary | Default limit |
+| --- | --- |
+| REST HTTP response | 128 KiB; commit detail only: 1 MiB before projection |
+| REST JSON result | 100,000 serialized bytes |
+| SDK output-file threshold | 128 KiB, above the PR/commit result budget to avoid requiring local file access |
+| `get_file` text | 64 KiB |
+| PR/commit file pagination | 1-100 files per page, at most 3,000 pages; GitHub's 3,000-file ceiling still applies |
+
+Pages remain in the ordinary SDK conversation; this is not a hard total-context
+bound or a guarantee of exhaustive analysis. PR metadata is revalidated around
+paging because the file-list endpoint is not commit-pinned. A final commit of a
+multi-commit rebase merge does not cover the whole PR. Missing patches, API
+ceilings, unsupported files, and unresolved source questions remain explicit
+limitations. Wiki publication still requires its existing authorization,
+source verification, and destination preconditions. See the
+[MCP read contracts](github_app_mcp/README.md) for details.
+
+## Observability
+
+Content-free run accounting is always on for both protocols through the existing
+Foundry/Application Insights pipeline. Content capture stays disabled. See the
+[observability guide](docs/observability.md) for configuration, privacy,
+measurement definitions and limitations, the
+[Azure Monitor Workbook](observability/workbook.json), and
+[copyable KQL reports](observability/queries.kql). Reports keep transport,
+execution, confirmed operations and telemetry coverage separate; missing usage is not
+zero, and HTTP success is not business success. Assets are checked offline;
+live ingestion/import validation and any deployment need separate authorization.
 
 ## Environment Variables
 

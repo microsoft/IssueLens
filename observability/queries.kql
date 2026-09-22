@@ -1,0 +1,159 @@
+// IssueLens schema-v1 reports, scoped to an Application Insights resource.
+// Copy COMMON and exactly one QUERY block into Logs; edit the COMMON literals.
+// Workbook queries embed the same blocks with safely encoded parameter values.
+// See docs/observability.md for AppEvents mapping and accounting limitations.
+
+// BEGIN COMMON
+let StartTime = ago(24h);
+let EndTime = now();
+let Protocol = "";
+let Release = "";
+let RunId = "";
+let TargetRepository = "";
+let TargetKind = "";
+let TargetNumber = "";
+let TargetRelationship = "";
+let FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);
+let ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in ("issue", "pull_request", "work_item") and TargetNumber matches regex @"^[1-9][0-9]*$") or (isnotempty(TargetRepository) and TargetKind in ("repository", "wiki") and TargetNumber == "0");
+let RawFacts = materialize(
+    customEvents
+    | where timestamp between (StartTime .. EndTime)
+    | where name in ("issuelens.run.started", "issuelens.run.completed", "issuelens.run.agent", "issuelens.run.model", "issuelens.run.target", "issuelens.run.error", "issuelens.request.rejected")
+    | extend d = customDimensions
+    | where tostring(d.schema_version) == "1"
+    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()
+    | where isnotempty(run_id)
+    | where isempty(Protocol) or protocol == Protocol
+    | where isempty(Release) or release == Release
+    | where isempty(RunId) or run_id == RunId
+    | project timestamp, ingested_at, name, run_id, protocol, release, d
+);
+let TargetFacts = materialize(
+    RawFacts
+    | where name == "issuelens.run.target"
+    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)
+    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)
+    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship
+);
+let MatchingRuns = TargetFacts
+    | where isempty(TargetRepository) or repository == tolower(TargetRepository)
+    | where isempty(TargetKind) or target_kind == TargetKind
+    | where isempty(TargetNumber) or tostring(number) == TargetNumber
+    | where isempty(TargetRelationship) or relationship == TargetRelationship
+    | distinct run_id;
+let Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));
+let Starts = materialize(Facts | where name == "issuelens.run.started" | summarize arg_max(timestamp, *) by run_id);
+let Runs = materialize(Facts | where name in ("issuelens.run.completed", "issuelens.request.rejected") | summarize arg_max(timestamp, *) by run_id);
+let Agents = materialize(Facts | where name == "issuelens.run.agent" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);
+let Models = materialize(Facts | where name == "issuelens.run.model" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);
+let Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));
+let Lifecycle = materialize(
+    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)
+    | extend start_seen = run_id in (Starts | project run_id)
+    | extend lifecycle_state = case(name == "issuelens.request.rejected" and start_seen, "rejection_with_start", name == "issuelens.request.rejected", "admission_rejection", terminal_seen and start_seen, "paired", terminal_seen, "terminal_without_start_in_window", "start_without_terminal_in_window")
+);
+// END COMMON
+
+// BEGIN QUERY overview-outcomes
+Runs
+| extend transport_status = tostring(d.transport_status), execution_status = tostring(d.execution_status), business_outcome = tostring(d.business_outcome), admitted = tobool(d.admitted)
+| extend transport_status = iff(isempty(transport_status), "unknown", transport_status), execution_status = iff(isempty(execution_status), "unknown", execution_status), business_outcome = iff(isempty(business_outcome), "unknown", business_outcome)
+| summarize observed_terminal_requests = count(), admitted_runs = countif(admitted == true), admission_rejections = countif(admitted == false), unknown_admission = countif(isnull(admitted)) by day = bin(timestamp, 1d), protocol, release, transport_status, execution_status, business_outcome
+| order by day desc, protocol asc, execution_status asc
+// END QUERY
+
+// BEGIN QUERY overview-usage
+Runs
+| where name == "issuelens.run.completed"
+| extend input_tokens = tolong(d.input_tokens), output_tokens = tolong(d.output_tokens), cache_read_tokens = tolong(d.cache_read_tokens), cache_write_tokens = tolong(d.cache_write_tokens), reasoning_tokens = tolong(d.reasoning_tokens)
+| summarize terminal_runs = count(), usage_complete_runs = countif(tostring(d.usage_status) == "complete"), usage_partial_runs = countif(tostring(d.usage_status) == "partial"), usage_unavailable_runs = countif(tostring(d.usage_status) == "unavailable"), usage_not_applicable_runs = countif(tostring(d.usage_status) == "not_applicable"), usage_status_missing_runs = countif(isempty(tostring(d.usage_status))), reported_usage_calls = sum(tolong(d.usage_calls)), input_samples = countif(isnotnull(input_tokens)), output_samples = countif(isnotnull(output_tokens)), cache_read_samples = countif(isnotnull(cache_read_tokens)), cache_write_samples = countif(isnotnull(cache_write_tokens)), reasoning_samples = countif(isnotnull(reasoning_tokens)), observed_input_tokens = sum(input_tokens), observed_output_tokens = sum(output_tokens), observed_cache_read_tokens = sum(cache_read_tokens), observed_cache_write_tokens = sum(cache_write_tokens), observed_reasoning_tokens = sum(reasoning_tokens), reported_input_tokens_calls = sum(tolong(d.input_tokens_calls)), reported_output_tokens_calls = sum(tolong(d.output_tokens_calls)), reported_cache_read_tokens_calls = sum(tolong(d.cache_read_tokens_calls)), reported_cache_write_tokens_calls = sum(tolong(d.cache_write_tokens_calls)), reported_reasoning_tokens_calls = sum(tolong(d.reasoning_tokens_calls)) by protocol, release
+| extend observed_input_tokens = iff(input_samples > 0, observed_input_tokens, long(null)), observed_output_tokens = iff(output_samples > 0, observed_output_tokens, long(null)), observed_cache_read_tokens = iff(cache_read_samples > 0, observed_cache_read_tokens, long(null)), observed_cache_write_tokens = iff(cache_write_samples > 0, observed_cache_write_tokens, long(null)), observed_reasoning_tokens = iff(reasoning_samples > 0, observed_reasoning_tokens, long(null))
+| order by protocol asc, release asc
+// END QUERY
+
+// BEGIN QUERY overview-targets
+union
+    (Targets | distinct repository, target_kind, number, relationship | summarize exact_recorded_identities = count() by target_kind, relationship),
+    (Targets | distinct repository, relationship | summarize exact_recorded_identities = count() by relationship | extend target_kind = "any_repository")
+| project target_kind, relationship, exact_recorded_identities
+| order by target_kind asc, relationship asc
+// END QUERY
+
+// BEGIN QUERY run-explorer
+Lifecycle
+| project last_observed_at = timestamp, run_id, lifecycle_state, protocol, release, run_trace_id = tostring(d.run_trace_id), invocation_id = tostring(d.invocation_id), response_id = tostring(d.response_id), conversation_id = tostring(d.conversation_id), session_id = tostring(d.session_id), transport_status = iff(terminal_seen and isnotempty(tostring(d.transport_status)), tostring(d.transport_status), "unknown"), execution_status = iff(terminal_seen, tostring(d.execution_status), "unknown"), business_outcome = iff(terminal_seen, tostring(d.business_outcome), "unknown"), admitted = tobool(d.admitted), model_request_sent = tobool(d.model_request_sent), duration_s = todouble(d.duration_s), first_root_output_s = todouble(d.first_root_output_s), first_final_output_s = todouble(d.first_final_output_s), usage_status = tostring(d.usage_status), usage_calls = tolong(d.usage_calls), input_tokens = tolong(d.input_tokens), output_tokens = tolong(d.output_tokens), tools_started = tolong(d.tools_started), tools_completed = tolong(d.tools_completed), tools_failed = tolong(d.tools_failed), agents_started = tolong(d.agents_started), model_failures = tolong(d.model_failures), model_retries = tolong(d.model_retries), write_operations_succeeded = tolong(d.write_operations_succeeded), notification_submissions = tolong(d.notification_submissions), context_tokens_peak = tolong(d.context_tokens_peak), context_token_limit = tolong(d.context_token_limit), attribution_complete = tobool(d.attribution_complete), telemetry_incomplete = tobool(d.telemetry_incomplete), stage = tostring(d.stage), error_type = tostring(d.error_type)
+| order by last_observed_at desc, run_id asc
+| take 100
+// END QUERY
+
+// BEGIN QUERY run-agents
+Agents
+| where isnotempty(RunId)
+| project run_id, agent_run_id, parent_agent_id = tostring(d.parent_agent_id), role = tostring(d.role), status = tostring(d.status), duration_s = todouble(d.duration_s), usage_calls = tolong(d.usage_calls), exclusive_input_tokens = tolong(d.input_tokens), exclusive_output_tokens = tolong(d.output_tokens), exclusive_cache_read_tokens = tolong(d.cache_read_tokens), exclusive_cache_write_tokens = tolong(d.cache_write_tokens), exclusive_reasoning_tokens = tolong(d.reasoning_tokens), input_tokens_calls = tolong(d.input_tokens_calls), output_tokens_calls = tolong(d.output_tokens_calls), cache_read_tokens_calls = tolong(d.cache_read_tokens_calls), cache_write_tokens_calls = tolong(d.cache_write_tokens_calls), reasoning_tokens_calls = tolong(d.reasoning_tokens_calls), tools_started = tolong(d.tools_started), tools_completed = tolong(d.tools_completed), tools_failed = tolong(d.tools_failed)
+| order by parent_agent_id asc, agent_run_id asc
+| take 500
+// END QUERY
+
+// BEGIN QUERY run-targets
+Targets
+| project last_observed_at = timestamp, run_id, repository, repository_id = tolong(d.repository_id), target_kind, number, relationship, observed_operations = tolong(d.operations)
+| order by last_observed_at desc, run_id asc, repository asc, target_kind asc, number asc, relationship asc
+| take 500
+// END QUERY
+
+// BEGIN QUERY trace-requests
+let TraceIds = Facts | where isnotempty(RunId) | extend run_trace_id = tostring(d.run_trace_id) | where isnotempty(run_trace_id) | distinct run_trace_id;
+requests
+| where timestamp between (StartTime .. EndTime)
+| where operation_Id in (TraceIds)
+| summarize arg_max(timestamp, *) by itemId
+| project timestamp, operation_Id, id, itemId, duration, success, resultCode
+| order by timestamp asc
+| take 100
+// END QUERY
+
+// BEGIN QUERY reliability-performance
+Runs
+| where name == "issuelens.run.completed"
+| extend duration_s = todouble(d.duration_s), first_root_output_s = todouble(d.first_root_output_s), first_final_output_s = todouble(d.first_final_output_s), tools_failed = tolong(d.tools_failed), model_failures = tolong(d.model_failures), model_retries = tolong(d.model_retries)
+| summarize terminal_runs = count(), execution_failed = countif(tostring(d.execution_status) == "failed"), execution_cancelled = countif(tostring(d.execution_status) == "cancelled"), telemetry_incomplete_runs = countif(tobool(d.telemetry_incomplete) == true), duration_samples = countif(isnotnull(duration_s)), root_output_samples = countif(isnotnull(first_root_output_s)), final_output_samples = countif(isnotnull(first_final_output_s)), duration_p50_s = percentile(duration_s, 50), duration_p95_s = percentile(duration_s, 95), duration_p99_s = percentile(duration_s, 99), root_output_p50_s = percentile(first_root_output_s, 50), root_output_p95_s = percentile(first_root_output_s, 95), root_output_p99_s = percentile(first_root_output_s, 99), final_output_p50_s = percentile(first_final_output_s, 50), final_output_p95_s = percentile(first_final_output_s, 95), final_output_p99_s = percentile(first_final_output_s, 99), tools_failed_samples = countif(isnotnull(tools_failed)), model_failures_samples = countif(isnotnull(model_failures)), model_retries_samples = countif(isnotnull(model_retries)), observed_failed_tools = sum(tools_failed), observed_model_failures = sum(model_failures), observed_model_retries = sum(model_retries) by protocol, release
+| extend root_output_coverage_pct = 100.0 * root_output_samples / terminal_runs, final_output_coverage_pct = 100.0 * final_output_samples / terminal_runs, observed_failed_tools = iff(tools_failed_samples > 0, observed_failed_tools, long(null)), observed_model_failures = iff(model_failures_samples > 0, observed_model_failures, long(null)), observed_model_retries = iff(model_retries_samples > 0, observed_model_retries, long(null))
+| order by protocol asc, release asc
+// END QUERY
+
+// BEGIN QUERY model-usage
+Models
+| extend input_tokens = tolong(d.input_tokens), output_tokens = tolong(d.output_tokens), cache_read_tokens = tolong(d.cache_read_tokens), cache_write_tokens = tolong(d.cache_write_tokens), reasoning_tokens = tolong(d.reasoning_tokens)
+| summarize run_model_records = count(), reported_usage_calls = sum(tolong(d.usage_calls)), input_samples = countif(isnotnull(input_tokens)), output_samples = countif(isnotnull(output_tokens)), cache_read_samples = countif(isnotnull(cache_read_tokens)), cache_write_samples = countif(isnotnull(cache_write_tokens)), reasoning_samples = countif(isnotnull(reasoning_tokens)), observed_input_tokens = sum(input_tokens), observed_output_tokens = sum(output_tokens), observed_cache_read_tokens = sum(cache_read_tokens), observed_cache_write_tokens = sum(cache_write_tokens), observed_reasoning_tokens = sum(reasoning_tokens), reported_input_tokens_calls = sum(tolong(d.input_tokens_calls)), reported_output_tokens_calls = sum(tolong(d.output_tokens_calls)), reported_cache_read_tokens_calls = sum(tolong(d.cache_read_tokens_calls)), reported_cache_write_tokens_calls = sum(tolong(d.cache_write_tokens_calls)), reported_reasoning_tokens_calls = sum(tolong(d.reasoning_tokens_calls)) by protocol, release, model
+| extend observed_input_tokens = iff(input_samples > 0, observed_input_tokens, long(null)), observed_output_tokens = iff(output_samples > 0, observed_output_tokens, long(null)), observed_cache_read_tokens = iff(cache_read_samples > 0, observed_cache_read_tokens, long(null)), observed_cache_write_tokens = iff(cache_write_samples > 0, observed_cache_write_tokens, long(null)), observed_reasoning_tokens = iff(reasoning_samples > 0, observed_reasoning_tokens, long(null))
+| order by protocol asc, release asc, model asc
+// END QUERY
+
+// BEGIN QUERY reliability-errors
+Facts
+| where name in ("issuelens.run.error", "issuelens.run.completed", "issuelens.request.rejected")
+| extend stage = tostring(d.stage), error_type = tostring(d.error_type)
+| where isnotempty(error_type)
+| distinct run_id, protocol, release, stage, error_type
+| summarize affected_runs = count() by protocol, release, stage, error_type
+| order by affected_runs desc
+// END QUERY
+
+// BEGIN QUERY telemetry-quality
+Lifecycle
+| extend usage_status = tostring(d.usage_status), attribution_complete = tobool(d.attribution_complete), telemetry_incomplete = tobool(d.telemetry_incomplete), transport_status = tostring(d.transport_status), model_request_sent = tobool(d.model_request_sent), raw_lag_s = (ingested_at - timestamp) / 1s
+| extend lag_s = iff(raw_lag_s >= 0, raw_lag_s, real(null))
+| summarize observed_run_ids = count(), starts_without_terminal_in_window = countif(lifecycle_state == "start_without_terminal_in_window"), terminals_without_start_in_window = countif(lifecycle_state == "terminal_without_start_in_window"), paired_runs = countif(lifecycle_state == "paired"), admission_rejections = countif(lifecycle_state == "admission_rejection"), unexpected_rejections_with_start = countif(lifecycle_state == "rejection_with_start"), terminal_records = countif(terminal_seen), usage_complete = countif(terminal_seen and usage_status == "complete"), usage_partial = countif(terminal_seen and usage_status == "partial"), usage_unavailable = countif(terminal_seen and usage_status == "unavailable"), usage_not_applicable = countif(terminal_seen and usage_status == "not_applicable"), missing_usage_status = countif(terminal_seen and isempty(usage_status)), incomplete_attribution = countif(terminal_seen and attribution_complete == false), missing_attribution_state = countif(terminal_seen and isnull(attribution_complete)), incomplete_telemetry = countif(terminal_seen and telemetry_incomplete == true), missing_completeness_state = countif(terminal_seen and isnull(telemetry_incomplete)), unknown_transport_status = countif(terminal_seen and transport_status == "unknown"), missing_transport_status = countif(terminal_seen and isempty(transport_status)), model_requests_sent = countif(terminal_seen and model_request_sent == true), model_not_sent = countif(terminal_seen and model_request_sent == false), missing_model_request_state = countif(terminal_seen and isnull(model_request_sent)), ingestion_lag_samples = countif(isnotnull(lag_s)), negative_ingestion_lag_samples = countif(raw_lag_s < 0), ingestion_lag_p50_s = percentile(lag_s, 50), ingestion_lag_p95_s = percentile(lag_s, 95), ingestion_lag_p99_s = percentile(lag_s, 99) by protocol, release
+| order by protocol asc, release asc
+// END QUERY
+
+// BEGIN QUERY telemetry-incomplete-reasons
+Runs
+| mv-expand reason = bag_keys(d) to typeof(string)
+| where reason startswith "incomplete_"
+| extend observed_count = tolong(d[reason])
+| where isnotnull(observed_count) and observed_count > 0
+| summarize affected_runs = count(), reported_occurrences = sum(observed_count) by protocol, release, reason
+| extend category = iff(reason endswith "_limit", "bounded_state_limit", "other_incompleteness")
+| order by category asc, reported_occurrences desc
+// END QUERY

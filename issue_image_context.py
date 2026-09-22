@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any
 
 from copilot.session import Attachment
@@ -48,6 +49,7 @@ async def issue_image_attachments(
     github_client: Any,
     *,
     maximum_images: int = 5,
+    on_issue_read: Callable[[str, int], None] | None = None,
 ) -> list[Attachment]:
     """Load issue-body images for explicit references as Copilot blobs."""
     if maximum_images <= 0:
@@ -57,6 +59,8 @@ async def issue_image_attachments(
         result = await github_client.get_issue_images(
             repository, issue_number
         )
+        if on_issue_read is not None:
+            on_issue_read(repository, issue_number)
         for image_index, image in enumerate(result.get("images", []), start=1):
             media_type = image["mime_type"]
             extension = _IMAGE_EXTENSIONS[media_type]

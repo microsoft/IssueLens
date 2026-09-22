@@ -11,6 +11,9 @@ resources:
   cpu: '0.5'
   memory: 1.0Gi
 environment_variables:
+  # Metadata-only telemetry. Foundry owns the Application Insights connection.
+  - name: OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
+    value: "false"
   # Model (inference) — Foundry BYOK. Key auth via AZURE_AI_MODEL_API_KEY
   # (no managed-identity model RBAC required).
   - name: AZURE_AI_MODEL_DEPLOYMENT_NAME

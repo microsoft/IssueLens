@@ -1,0 +1,406 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 1,
+      "name": "report-contract",
+      "content": {
+        "json": "# IssueLens operational reporting\nSchema v1, Application Insights customEvents. These assets are checked offline, not live-import/query validated. Select the intended Applications resource. Unknown usage is not zero; transport completion and HTTP success are not business success. Facts must be unsampled but are not lossless or an audit ledger. Facts use an isolated, trace-independent context and explicit run_trace_id. Host enrichment and trace-based log sampling are tested offline; live ingestion settings and delivery still need verification. Diagnostic traces may be sampled. Native per-call CLI trace export is not enabled.\n\nBlank filters mean all. A target number requires both repository and kind (issue, pull_request or unresolved work_item; repository/wiki use 0). Target filters select whole runs, including all their other targets, without allocating tokens. Clear target filters when investigating missing telemetry. Copy a run ID into RunId for agent and native request-trace details. See docs/observability.md and observability/queries.kql in the repository."
+      }
+    },
+    {
+      "type": 9,
+      "name": "report-filters",
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "style": "above",
+        "parameters": [
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-000000000001",
+            "version": "KqlParameterItem/1.0",
+            "name": "Applications",
+            "label": "Applications",
+            "type": 5,
+            "isRequired": true,
+            "multiSelect": true,
+            "quote": "'",
+            "delimiter": ",",
+            "value": ["value::3"],
+            "typeSettings": {
+              "resourceTypeFilter": {"microsoft.insights/components": true},
+              "additionalResourceOptions": ["value::3"]
+            }
+          },
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-000000000002",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "label": "Time range",
+            "type": 4,
+            "isRequired": true,
+            "value": {"durationMs": 86400000},
+            "typeSettings": {
+              "selectableValues": [
+                {"durationMs": 3600000},
+                {"durationMs": 21600000},
+                {"durationMs": 86400000},
+                {"durationMs": 604800000},
+                {"durationMs": 2592000000}
+              ],
+              "allowCustom": true
+            }
+          },
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-000000000004",
+            "version": "KqlParameterItem/1.0",
+            "name": "Protocol",
+            "label": "Protocol",
+            "type": 2,
+            "isRequired": false,
+            "value": "",
+            "jsonData": "[{\"value\":\"\",\"label\":\"All protocols\",\"selected\":true},{\"value\":\"invocations\",\"label\":\"Invocations\"},{\"value\":\"responses\",\"label\":\"Responses\"}]"
+          },
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-000000000005",
+            "version": "KqlParameterItem/1.0",
+            "name": "Release",
+            "label": "Release (blank = all)",
+            "type": 1,
+            "isRequired": false,
+            "value": ""
+          },
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-000000000006",
+            "version": "KqlParameterItem/1.0",
+            "name": "RunId",
+            "label": "Run ID (blank = all)",
+            "type": 1,
+            "isRequired": false,
+            "value": ""
+          },
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-000000000007",
+            "version": "KqlParameterItem/1.0",
+            "name": "TargetRepository",
+            "label": "Target owner/repository",
+            "type": 1,
+            "isRequired": false,
+            "value": ""
+          },
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-000000000008",
+            "version": "KqlParameterItem/1.0",
+            "name": "TargetKind",
+            "label": "Target kind",
+            "type": 2,
+            "isRequired": false,
+            "value": "",
+            "jsonData": "[{\"value\":\"\",\"label\":\"All kinds\",\"selected\":true},{\"value\":\"repository\",\"label\":\"Repository\"},{\"value\":\"issue\",\"label\":\"Issue\"},{\"value\":\"pull_request\",\"label\":\"Pull request\"},{\"value\":\"work_item\",\"label\":\"Unresolved work item\"},{\"value\":\"wiki\",\"label\":\"Wiki destination\"}]"
+          },
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-000000000009",
+            "version": "KqlParameterItem/1.0",
+            "name": "TargetNumber",
+            "label": "Target number (requires repository and kind)",
+            "type": 1,
+            "isRequired": false,
+            "value": ""
+          },
+          {
+            "id": "652aeeb0-3b07-4fd9-bcb5-00000000000a",
+            "version": "KqlParameterItem/1.0",
+            "name": "TargetRelationship",
+            "label": "Target relationship",
+            "type": 2,
+            "isRequired": false,
+            "value": "",
+            "jsonData": "[{\"value\":\"\",\"label\":\"All relationships\",\"selected\":true},{\"value\":\"attempted\",\"label\":\"Attempted\"},{\"value\":\"read\",\"label\":\"Read\"},{\"value\":\"write_succeeded\",\"label\":\"Successful operation\"},{\"value\":\"source\",\"label\":\"Wiki source repository\"}]"
+          }
+        ]
+      }
+    },
+    {
+      "type": 12,
+      "name": "overview",
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "title": "Overview",
+        "items": [
+          {
+            "type": 1,
+            "name": "overview-definitions",
+            "content": {
+              "json": "## Overview\nTerminal records include failed/cancelled runs; rejected admissions are separate. Transport, execution and business outcomes are independent. Token sums use root terminal facts once, with known-record samples and per-call field coverage. Cache/reasoning breakdowns are not additive to input/output. No pricing or cost estimate is implemented. Target counts are exact observed typed identities; relationships and any_repository overlap and must not be added."
+            }
+          },
+          {
+            "type": 3,
+            "name": "overview-outcomes",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Daily terminal transport, execution and business observations",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nRuns\n| extend transport_status = tostring(d.transport_status), execution_status = tostring(d.execution_status), business_outcome = tostring(d.business_outcome), admitted = tobool(d.admitted)\n| extend transport_status = iff(isempty(transport_status), \"unknown\", transport_status), execution_status = iff(isempty(execution_status), \"unknown\", execution_status), business_outcome = iff(isempty(business_outcome), \"unknown\", business_outcome)\n| summarize observed_terminal_requests = count(), admitted_runs = countif(admitted == true), admission_rejections = countif(admitted == false), unknown_admission = countif(isnull(admitted)) by day = bin(timestamp, 1d), protocol, release, transport_status, execution_status, business_outcome\n| order by day desc, protocol asc, execution_status asc",
+              "noDataMessage": "No matching schema-v1 terminal facts. Empty results do not prove no activity."
+            }
+          },
+          {
+            "type": 3,
+            "name": "overview-usage",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Root run usage: observed totals and field coverage",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nRuns\n| where name == \"issuelens.run.completed\"\n| extend input_tokens = tolong(d.input_tokens), output_tokens = tolong(d.output_tokens), cache_read_tokens = tolong(d.cache_read_tokens), cache_write_tokens = tolong(d.cache_write_tokens), reasoning_tokens = tolong(d.reasoning_tokens)\n| summarize terminal_runs = count(), usage_complete_runs = countif(tostring(d.usage_status) == \"complete\"), usage_partial_runs = countif(tostring(d.usage_status) == \"partial\"), usage_unavailable_runs = countif(tostring(d.usage_status) == \"unavailable\"), usage_not_applicable_runs = countif(tostring(d.usage_status) == \"not_applicable\"), usage_status_missing_runs = countif(isempty(tostring(d.usage_status))), reported_usage_calls = sum(tolong(d.usage_calls)), input_samples = countif(isnotnull(input_tokens)), output_samples = countif(isnotnull(output_tokens)), cache_read_samples = countif(isnotnull(cache_read_tokens)), cache_write_samples = countif(isnotnull(cache_write_tokens)), reasoning_samples = countif(isnotnull(reasoning_tokens)), observed_input_tokens = sum(input_tokens), observed_output_tokens = sum(output_tokens), observed_cache_read_tokens = sum(cache_read_tokens), observed_cache_write_tokens = sum(cache_write_tokens), observed_reasoning_tokens = sum(reasoning_tokens), reported_input_tokens_calls = sum(tolong(d.input_tokens_calls)), reported_output_tokens_calls = sum(tolong(d.output_tokens_calls)), reported_cache_read_tokens_calls = sum(tolong(d.cache_read_tokens_calls)), reported_cache_write_tokens_calls = sum(tolong(d.cache_write_tokens_calls)), reported_reasoning_tokens_calls = sum(tolong(d.reasoning_tokens_calls)) by protocol, release\n| extend observed_input_tokens = iff(input_samples > 0, observed_input_tokens, long(null)), observed_output_tokens = iff(output_samples > 0, observed_output_tokens, long(null)), observed_cache_read_tokens = iff(cache_read_samples > 0, observed_cache_read_tokens, long(null)), observed_cache_write_tokens = iff(cache_write_samples > 0, observed_cache_write_tokens, long(null)), observed_reasoning_tokens = iff(reasoning_samples > 0, observed_reasoning_tokens, long(null))\n| order by protocol asc, release asc",
+              "noDataMessage": "No matching run usage facts. Missing usage is not zero."
+            }
+          },
+          {
+            "type": 3,
+            "name": "overview-targets",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Exact observed typed target identities (non-additive)",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nunion\n    (Targets | distinct repository, target_kind, number, relationship | summarize exact_recorded_identities = count() by target_kind, relationship),\n    (Targets | distinct repository, relationship | summarize exact_recorded_identities = count() by relationship | extend target_kind = \"any_repository\")\n| project target_kind, relationship, exact_recorded_identities\n| order by target_kind asc, relationship asc",
+              "noDataMessage": "No matching target facts. Absence does not establish no targets or no writes."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": 12,
+      "name": "run-explorer-view",
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "title": "Run explorer",
+        "items": [
+          {
+            "type": 1,
+            "name": "run-explorer-definitions",
+            "content": {
+              "json": "## Run explorer\nCopy a run_id into RunId. The lifecycle grid is limited to the latest 100 rows; detail grids are bounded. Missing start/terminal can be a window boundary, active run, ingestion delay or loss. Agent usage is exclusive and must not be added to root/model totals; duration_s is captured at observed execution end. Missing events can still prevent full attribution. model_request_sent describes host dispatch, not proof of provider acceptance or a count of API calls.\n\nHost issue-image reads initially use work_item. A later typed SDK issue/PR result merges pending unknown associations before export. Successful issuelens-config calls count as repository reads. Optional repository_id comes from observed get_repository results, with no enrichment-only reads. Tool attempts do not identify primary user intent. Successful operations do not necessarily change state; notification submission is not delivery.\n\nRetained request traces match operation_Id to explicit run_trace_id and provide native Details links, not native per-call CLI export. No matching request does not mean no trace: inspect dependencies, sampling, time range and correlation. Links and ingestion need validation on the target resource. No message, URL or exception content is selected."
+            }
+          },
+          {
+            "type": 3,
+            "name": "run-explorer",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Runs, lifecycle and correlation (latest 100)",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nLifecycle\n| project last_observed_at = timestamp, run_id, lifecycle_state, protocol, release, run_trace_id = tostring(d.run_trace_id), invocation_id = tostring(d.invocation_id), response_id = tostring(d.response_id), conversation_id = tostring(d.conversation_id), session_id = tostring(d.session_id), transport_status = iff(terminal_seen and isnotempty(tostring(d.transport_status)), tostring(d.transport_status), \"unknown\"), execution_status = iff(terminal_seen, tostring(d.execution_status), \"unknown\"), business_outcome = iff(terminal_seen, tostring(d.business_outcome), \"unknown\"), admitted = tobool(d.admitted), model_request_sent = tobool(d.model_request_sent), duration_s = todouble(d.duration_s), first_root_output_s = todouble(d.first_root_output_s), first_final_output_s = todouble(d.first_final_output_s), usage_status = tostring(d.usage_status), usage_calls = tolong(d.usage_calls), input_tokens = tolong(d.input_tokens), output_tokens = tolong(d.output_tokens), tools_started = tolong(d.tools_started), tools_completed = tolong(d.tools_completed), tools_failed = tolong(d.tools_failed), agents_started = tolong(d.agents_started), model_failures = tolong(d.model_failures), model_retries = tolong(d.model_retries), write_operations_succeeded = tolong(d.write_operations_succeeded), notification_submissions = tolong(d.notification_submissions), context_tokens_peak = tolong(d.context_tokens_peak), context_token_limit = tolong(d.context_token_limit), attribution_complete = tobool(d.attribution_complete), telemetry_incomplete = tobool(d.telemetry_incomplete), stage = tostring(d.stage), error_type = tostring(d.error_type)\n| order by last_observed_at desc, run_id asc\n| take 100",
+              "gridSettings": {"filter": true, "rowLimit": 100},
+              "noDataMessage": "No matching lifecycle facts. Check filters, ingestion and telemetry enablement."
+            }
+          },
+          {
+            "type": 3,
+            "name": "run-agents",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Exclusive agent accounting (enter RunId)",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nAgents\n| where isnotempty(RunId)\n| project run_id, agent_run_id, parent_agent_id = tostring(d.parent_agent_id), role = tostring(d.role), status = tostring(d.status), duration_s = todouble(d.duration_s), usage_calls = tolong(d.usage_calls), exclusive_input_tokens = tolong(d.input_tokens), exclusive_output_tokens = tolong(d.output_tokens), exclusive_cache_read_tokens = tolong(d.cache_read_tokens), exclusive_cache_write_tokens = tolong(d.cache_write_tokens), exclusive_reasoning_tokens = tolong(d.reasoning_tokens), input_tokens_calls = tolong(d.input_tokens_calls), output_tokens_calls = tolong(d.output_tokens_calls), cache_read_tokens_calls = tolong(d.cache_read_tokens_calls), cache_write_tokens_calls = tolong(d.cache_write_tokens_calls), reasoning_tokens_calls = tolong(d.reasoning_tokens_calls), tools_started = tolong(d.tools_started), tools_completed = tolong(d.tools_completed), tools_failed = tolong(d.tools_failed)\n| order by parent_agent_id asc, agent_run_id asc\n| take 500",
+              "gridSettings": {"filter": true, "rowLimit": 500},
+              "noDataMessage": "Enter RunId. No matching agent facts may also indicate missing collection."
+            }
+          },
+          {
+            "type": 3,
+            "name": "run-targets",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Observed target relationships (latest 500)",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nTargets\n| project last_observed_at = timestamp, run_id, repository, repository_id = tolong(d.repository_id), target_kind, number, relationship, observed_operations = tolong(d.operations)\n| order by last_observed_at desc, run_id asc, repository asc, target_kind asc, number asc, relationship asc\n| take 500",
+              "gridSettings": {"filter": true, "rowLimit": 500},
+              "noDataMessage": "No matching target facts; this is not proof that no operations occurred."
+            }
+          },
+          {
+            "type": 3,
+            "name": "trace-requests",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Retained request traces (enter RunId; details are diagnostic)",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nlet TraceIds = Facts | where isnotempty(RunId) | extend run_trace_id = tostring(d.run_trace_id) | where isnotempty(run_trace_id) | distinct run_trace_id;\nrequests\n| where timestamp {TimeRange}\n| where operation_Id in (TraceIds)\n| summarize arg_max(timestamp, *) by itemId\n| project timestamp, operation_Id, id, itemId, duration, success, resultCode\n| order by timestamp asc\n| take 100",
+              "gridSettings": {
+                "rowLimit": 100,
+                "formatters": [
+                  {
+                    "columnMatch": "itemId",
+                    "formatter": 7,
+                    "formatOptions": {
+                      "linkTarget": "RequestDetails",
+                      "linkLabel": "Details",
+                      "linkIsContextBlade": true
+                    }
+                  }
+                ]
+              },
+              "noDataMessage": "Enter RunId. No retained request in this scope/window is not proof that no trace exists."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": 12,
+      "name": "reliability-performance-view",
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "title": "Reliability and performance",
+        "items": [
+          {
+            "type": 1,
+            "name": "reliability-definitions",
+            "content": {
+              "json": "## Reliability and performance\nPercentiles use known samples only; missing first output remains null. First root output and first final-phase text are host-observed timings, not model TTFT or client latency. First final output is not full-answer completion. No alert threshold or SLO is asserted. Model facts aggregate once per run/model; do not add these totals to the root usage report. Error categories count affected runs, not attempts, and do not replace execution/business outcomes."
+            }
+          },
+          {
+            "type": 3,
+            "name": "reliability-performance",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Release/protocol latency, coverage and observed failures",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nRuns\n| where name == \"issuelens.run.completed\"\n| extend duration_s = todouble(d.duration_s), first_root_output_s = todouble(d.first_root_output_s), first_final_output_s = todouble(d.first_final_output_s), tools_failed = tolong(d.tools_failed), model_failures = tolong(d.model_failures), model_retries = tolong(d.model_retries)\n| summarize terminal_runs = count(), execution_failed = countif(tostring(d.execution_status) == \"failed\"), execution_cancelled = countif(tostring(d.execution_status) == \"cancelled\"), telemetry_incomplete_runs = countif(tobool(d.telemetry_incomplete) == true), duration_samples = countif(isnotnull(duration_s)), root_output_samples = countif(isnotnull(first_root_output_s)), final_output_samples = countif(isnotnull(first_final_output_s)), duration_p50_s = percentile(duration_s, 50), duration_p95_s = percentile(duration_s, 95), duration_p99_s = percentile(duration_s, 99), root_output_p50_s = percentile(first_root_output_s, 50), root_output_p95_s = percentile(first_root_output_s, 95), root_output_p99_s = percentile(first_root_output_s, 99), final_output_p50_s = percentile(first_final_output_s, 50), final_output_p95_s = percentile(first_final_output_s, 95), final_output_p99_s = percentile(first_final_output_s, 99), tools_failed_samples = countif(isnotnull(tools_failed)), model_failures_samples = countif(isnotnull(model_failures)), model_retries_samples = countif(isnotnull(model_retries)), observed_failed_tools = sum(tools_failed), observed_model_failures = sum(model_failures), observed_model_retries = sum(model_retries) by protocol, release\n| extend root_output_coverage_pct = 100.0 * root_output_samples / terminal_runs, final_output_coverage_pct = 100.0 * final_output_samples / terminal_runs, observed_failed_tools = iff(tools_failed_samples > 0, observed_failed_tools, long(null)), observed_model_failures = iff(model_failures_samples > 0, observed_model_failures, long(null)), observed_model_retries = iff(model_retries_samples > 0, observed_model_retries, long(null))\n| order by protocol asc, release asc",
+              "noDataMessage": "No matching terminal run timings. Unknown timings are not zero."
+            }
+          },
+          {
+            "type": 3,
+            "name": "model-usage",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Model usage: once per run/model, with field coverage",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nModels\n| extend input_tokens = tolong(d.input_tokens), output_tokens = tolong(d.output_tokens), cache_read_tokens = tolong(d.cache_read_tokens), cache_write_tokens = tolong(d.cache_write_tokens), reasoning_tokens = tolong(d.reasoning_tokens)\n| summarize run_model_records = count(), reported_usage_calls = sum(tolong(d.usage_calls)), input_samples = countif(isnotnull(input_tokens)), output_samples = countif(isnotnull(output_tokens)), cache_read_samples = countif(isnotnull(cache_read_tokens)), cache_write_samples = countif(isnotnull(cache_write_tokens)), reasoning_samples = countif(isnotnull(reasoning_tokens)), observed_input_tokens = sum(input_tokens), observed_output_tokens = sum(output_tokens), observed_cache_read_tokens = sum(cache_read_tokens), observed_cache_write_tokens = sum(cache_write_tokens), observed_reasoning_tokens = sum(reasoning_tokens), reported_input_tokens_calls = sum(tolong(d.input_tokens_calls)), reported_output_tokens_calls = sum(tolong(d.output_tokens_calls)), reported_cache_read_tokens_calls = sum(tolong(d.cache_read_tokens_calls)), reported_cache_write_tokens_calls = sum(tolong(d.cache_write_tokens_calls)), reported_reasoning_tokens_calls = sum(tolong(d.reasoning_tokens_calls)) by protocol, release, model\n| extend observed_input_tokens = iff(input_samples > 0, observed_input_tokens, long(null)), observed_output_tokens = iff(output_samples > 0, observed_output_tokens, long(null)), observed_cache_read_tokens = iff(cache_read_samples > 0, observed_cache_read_tokens, long(null)), observed_cache_write_tokens = iff(cache_write_samples > 0, observed_cache_write_tokens, long(null)), observed_reasoning_tokens = iff(reasoning_samples > 0, observed_reasoning_tokens, long(null))\n| order by protocol asc, release asc, model asc",
+              "noDataMessage": "No matching model usage facts. Missing model facts are not zero usage."
+            }
+          },
+          {
+            "type": 3,
+            "name": "reliability-errors",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Affected runs per bounded error category",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nFacts\n| where name in (\"issuelens.run.error\", \"issuelens.run.completed\", \"issuelens.request.rejected\")\n| extend stage = tostring(d.stage), error_type = tostring(d.error_type)\n| where isnotempty(error_type)\n| distinct run_id, protocol, release, stage, error_type\n| summarize affected_runs = count() by protocol, release, stage, error_type\n| order by affected_runs desc",
+              "noDataMessage": "No matching bounded error facts; consult coverage before interpreting this as healthy."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": 12,
+      "name": "telemetry-quality-view",
+      "content": {
+        "version": "NotebookGroup/1.0",
+        "groupType": "editable",
+        "title": "Telemetry quality",
+        "items": [
+          {
+            "type": 1,
+            "name": "quality-definitions",
+            "content": {
+              "json": "## Telemetry quality\nClear target filters, broaden the time range and allow for ingestion before diagnosing missing starts/completions. Active runs and window boundaries are not automatically failures or loss. Admission rejections do not require starts. Null completeness/ownership/model-dispatch flags remain unknown, not false. Missing and explicitly unknown transport status are separate. Compare the token-field coverage in Overview as well as usage_status. attribution_complete=true does not prove every event was retained.\n\nThe bounded-state table contains only reported incomplete_* counters; absence is not proof of no drops. A lost final fact cannot report its own export failure. Ingestion lag is measured on the latest logical lifecycle fact, excludes negative samples from percentiles and shows coverage. Neither unsampled facts nor these checks make Application Insights an audit ledger."
+            }
+          },
+          {
+            "type": 3,
+            "name": "telemetry-quality",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Lifecycle, usage, attribution and ingestion coverage",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nLifecycle\n| extend usage_status = tostring(d.usage_status), attribution_complete = tobool(d.attribution_complete), telemetry_incomplete = tobool(d.telemetry_incomplete), transport_status = tostring(d.transport_status), model_request_sent = tobool(d.model_request_sent), raw_lag_s = (ingested_at - timestamp) / 1s\n| extend lag_s = iff(raw_lag_s >= 0, raw_lag_s, real(null))\n| summarize observed_run_ids = count(), starts_without_terminal_in_window = countif(lifecycle_state == \"start_without_terminal_in_window\"), terminals_without_start_in_window = countif(lifecycle_state == \"terminal_without_start_in_window\"), paired_runs = countif(lifecycle_state == \"paired\"), admission_rejections = countif(lifecycle_state == \"admission_rejection\"), unexpected_rejections_with_start = countif(lifecycle_state == \"rejection_with_start\"), terminal_records = countif(terminal_seen), usage_complete = countif(terminal_seen and usage_status == \"complete\"), usage_partial = countif(terminal_seen and usage_status == \"partial\"), usage_unavailable = countif(terminal_seen and usage_status == \"unavailable\"), usage_not_applicable = countif(terminal_seen and usage_status == \"not_applicable\"), missing_usage_status = countif(terminal_seen and isempty(usage_status)), incomplete_attribution = countif(terminal_seen and attribution_complete == false), missing_attribution_state = countif(terminal_seen and isnull(attribution_complete)), incomplete_telemetry = countif(terminal_seen and telemetry_incomplete == true), missing_completeness_state = countif(terminal_seen and isnull(telemetry_incomplete)), unknown_transport_status = countif(terminal_seen and transport_status == \"unknown\"), missing_transport_status = countif(terminal_seen and isempty(transport_status)), model_requests_sent = countif(terminal_seen and model_request_sent == true), model_not_sent = countif(terminal_seen and model_request_sent == false), missing_model_request_state = countif(terminal_seen and isnull(model_request_sent)), ingestion_lag_samples = countif(isnotnull(lag_s)), negative_ingestion_lag_samples = countif(raw_lag_s < 0), ingestion_lag_p50_s = percentile(lag_s, 50), ingestion_lag_p95_s = percentile(lag_s, 95), ingestion_lag_p99_s = percentile(lag_s, 99) by protocol, release\n| order by protocol asc, release asc",
+              "noDataMessage": "No matching lifecycle evidence. Check enablement, resource, filters and ingestion; do not assume zero runs."
+            }
+          },
+          {
+            "type": 3,
+            "name": "telemetry-incomplete-reasons",
+            "content": {
+              "version": "KqlItem/1.0",
+              "title": "Reported bounded-state limits and other incomplete accounting",
+              "queryType": 0,
+              "resourceType": "microsoft.insights/components",
+              "crossComponentResources": ["{Applications}"],
+              "timeContextFromParameter": "TimeRange",
+              "visualization": "table",
+              "size": 0,
+              "query": "let Protocol = base64_decode_tostring('{Protocol:base64}');\nlet Release = base64_decode_tostring('{Release:base64}');\nlet RunId = base64_decode_tostring('{RunId:base64}');\nlet TargetRepository = base64_decode_tostring('{TargetRepository:base64}');\nlet TargetKind = base64_decode_tostring('{TargetKind:base64}');\nlet TargetNumber = base64_decode_tostring('{TargetNumber:base64}');\nlet TargetRelationship = base64_decode_tostring('{TargetRelationship:base64}');\nlet FilterByTarget = isnotempty(TargetRepository) or isnotempty(TargetKind) or isnotempty(TargetNumber) or isnotempty(TargetRelationship);\nlet ValidTargetNumber = isempty(TargetNumber) or (isnotempty(TargetRepository) and TargetKind in (\"issue\", \"pull_request\", \"work_item\") and TargetNumber matches regex @\"^[1-9][0-9]*$\") or (isnotempty(TargetRepository) and TargetKind in (\"repository\", \"wiki\") and TargetNumber == \"0\");\nlet RawFacts = materialize(\n    customEvents\n    | where timestamp {TimeRange}\n    | where name in (\"issuelens.run.started\", \"issuelens.run.completed\", \"issuelens.run.agent\", \"issuelens.run.model\", \"issuelens.run.target\", \"issuelens.run.error\", \"issuelens.request.rejected\")\n    | extend d = customDimensions\n    | where tostring(d.schema_version) == \"1\"\n    | extend run_id = tostring(d.run_id), protocol = tostring(d.protocol), release = tostring(d.release), ingested_at = ingestion_time()\n    | where isnotempty(run_id)\n    | where isempty(Protocol) or protocol == Protocol\n    | where isempty(Release) or release == Release\n    | where isempty(RunId) or run_id == RunId\n    | project timestamp, ingested_at, name, run_id, protocol, release, d\n);\nlet TargetFacts = materialize(\n    RawFacts\n    | where name == \"issuelens.run.target\"\n    | extend repository = tolower(tostring(d.repository)), target_kind = tostring(d.target_kind), number = tolong(d.number), relationship = tostring(d.relationship)\n    | where isnotempty(repository) and isnotempty(target_kind) and isnotnull(number) and isnotempty(relationship)\n    | summarize arg_max(timestamp, *) by run_id, repository, target_kind, number, relationship\n);\nlet MatchingRuns = TargetFacts\n    | where isempty(TargetRepository) or repository == tolower(TargetRepository)\n    | where isempty(TargetKind) or target_kind == TargetKind\n    | where isempty(TargetNumber) or tostring(number) == TargetNumber\n    | where isempty(TargetRelationship) or relationship == TargetRelationship\n    | distinct run_id;\nlet Facts = materialize(RawFacts | where ValidTargetNumber | where not(FilterByTarget) or run_id in (MatchingRuns));\nlet Starts = materialize(Facts | where name == \"issuelens.run.started\" | summarize arg_max(timestamp, *) by run_id);\nlet Runs = materialize(Facts | where name in (\"issuelens.run.completed\", \"issuelens.request.rejected\") | summarize arg_max(timestamp, *) by run_id);\nlet Agents = materialize(Facts | where name == \"issuelens.run.agent\" | extend agent_run_id = tostring(d.agent_run_id) | where isnotempty(agent_run_id) | summarize arg_max(timestamp, *) by run_id, agent_run_id);\nlet Models = materialize(Facts | where name == \"issuelens.run.model\" | extend model = tostring(d.model) | where isnotempty(model) | summarize arg_max(timestamp, *) by run_id, model);\nlet Targets = materialize(TargetFacts | where run_id in (Facts | distinct run_id));\nlet Lifecycle = materialize(\n    union (Runs | extend terminal_seen = true), (Starts | join kind=leftanti (Runs | project run_id) on run_id | extend terminal_seen = false)\n    | extend start_seen = run_id in (Starts | project run_id)\n    | extend lifecycle_state = case(name == \"issuelens.request.rejected\" and start_seen, \"rejection_with_start\", name == \"issuelens.request.rejected\", \"admission_rejection\", terminal_seen and start_seen, \"paired\", terminal_seen, \"terminal_without_start_in_window\", \"start_without_terminal_in_window\")\n);\nRuns\n| mv-expand reason = bag_keys(d) to typeof(string)\n| where reason startswith \"incomplete_\"\n| extend observed_count = tolong(d[reason])\n| where isnotnull(observed_count) and observed_count > 0\n| summarize affected_runs = count(), reported_occurrences = sum(observed_count) by protocol, release, reason\n| extend category = iff(reason endswith \"_limit\", \"bounded_state_limit\", \"other_incompleteness\")\n| order by category asc, reported_occurrences desc",
+              "noDataMessage": "No incomplete counters were reported in matching terminal facts; missing facts can still hide loss."
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "fallbackResourceIds": [],
+  "$schema": "https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/schema/workbook.json"
+}
