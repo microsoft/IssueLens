@@ -184,6 +184,27 @@ def team_memory_metadata(repository, project, event):
     }
 
 
+def read_merged_pr(repository, project, number):
+    pull = github_read(f"/repos/{repository}/pulls/{number}")
+    require(type(pull.get("number")) is int and pull["number"] == number
+            and pull.get("merged") is True and pull.get("state") == "closed",
+            "Selected pull request is not merged")
+    base = pull.get("base")
+    require(isinstance(base, dict) and isinstance(base.get("repo"), dict)
+            and type(base["repo"].get("id")) is int and base["repo"]["id"] == project["id"]
+            and isinstance(base["repo"].get("full_name"), str)
+            and base["repo"]["full_name"].lower() == repository.lower()
+            and base.get("ref") == project["default_branch"],
+            "Pull request was not merged into this default branch")
+    merge_sha = full_sha(pull.get("merge_commit_sha"))
+    require(isinstance(pull.get("merged_at"), str) and 0 < len(pull["merged_at"]) <= 64,
+            "Merged PR has no bounded merge timestamp")
+    return {
+        "pull_number": number, "merge_commit_sha": merge_sha, "merged_at": pull["merged_at"],
+        "source_identity": f"{repository}#{number}:{merge_sha}",
+    }
+
+
 def prepare_push_memory(repository, project, event):
     require(all(event.get(flag) is False for flag in ("created", "deleted", "forced")),
             "Created, deleted, or forced refs require manual PR reconciliation")
@@ -220,6 +241,7 @@ def prepare_push_memory(repository, project, event):
             "Comparison page does not match the push inventory")
     owner, name = repository.split("/", 1)
     pulls = {}
+    rest_merges = {}
     for offset in range(0, len(shas), ASSOCIATION_BATCH_SIZE):
         require(time.monotonic() < deadline, "Push discovery exceeded its time budget")
         batch = shas[offset:offset + ASSOCIATION_BATCH_SIZE]
@@ -275,8 +297,23 @@ def prepare_push_memory(repository, project, event):
                         and isinstance(pull.get("baseRefName"), str), "Invalid associated PR state")
                 if not pull["merged"] or pull["baseRefName"] != project["default_branch"]:
                     continue
-                require(isinstance(pull.get("mergeCommit"), dict), "Merged PR has no merge identity")
-                merge_sha = full_sha(pull["mergeCommit"].get("oid"))
+                require("mergeCommit" in pull, "Merged PR metadata is missing mergeCommit")
+                merge = pull["mergeCommit"]
+                if merge is None:
+                    # REST also identifies the last rebased commit when no merge commit exists.
+                    if number not in rest_merges:
+                        require(len(rest_merges) < MAX_BATCH_PRS,
+                                "Push exceeds the PR metadata lookup limit; use manual PR dispatch")
+                        require(time.monotonic() < deadline, "Push discovery exceeded its time budget")
+                        rest_merges[number] = read_merged_pr(repository, project, number)
+                        require(time.monotonic() < deadline, "Push discovery exceeded its time budget")
+                    resolved_merge = rest_merges[number]
+                    require(resolved_merge["merged_at"] == pull.get("mergedAt"),
+                            "PR merge identity changed during discovery")
+                    merge_sha = resolved_merge["merge_commit_sha"]
+                else:
+                    require(isinstance(merge, dict), "Invalid merged PR commit metadata")
+                    merge_sha = full_sha(merge.get("oid"))
                 if merge_sha not in sha_set:
                     continue
                 require(isinstance(pull.get("mergedAt"), str) and 0 < len(pull["mergedAt"]) <= 64,
@@ -312,26 +349,12 @@ def prepare_team_memory(repository, event):
     else:
         number = positive(os.environ["DISPATCH_PR"])
     project = validate_workflow(repository, event)
-    default_branch = project["default_branch"]
-    pull = github_read(f"/repos/{repository}/pulls/{number}")
-    require(pull["number"] == number and pull.get("merged") is True and pull.get("state") == "closed",
-            "Selected pull request is not merged")
-    require(pull["base"]["repo"]["id"] == project["id"]
-            and pull["base"]["repo"]["full_name"].lower() == repository.lower()
-            and pull["base"]["ref"] == default_branch,
-            "Pull request was not merged into this default branch")
-    merge_sha = pull["merge_commit_sha"]
-    require(isinstance(merge_sha, str) and re.fullmatch(r"[0-9a-f]{40}", merge_sha), "Invalid merge commit SHA")
-    require(isinstance(pull.get("merged_at"), str) and pull["merged_at"], "Missing merge timestamp")
+    merged = read_merged_pr(repository, project, number)
     if event_name == "pull_request_target":
         require(event["pull_request"]["number"] == number
-                and event["pull_request"]["merge_commit_sha"] == merge_sha,
+                and event["pull_request"]["merge_commit_sha"] == merged["merge_commit_sha"],
                 "Authoritative merge does not match the event")
-    metadata = {
-        **team_memory_metadata(repository, project, event), "pull_number": number,
-        "merge_commit_sha": merge_sha, "merged_at": pull["merged_at"],
-        "source_identity": f"{repository}#{number}:{merge_sha}",
-    }
+    metadata = {**team_memory_metadata(repository, project, event), **merged}
     return {"metadata": metadata, "request": build_team_memory_request(metadata)}
 
 

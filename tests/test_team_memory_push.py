@@ -131,14 +131,25 @@ class PushBatchTests(unittest.TestCase):
                     **self.comparison, "total_commits": len(commits), "ahead_by": len(commits),
                     "commits": [{"sha": commits[1]}] if len(commits) > 1 else [],
                 }
-                node = self.pull_node(28, self.after)
-                self.execute("preflight", self.responses(
+                node = self.pull_node(27, self.after, mergedAt=self.pull["merged_at"])
+                if len(commits) > 1:
+                    node["mergeCommit"] = None
+                responses = self.responses(
                     self.association_response(shas=commits, pulls=[node]), comparison,
-                ))
+                )
+                if node["mergeCommit"] is None:
+                    responses.append(Response(json.dumps({**self.pull, "merge_commit_sha": self.after}).encode()))
+                self.execute("preflight", responses)
                 self.assertEqual(
                     self.prepared_envelope()["metadata"]["pull_requests"][0]["merge_commit_sha"], self.after,
                 )
                 self.assertEqual(len(self.prepared_envelope()["metadata"]["pull_requests"]), 1)
+                self.assertEqual(self.opener.open.call_count, 4 if node["mergeCommit"] is None else 3)
+                self.assertNotIn("UNTRUSTED", self.prepared_envelope()["request"]["input"])
+                if node["mergeCommit"] is None:
+                    self.assertEqual(self.opener.open.call_args.args[0].full_url,
+                                     "https://api.github.com/repos/example/project/pulls/27")
+                self.token.assert_not_called()
 
     def test_multiple_lookup_groups_do_not_duplicate_the_pr(self):
         commits = [f"{index:040x}" for index in range(1, 22)]
@@ -148,18 +159,88 @@ class PushBatchTests(unittest.TestCase):
                           commits=[{"id": sha} for sha in commits])
         comparison = {**self.comparison, "ahead_by": 21, "total_commits": 21,
                       "commits": [{"sha": commits[1]}]}
-        pulls = [self.pull_node(27, self.after)]
+        pulls = [self.pull_node(27, self.after, mergeCommit=None, mergedAt=self.pull["merged_at"])]
         responses = [
             self.project, comparison,
             self.association_response(commits[:20], pulls),
+            {**self.pull, "merge_commit_sha": self.after},
             self.association_response(commits[20:], pulls),
         ]
         self.execute("preflight", [Response(json.dumps(value).encode()) for value in responses])
-        self.assertEqual(self.opener.open.call_count, 4)
+        self.assertEqual(self.opener.open.call_count, 5)
+        urls = [call.args[0].full_url for call in self.opener.open.call_args_list]
+        self.assertEqual(urls.count("https://api.github.com/repos/example/project/pulls/27"), 1)
         metadata = self.prepared_envelope()["metadata"]
         self.assertEqual(metadata["commit_count"], 21)
         self.assertEqual(len(metadata["pull_requests"]), 1)
         self.assertEqual(metadata["pull_requests"][0]["merge_commit_sha"], self.after)
+
+    def test_rebase_and_merge_commit_prs_share_one_batch(self):
+        self.pulls[0].update(mergeCommit=None, mergedAt=self.pull["merged_at"])
+        self.execute("preflight", self.responses() + [Response(json.dumps(self.pull).encode())])
+        pulls = self.prepared_envelope()["metadata"]["pull_requests"]
+        self.assertEqual([(item["pull_number"], item["merge_commit_sha"]) for item in pulls],
+                         [(27, self.merge_sha), (28, self.after)])
+        self.assertEqual(self.opener.open.call_count, 4)
+
+    def test_rebase_outside_push_is_not_authorized_by_an_associated_commit(self):
+        node = self.pull_node(27, self.merge_sha, mergeCommit=None, mergedAt=self.pull["merged_at"])
+        responses = self.responses(self.association_response(pulls=[node]))
+        responses.append(Response(json.dumps({**self.pull, "merge_commit_sha": "f" * 40}).encode()))
+        self.execute("preflight", responses)
+        self.assertEqual(self.action_outputs()["skip-reason"], "no_merged_pull_requests")
+        self.assertEqual(self.opener.open.call_count, 4)
+        self.token.assert_not_called()
+
+    def test_rebase_rest_metadata_is_revalidated_before_submission(self):
+        node = self.pull_node(27, self.merge_sha, mergeCommit=None, mergedAt=self.pull["merged_at"])
+        cases = [
+            {"number": 28}, {"merged": False}, {"state": "open"},
+            {"base": None}, {"base": {"ref": "other", "repo": self.project}},
+            {"base": {"ref": "main", "repo": {**self.project, "id": 101}}},
+            {"base": {"ref": "main", "repo": {**self.project, "full_name": "other/project"}}},
+            {"merge_commit_sha": None}, {"merge_commit_sha": "short"}, {"merge_commit_sha": "0" * 40},
+            {"merged_at": None}, {"merged_at": "2026-09-11T00:00:00Z"},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                responses = self.responses(self.association_response(pulls=[node]))
+                responses.append(Response(json.dumps({**self.pull, **changes}).encode()))
+                with self.assertRaises(SystemExit):
+                    self.execute("preflight", responses)
+                self.assertFalse((self.directory / "output.txt").exists())
+                self.assertFalse(list(self.directory.glob("issuelens-request-*")))
+                self.token.assert_not_called()
+
+    def test_rebase_rest_failure_does_not_fall_back_to_other_prs(self):
+        self.pulls[0].update(mergeCommit=None, mergedAt=self.pull["merged_at"])
+        with self.assertRaises(SystemExit) as raised:
+            self.execute("preflight", self.responses() + [OSError("PRIVATE REST DETAIL")])
+        self.assertEqual(self.opener.open.call_count, 4)
+        self.assertNotIn("PRIVATE REST DETAIL", str(raised.exception))
+        self.assertFalse((self.directory / "output.txt").exists())
+        self.token.assert_not_called()
+
+    def test_rebase_lookup_limit_counts_prs_outside_the_push(self):
+        for node in self.pulls:
+            node.update(mergeCommit=None, mergedAt=self.pull["merged_at"])
+        responses = self.responses() + [Response(json.dumps({**self.pull, "merge_commit_sha": "f" * 40}).encode())]
+        with patch.object(action, "MAX_BATCH_PRS", 1), self.assertRaisesRegex(SystemExit, "metadata lookup limit"):
+            self.execute("preflight", responses)
+        self.assertEqual(self.opener.open.call_count, 4)
+        self.assertFalse((self.directory / "output.txt").exists())
+        self.token.assert_not_called()
+
+    def test_rebase_lookup_respects_the_discovery_deadline(self):
+        node = self.pull_node(27, self.merge_sha, mergeCommit=None, mergedAt=self.pull["merged_at"])
+        responses = self.responses(self.association_response(pulls=[node]))
+        responses.append(Response(json.dumps(self.pull).encode()))
+        with patch.object(action.time, "monotonic", side_effect=[0, 1, 2, 3, 181]), \
+                self.assertRaisesRegex(SystemExit, "time budget"):
+            self.execute("preflight", responses)
+        self.assertEqual(self.opener.open.call_count, 4)
+        self.assertFalse((self.directory / "output.txt").exists())
+        self.token.assert_not_called()
 
     def test_one_commit_can_be_associated_with_multiple_merged_prs(self):
         self.event["commits"] = [{"id": self.after}]
@@ -209,7 +290,8 @@ class PushBatchTests(unittest.TestCase):
             self.token.assert_not_called()
 
     def test_incomplete_graphql_data_and_wrong_identities_fail_closed(self):
-        for mutation in ("errors", "repository", "branch", "commit", "page", "count", "missing", "foreign", "changed"):
+        for mutation in ("errors", "repository", "branch", "commit", "page", "count", "missing",
+                         "foreign", "merge_missing", "merge_shape", "changed"):
             response = self.association_response()
             repository = response["data"]["repository"]
             connection = repository["c0"]["associatedPullRequests"]
@@ -229,11 +311,16 @@ class PushBatchTests(unittest.TestCase):
                 repository["c1"] = None
             elif mutation == "foreign":
                 connection["nodes"][0]["baseRepository"]["databaseId"] = 101
+            elif mutation == "merge_missing":
+                del connection["nodes"][0]["mergeCommit"]
+            elif mutation == "merge_shape":
+                connection["nodes"][0]["mergeCommit"] = []
             else:
                 repository["c1"]["associatedPullRequests"]["nodes"][0]["mergeCommit"]["oid"] = self.after
             with self.subTest(mutation=mutation), self.assertRaises(SystemExit) as raised:
                 self.execute("preflight", self.responses(response))
             self.assertNotIn("PRIVATE DETAIL", str(raised.exception))
+            self.assertEqual(self.opener.open.call_count, 3)
             self.assertFalse((self.directory / "output.txt").exists())
             self.token.assert_not_called()
 

@@ -116,11 +116,22 @@ is supplied as additional context to avoid reinstating superseded changes;
 it does not authorize updates for other PRs. The agent retrieves its own
 bounded evidence.
 
+If GraphQL returns an explicit `null` merge commit, preflight re-reads the PR
+through the version-pinned REST API. Its `merge_commit_sha` supplies the final
+rebased commit for rebase merges. The same validation used by manual dispatch
+rechecks PR identity, merge state, source repository, default base branch, and
+full SHA; the merge timestamp must also match GraphQL. The resolved SHA must
+still belong to this push. These lookups are cached once per PR across all
+commit groups, bounded, and subject to the discovery deadline. Missing or
+malformed metadata and failed lookups stop discovery rather than guessing a
+commit or submitting a partial source set.
+
 | Discovery boundary | Limit / behavior |
 | --- | --- |
 | Pushed commit inventory | At most 1,000 unique commits; must match the full comparison count |
 | PR batch | At most 100 verified PRs |
 | Associations per commit | At most 100; a remaining page fails discovery rather than dropping PRs |
+| REST merge-identity lookups | At most 100 distinct PRs, including candidates ultimately outside the push |
 | GitHub response | 4 MiB per request; redirects denied |
 | Discovery time | 180-second cooperative budget, checked around requests; an in-flight request retains its 30-second timeout |
 | Agent input | At most 64 KiB UTF-8 |
