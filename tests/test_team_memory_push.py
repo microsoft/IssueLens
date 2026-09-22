@@ -300,20 +300,53 @@ class PushBatchTests(unittest.TestCase):
         self.assertEqual(self.action_outputs()["status"], "no-change")
 
     def test_structured_failure_retains_known_batch_outcomes(self):
-        self.result.update(status="failed", wiki_repository=None, wiki_sha=None)
+        self.environment["OUTPUT_MODE"] = "activity"
+        self.result.update(status="failed", wiki_repository=None, wiki_sha=None,
+                           reason="Source evidence unavailable; no PR could be completed.")
         for item in self.result["results"]:
-            item["status"] = "failed"
+            item.update(status="failed", reason="Source evidence unavailable.")
         self.write_envelope()
         with self.assertRaisesRegex(SystemExit, "incomplete"):
             self.execute("submit", [self.stream()])
-        self.assertEqual(self.action_outputs()["status"], "failed")
-        self.assertNotIn("wiki-sha", self.action_outputs())
-        self.assertIn(self.after, (self.directory / "summary.md").read_text())
+        outputs = self.action_outputs()
+        self.assertEqual(outputs["status"], "failed")
+        self.assertNotIn("wiki-sha", outputs)
+        self.assertEqual(json.loads(pathlib.Path(outputs["response-path"]).read_text()), self.result)
+        log = self.output.getvalue()
+        self.assertIn("Maintenance batch incomplete.", log)
+        self.assertNotIn("outcome is unknown", log)
+        summary = (self.directory / "summary.md").read_text()
+        self.assertIn(self.after, summary)
+        self.assertIn("## IssueLens: Team memory batch incomplete", summary)
+        self.assertIn("passed the caller's structured identity and status checks", summary)
+        self.assertNotIn("outcome unknown", summary)
+
+    def test_invalid_failed_batch_keeps_unknown_outcome_diagnostics(self):
+        self.environment["OUTPUT_MODE"] = "activity"
+        self.result.update(status="failed", push_after=self.before)
+        for item in self.result["results"]:
+            item["status"] = "failed"
+        self.write_envelope()
+        with self.assertRaises(SystemExit):
+            self.execute("submit", [self.stream()])
+        log = self.output.getvalue()
+        self.assertIn("Invocation failed or its outcome is unknown.", log)
+        self.assertNotIn("Maintenance batch incomplete.", log)
+        summary = (self.directory / "summary.md").read_text()
+        self.assertIn("Invocation failed or outcome unknown", summary)
+        self.assertNotIn("passed the caller's structured identity and status checks", summary)
+        self.assertFalse((self.directory / "output.txt").exists())
+        self.assertFalse(list(self.directory.glob("issuelens-response-*")))
 
     def test_unconfirmed_stream_cannot_create_a_batch_receipt(self):
+        self.environment["OUTPUT_MODE"] = "activity"
         self.write_envelope()
         with self.assertRaises(SystemExit):
             self.execute("submit", [self.stream(done=False)])
+        log = self.output.getvalue()
+        self.assertIn("Invocation failed or its outcome is unknown.", log)
+        self.assertNotIn("Maintenance batch incomplete.", log)
+        self.assertIn("Invocation failed or outcome unknown", (self.directory / "summary.md").read_text())
         self.assertFalse((self.directory / "output.txt").exists())
         self.assertFalse(list(self.directory.glob("issuelens-response-*")))
 

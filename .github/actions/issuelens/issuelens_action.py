@@ -598,7 +598,7 @@ def submit():
         renderer.finish("failed")
         write_summary(renderer.summary("failed", summary_mode))
         raise
-    renderer.finish(status)
+    renderer.finish(status, validated_batch=request_type == "team-memory" and metadata.get("event_name") == "push")
     write_summary(renderer.summary(status, summary_mode, text=text, wiki=result))
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
         output.write(outputs)

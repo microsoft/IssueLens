@@ -270,17 +270,17 @@ class StreamRenderer:
             self._line("warning", "Retrying model request.")
         self.tick()
 
-    def finish(self, status):
+    def finish(self, status, *, validated_batch=False):
         if self.finished:
             return
         if status not in {"completed", "updated", "no-change", "partial", "needs-review", "failed"}:
             raise ValueError("Invalid display status")
         for state in self.messages.values():
             self._flush(state, force=True)
-        if status == "failed":
-            self._line("error", "Invocation failed or its outcome is unknown. Displayed text may be incomplete; inspect the target before retrying.")
-        elif status in {"partial", "needs-review"}:
+        if status in {"partial", "needs-review"} or (status == "failed" and validated_batch):
             self._line("warning", "Maintenance batch incomplete. Inspect per-PR results and confirmed wiki state before retrying.")
+        elif status == "failed":
+            self._line("error", "Invocation failed or its outcome is unknown. Displayed text may be incomplete; inspect the target before retrying.")
         else:
             self._line("IssueLens", f"Invocation {status}. Stream completion alone does not confirm requested writes.")
         if self.display_truncated and not self.limited:
@@ -292,16 +292,17 @@ class StreamRenderer:
             raise ValueError("summary-mode must be full, status, or none")
         if mode == "none":
             return ""
+        batch = wiki is not None and isinstance(wiki.get("results"), list)
         headings = {"completed": "Invocation completed", "updated": "Team memory updated",
                     "no-change": "Team memory unchanged", "partial": "Team memory batch incomplete",
                     "needs-review": "Team memory needs review", "failed": "Invocation failed or outcome unknown"}
+        heading = headings["partial"] if batch and status == "failed" else headings[status]
         report = (
-            f"## IssueLens: {headings[status]}\n\n"
+            f"## IssueLens: {heading}\n\n"
             f"| Elapsed | Tool calls observed | Failed tools observed | Model retries |\n"
             f"| --- | ---: | ---: | ---: |\n"
             f"| {self.elapsed:.1f}s | {self.tool_count} | {self.failed_tools} | {self.retries} |\n\n"
         )
-        batch = wiki is not None and isinstance(wiki.get("results"), list)
         if status == "failed" and not batch:
             report += "The response did not pass completion/result validation. Partial live text is not a confirmed result. Inspect the target before retrying; a write may already have occurred.\n"
         elif status == "completed":

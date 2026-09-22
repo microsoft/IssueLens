@@ -156,6 +156,9 @@ are rejected even when the overall status claims success.
 An incomplete batch **fails the action**, but first records its validated status,
 runner-local `response-path`, and any reported confirmed wiki identity. The
 summary lists every PR's outcome; full summaries show bounded agent reasons.
+Even when every PR reports `failed`, a validated batch uses the incomplete-batch
+diagnostic, not the unknown-outcome diagnostic reserved for submission or
+completion/result-validation errors.
 This is not a rollback or a claim that nothing was published. The complete JSON
 receipt remains in the response file, subject to the same privacy precautions
 as other agent responses. No automatic retry or artifact upload is performed.
