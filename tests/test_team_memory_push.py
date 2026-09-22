@@ -379,7 +379,24 @@ class PushBatchTests(unittest.TestCase):
         outputs = self.action_outputs()
         self.assertEqual(outputs["status"], "needs-review")
         self.assertNotIn("wiki-sha", outputs)
-        self.assertTrue(pathlib.Path(outputs["response-path"]).is_file())
+        self.assertEqual(json.loads(pathlib.Path(outputs["response-path"]).read_text()), self.result)
+
+    def test_incomplete_batches_require_both_wiki_identity_keys(self):
+        self.write_envelope()
+        for status in ("needs-review", "failed"):
+            for missing in (("wiki_repository",), ("wiki_sha",), ("wiki_repository", "wiki_sha")):
+                with self.subTest(status=status, missing=missing):
+                    result = copy.deepcopy(self.result)
+                    result.update(status=status, wiki_repository=None, wiki_sha=None,
+                                  reason="No PR could be completed.")
+                    for item in result["results"]:
+                        item.update(status=status, reason="Insufficient evidence.")
+                    for field in missing:
+                        del result[field]
+                    with self.assertRaisesRegex(SystemExit, "requires both wiki identity fields"):
+                        self.execute("submit", [self.stream(result=result)])
+                    self.assertFalse((self.directory / "output.txt").exists())
+                    self.assertFalse(list(self.directory.glob("issuelens-response-*")))
 
     def test_batch_result_cannot_omit_duplicate_or_substitute_prs(self):
         original = copy.deepcopy(self.result)

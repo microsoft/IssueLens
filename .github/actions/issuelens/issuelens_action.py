@@ -145,7 +145,8 @@ def build_team_memory_batch_request(metadata):
         "completed without a write; partial if some completed and some did not; otherwise "
         "needs-review or failed. Never omit a failed PR or claim whole-batch success for a subset. "
         "wiki_repository and wiki_sha must identify the tool-confirmed publication or verified "
-        "snapshot for completed PRs; use null for both if unavailable. An uncertain write is not "
+        "snapshot for completed PRs. Both wiki identity fields are required; use null for both "
+        "if unavailable. An uncertain write is not "
         "a confirmed update. Re-read current state before considering a retry; matching content "
         "does not prove who published it. Keep unconfirmed publication outcomes incomplete. "
         "The overall reason is at most 4096 characters. "
@@ -530,7 +531,9 @@ def validate_team_memory_batch_result(result, metadata):
     require(result.get("status") in allowed, "Batch status does not match its per-PR outcomes")
     require(isinstance(result.get("reason"), str) and result["reason"].strip() and len(result["reason"]) <= 4096,
             "Maintenance result requires a bounded reason")
-    wiki_repository, wiki_sha = result.get("wiki_repository"), result.get("wiki_sha")
+    require("wiki_repository" in result and "wiki_sha" in result,
+            "Maintenance result requires both wiki identity fields; use explicit null when unavailable")
+    wiki_repository, wiki_sha = result["wiki_repository"], result["wiki_sha"]
     if completed or wiki_repository is not None or wiki_sha is not None:
         require(isinstance(wiki_repository, str) and len(wiki_repository) <= 140
                 and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", wiki_repository),

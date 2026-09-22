@@ -139,9 +139,11 @@ subsequently removed by the batch must not become current wiki knowledge.
 Unassociated direct-push commits receive no additional write authorization.
 
 The requested push result has `source_repository`, `push_before`, `push_after`,
-`status`, `wiki_repository`, `wiki_sha`, `reason`, and `results`. Each result
-contains `pull_number`, `merge_commit_sha`, `status`, and a reason of at most 512
-characters. Every submitted PR must appear exactly once with its matching SHA:
+`status`, `wiki_repository`, `wiki_sha`, `reason`, and `results`. Both wiki identity
+keys are required. If no PR completed and the identity is unavailable, set both
+values to explicit `null`; do not omit either key. Each result contains
+`pull_number`, `merge_commit_sha`, `status`, and a reason of at most 512 characters.
+Every submitted PR must appear exactly once with its matching SHA:
 
 - `updated`: that PR's complete intended edit was included in tool-confirmed publication.
 - `no-change`: its source and the wiki were verified and no edit is needed.
