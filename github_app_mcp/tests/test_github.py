@@ -143,6 +143,56 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(self.provider.calls[-1], ("microsoft/IssueLens", {"contents": "read"}))
 
+    async def test_pull_request_preserves_merge_sha_across_api_versions(self):
+        for provider_type in (RecordingProvider, FailingProvider):
+            for merged, merge_sha in ((True, "a" * 40), (False, None), (False, "b" * 40)):
+                with self.subTest(provider=provider_type.__name__, merged=merged, merge_sha=merge_sha):
+                    payload = {
+                        "number": 34,
+                        "state": "closed" if merged else "open",
+                        "merged": merged,
+                        "merged_at": "2026-09-23T03:07:46Z" if merged else None,
+                        "merge_commit_sha": merge_sha,
+                        "base": {"ref": "main", "sha": "c" * 40},
+                        "head": {"sha": "d" * 40},
+                    }
+
+                    def handler(request):
+                        self.requests.append(request)
+                        result = dict(payload)
+                        if request.headers["X-GitHub-Api-Version"] != "2022-11-28":
+                            result.pop("merge_commit_sha")
+                        return httpx.Response(200, json=result)
+
+                    provider = provider_type()
+                    client = GitHubClient(provider, transport=httpx.MockTransport(handler))
+                    result = await client.get_pull_request("microsoft/IssueLens", 34)
+
+                    self.assertEqual(result, payload)
+                    request = self.requests[-1]
+                    self.assertEqual(request.url.path, "/repos/microsoft/IssueLens/pulls/34")
+                    self.assertEqual(request.headers["X-GitHub-Api-Version"], "2022-11-28")
+                    self.assertEqual(
+                        "Authorization" in request.headers, provider_type is RecordingProvider,
+                    )
+                    self.assertEqual(provider.calls, [
+                        ("microsoft/IssueLens", {"pull_requests": "read"}),
+                    ])
+
+    async def test_pull_request_api_version_override_does_not_leak_to_other_operations(self):
+        client = self.client(writes_enabled=True)
+        await client.get_pull_request("microsoft/IssueLens", 34)
+        await client.get_repository("microsoft/IssueLens")
+        await client.get_commit("microsoft/IssueLens", "a" * 40, detail="none")
+        await client.list_pull_request_files("microsoft/IssueLens", 34)
+        await client.list_merged_pull_requests("microsoft/IssueLens", base="main")
+        await client.add_issue_comment("microsoft/IssueLens", 34, "Investigated")
+
+        self.assertEqual(
+            [request.headers["X-GitHub-Api-Version"] for request in self.requests],
+            ["2022-11-28"] + ["2026-03-10"] * 5,
+        )
+
     def commit_client(self, patch="+new\n", *, file_count=1):
         payload = {
             "sha": "a" * 40,
