@@ -26,6 +26,8 @@ from .wiki import WikiError, WikiRepository
 
 _API_ROOT = "https://api.github.com"
 _API_VERSION = "2026-03-10"
+# PR source verification needs merge_commit_sha, removed in the 2026 API.
+_PULL_REQUEST_API_VERSION = "2022-11-28"
 _MAX_RESULT_BYTES = 100_000
 _MAX_WIKI_RESULT_BYTES = 6 * 64 * 1024 + 4096
 _MAX_HTTP_RESPONSE_BYTES = 128 * 1024
@@ -341,6 +343,7 @@ class GitHubClient:
         return await self._request(
             "GET", repository, f"/pulls/{_positive(pull_number, 'pull_number')}",
             permissions={"pull_requests": "read"},
+            _api_version=_PULL_REQUEST_API_VERSION,
         )
 
     async def list_pull_request_files(
@@ -1026,6 +1029,7 @@ class GitHubClient:
         content_read_auth: _ContentReadAuth | None = None,
         _client: httpx.AsyncClient | None = None,
         _commit_detail: CommitDetail | None = None,
+        _api_version: str = _API_VERSION,
     ) -> Any:
         repository = self._authorize(repository, write=write)
         if _client is not None and content_read_auth is None:
@@ -1033,7 +1037,7 @@ class GitHubClient:
         headers = {
             "Accept": "application/vnd.github+json",
             "User-Agent": "IssueLens-GitHub-MCP/0.1",
-            "X-GitHub-Api-Version": _API_VERSION,
+            "X-GitHub-Api-Version": _api_version,
         }
         anonymous_fallback = False
         if content_read_auth is not None:

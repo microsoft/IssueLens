@@ -101,6 +101,17 @@ existing single-request 30-second HTTP timeout, not the scan budget.
 Large changes use existing tools and ordinary Copilot tool/model turns, not
 custom diff readers or an analysis runtime.
 
+`get_pull_request` pins its metadata request to GitHub REST API `2022-11-28`
+to retain the authoritative `merge_commit_sha` needed for merged-source
+verification. GitHub [removed that field in API version
+`2026-03-10`](https://docs.github.com/en/rest/about-the-rest-api/breaking-changes?apiVersion=2026-03-10).
+The pin applies to both App-authenticated and anonymous public PR reads;
+other REST operations and App token minting retain `2026-03-10`. No additional
+permissions, fallback lookup, or inferred merge SHA is introduced. An open
+PR's null or temporary merge SHA is preserved as returned by GitHub and is
+not evidence of a completed merge. Removing this compatibility pin requires
+an authoritative replacement for merged-commit verification.
+
 `get_commit(repository, sha, detail="stats", per_page=30, page=1)` adopts the
 [official GitHub MCP detail semantics](https://github.com/github/github-mcp-server/blob/85598ba6e1256f7ebf4867b95d63b833c4549264/pkg/github/repositories.go#L29-L126):
 
