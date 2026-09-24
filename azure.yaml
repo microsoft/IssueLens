@@ -10,21 +10,6 @@ services:
             dependencyResolution: remote_build
             entryPoint: main.py
             runtime: python_3_13
-        hooks:
-            postpackage:
-                posix:
-                    shell: sh
-                    run: |
-                        if [ -n "${ISSUELENS_PACKAGE_CHECK_DIR:-}" ]; then
-                            python3 -I .github/scripts/foundry_deploy.py package-check
-                        fi
-                windows:
-                    shell: pwsh
-                    run: |
-                        if ($env:ISSUELENS_PACKAGE_CHECK_DIR) {
-                            python -I .github/scripts/foundry_deploy.py package-check
-                            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                        }
         container:
             resources:
                 cpu: "0.5"

@@ -13,122 +13,144 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = (ROOT / ".github/workflows/deploy-foundry.yml").read_text(encoding="utf-8")
         cls.workflow = yaml.load(cls.source, Loader=yaml.BaseLoader)
-        cls.preflight = cls.workflow["jobs"]["preflight"]
-        cls.deploy = cls.workflow["jobs"]["deploy"]
+        cls.deploy = cls.workflow["jobs"]["deploy-and-test"]
+        cls.steps = cls.deploy["steps"]
+        cls.commands = "\n".join(step.get("run", "") for step in cls.steps)
 
-    def test_dispatch_has_no_untrusted_target_or_revision_inputs(self):
+    def test_manual_default_branch_dispatch_requires_environment_approval(self):
         self.assertEqual(self.workflow["on"], {"workflow_dispatch": ""})
         self.assertEqual(self.workflow["permissions"], {})
         self.assertEqual(self.workflow["defaults"]["run"]["shell"], "bash")
+        self.assertEqual(set(self.workflow["jobs"]), {"deploy-and-test"})
         self.assertNotIn("inputs.", self.source)
         self.assertNotIn("pull_request", self.source)
-        self.assertEqual(self.deploy["needs"], "preflight")
         self.assertEqual(self.deploy["environment"], "foundry-production")
-
-    def test_branch_guard_runs_before_checkout(self):
-        guard, checkout, check = self.preflight["steps"]
         for condition in (
-            '"$GITHUB_REPOSITORY" != "microsoft/IssueLens"',
-            '"$GITHUB_EVENT_NAME" != "workflow_dispatch"',
-            '"$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH"',
-            '"$GITHUB_SHA" != "$WORKFLOW_SHA"',
+            "github.repository == 'microsoft/IssueLens'",
+            "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)",
+            "github.sha == github.workflow_sha",
         ):
-            self.assertIn(condition, guard["run"])
-        self.assertIn("exit 1", guard["run"])
-        self.assertEqual(guard["env"]["WORKFLOW_SHA"], "${{ github.workflow_sha }}")
-        self.assertEqual(guard["env"]["DEFAULT_BRANCH"], "${{ github.event.repository.default_branch }}")
-        self.assertEqual(checkout["with"]["ref"], "${{ github.sha }}")
-        self.assertTrue(check["run"].endswith("foundry_deploy.py preflight"))
-        self.assertEqual(check["env"], {"GH_TOKEN": "${{ github.token }}"})
+            self.assertIn(condition, self.deploy["if"])
 
-    def test_preflight_is_unprivileged_and_deploy_rechecks_before_login(self):
-        read_permissions = {"contents": "read", "actions": "read", "deployments": "read"}
-        self.assertEqual(self.preflight["permissions"], read_permissions)
-        self.assertEqual(self.deploy["permissions"], {**read_permissions, "id-token": "write"})
-        self.assertNotIn("secrets.", str(self.preflight))
-        steps = self.deploy["steps"]
-        self.assertTrue(steps[1]["run"].endswith("foundry_deploy.py preflight"))
-        prepare = next(index for index, step in enumerate(steps) if step.get("run", "").endswith(" prepare"))
-        login = next(index for index, step in enumerate(steps) if step.get("uses", "").startswith("azure/login@"))
-        publish = next(index for index, step in enumerate(steps) if step.get("id") == "publish")
-        self.assertLess(prepare, login)
-        self.assertLess(login, publish)
-        identity = steps[login]["with"]
-        self.assertEqual(identity, {
-            "client-id": "${{ secrets.ISSUELENS_DEPLOY_AZURE_CLIENT_ID }}",
-            "tenant-id": "${{ secrets.ISSUELENS_DEPLOY_AZURE_TENANT_ID }}",
-            "subscription-id": "${{ secrets.ISSUELENS_DEPLOY_AZURE_SUBSCRIPTION_ID }}",
+    def test_github_gates_run_before_oidc_login(self):
+        gate = self.steps[1]
+        self.assertEqual(gate["env"], {
+            "GH_TOKEN": "${{ github.token }}",
+            "DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
         })
-        for step in steps:
-            if "env" in step and step.get("run", "").endswith(" prepare"):
-                for name in ("AZURE_AI_MODEL_API_KEY", "MAILING_URL", "PERSONAL_NOTIFICATION_URL"):
-                    self.assertEqual(step["env"][name], "${{ secrets." + name + " }}")
-            self.assertNotIn("continue-on-error", step)
+        for condition in (
+            '.can_admins_bypass == false', '.type == "required_reviewers"',
+            ".prevent_self_review == true", "(.reviewers | length) > 0",
+            "/actions/workflows/ci.yml/runs", "-f event=push",
+            '-f branch="$DEFAULT_BRANCH"', '-f head_sha="$GITHUB_SHA"', "-F per_page=1",
+            '.status == "completed" and .conclusion == "success"',
+        ):
+            self.assertIn(condition, gate["run"])
+        self.assertEqual(gate["run"].count("grep -qx true"), 2)
+        self.assertEqual(gate["run"].count("exit 1"), 2)
+        login = next(index for index, step in enumerate(self.steps)
+                     if step.get("uses", "").startswith("azure/login@"))
+        self.assertGreater(login, 1)
 
-    def test_actions_and_deployment_provider_are_pinned(self):
-        for job in (self.preflight, self.deploy):
-            for step in job["steps"]:
-                if "uses" in step:
-                    self.assertRegex(step["uses"], r"^[A-Za-z0-9-]+/[A-Za-z0-9-]+@[0-9a-f]{40}$")
-                if step.get("uses", "").startswith("actions/checkout@"):
-                    self.assertEqual(step["with"], {"ref": "${{ github.sha }}", "persist-credentials": "false"})
-        setup = next(step for step in self.deploy["steps"] if step.get("uses", "").startswith("Azure/setup-azd@"))
+    def test_official_oidc_and_azd_configuration_pattern(self):
+        self.assertEqual(self.deploy["permissions"], {
+            "contents": "read", "actions": "read", "id-token": "write",
+        })
+        login = next(step for step in self.steps if step.get("uses", "").startswith("azure/login@"))
+        self.assertEqual(login["with"], {
+            "client-id": "${{ vars.AZURE_CLIENT_ID }}",
+            "tenant-id": "${{ vars.AZURE_TENANT_ID }}",
+            "subscription-id": "${{ vars.AZURE_SUBSCRIPTION_ID }}",
+        })
+        configure = next(step for step in self.steps if "azd config set" in step.get("run", ""))
+        self.assertIn("azd config set auth.useAzCliAuth true", configure["run"])
+        self.assertIn('azd env new "$AZD_ENV_NAME"', configure["run"])
+        self.assertIn('azd env set --no-prompt -- "$name" "${!name}" >/dev/null', configure["run"])
+        self.assertIn('[[ -n "${!name}" ]]', configure["run"])
+        for name in ("AZURE_AI_MODEL_API_KEY", "MAILING_URL", "PERSONAL_NOTIFICATION_URL"):
+            self.assertEqual(configure["env"][name], "${{ secrets." + name + " }}")
+        manifest = yaml.load((ROOT / "azure.yaml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        for name in re.findall(r"\$\{([A-Z_]+)\}", str(manifest)):
+            self.assertIn(name, configure["run"])
+            self.assertIn(name, self.deploy["env"] | configure["env"])
+
+    def test_official_actions_and_bundle_are_pinned(self):
+        for step in self.steps:
+            if "uses" in step:
+                self.assertRegex(step["uses"], r"^[A-Za-z0-9-]+/[A-Za-z0-9-]+@[0-9a-f]{40}$")
+        self.assertEqual(self.steps[0]["with"], {"ref": "${{ github.sha }}", "persist-credentials": "false"})
+        setup = next(step for step in self.steps if step.get("uses", "").startswith("Azure/setup-azd@"))
         self.assertEqual(setup["with"]["version"], "1.34.2")
-        install = next(step["run"] for step in self.deploy["steps"]
-                       if step.get("run", "").startswith("azd extension"))
-        self.assertEqual(install,
-                         "azd extension install azure.ai.agents --version 1.0.0-beta.16 --no-dependencies --no-prompt")
+        self.assertIn("azd extension install microsoft.foundry --version 1.0.0-beta.2 --no-prompt", self.commands)
+        self.assertIn("azd ai agent --help >/dev/null", self.commands)
 
-    def test_one_target_is_serialized_without_cancelling_publication(self):
+    def test_native_deployment_is_bounded_and_serialized(self):
         self.assertEqual(self.workflow["concurrency"], {
             "group": "issuelens-foundry-production", "cancel-in-progress": "false",
         })
-        self.assertEqual(self.preflight["timeout-minutes"], "5")
         self.assertEqual(self.deploy["timeout-minutes"], "40")
-        for job in self.workflow["jobs"].values():
-            self.assertEqual(job["runs-on"], "ubuntu-24.04")
-            self.assertNotIn("strategy", job)
+        self.assertEqual(self.deploy["runs-on"], "ubuntu-24.04")
+        deploy = next(step for step in self.steps if step.get("id") == "deploy")
+        self.assertEqual(deploy["run"], 'azd deploy IssueLens --environment "$AZD_ENV_NAME" --no-prompt --timeout 1200')
+        self.assertEqual(deploy["timeout-minutes"], "25")
+        for step in self.steps:
+            self.assertNotIn("continue-on-error", step)
+        for forbidden in ("azd provision", "azd up", "azd init", "--from-package", "az role assignment"):
+            self.assertNotIn(forbidden, self.commands)
 
-    def test_summary_and_cleanup_run_after_failures(self):
-        summary, cleanup = self.deploy["steps"][-2:]
+    def test_both_protocols_check_the_new_version_and_expected_reply(self):
+        status = next(step for step in self.steps if step.get("id") == "status")
+        self.assertIn("AGENT_ISSUELENS_VERSION", status["run"])
+        self.assertIn('.version == $version and .status == "active"', status["run"])
+        for protocol in ("responses", "invocations"):
+            step = next(step for step in self.steps if step.get("id") == protocol)
+            self.assertEqual(step["timeout-minutes"], "3")
+            self.assertEqual(step["env"], {"AGENT_VERSION": "${{ steps.status.outputs.version }}"})
+            for text in (
+                f"--protocol {protocol}", '--version "$AGENT_VERSION"', "--new-session",
+                "--timeout 120", "--output raw", "ulimit -f 8192",
+                'jq -e -s --arg expected "$EXPECTED_REPLY"', "exit 1",
+            ):
+                self.assertIn(text, step["run"])
+        self.assertIn('--arg input "$AGENT_TEST_PROMPT" \'{input: $input}\'', self.commands)
+        self.assertIn("--new-conversation", self.commands)
+        self.assertIn('select(.type == "response.completed")', self.commands)
+        self.assertIn('(.invocation_id | length) > 0', self.commands)
+        self.assertIn(".data.content == $expected", self.commands)
+        self.assertIn("Do not call tools or sub-agents", self.workflow["env"]["AGENT_TEST_PROMPT"])
+
+    def test_summary_cleanup_and_secret_handling(self):
+        summary, cleanup = self.steps[-2:]
         self.assertEqual(summary["if"], "always()")
         self.assertEqual(cleanup["if"], "always()")
-        self.assertTrue(summary["run"].endswith("foundry_deploy.py summary"))
-        self.assertTrue(cleanup["run"].endswith("foundry_deploy.py cleanup"))
-        self.assertEqual(summary["env"], {
-            "PUBLISH_OUTCOME": "${{ steps.publish.outcome }}",
-            "VERIFY_OUTCOME": "${{ steps.verify.outcome }}",
-        })
+        self.assertIn("GITHUB_STEP_SUMMARY", summary["run"])
+        self.assertIn("No automatic retry or rollback", summary["run"])
+        self.assertIn("rm -rf -- .azure", cleanup["run"])
         self.assertNotIn("upload-artifact", self.source)
-        for step in self.deploy["steps"]:
+        self.assertNotIn("azd env get-values", self.commands)
+        self.assertNotIn("cat ", self.commands)
+        for step in self.steps:
             self.assertNotIn("${{", step.get("run", ""))
 
-    def test_ci_only_postpackage_hook_preserves_the_native_deploy_path(self):
+    def test_existing_manifest_needs_no_deployment_helper_or_hook(self):
         manifest = yaml.load((ROOT / "azure.yaml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
         service = manifest["services"]["IssueLens"]
         self.assertEqual(service["codeConfiguration"], {
             "dependencyResolution": "remote_build", "entryPoint": "main.py", "runtime": "python_3_13",
         })
-        self.assertEqual(set(service["hooks"]), {"postpackage"})
-        hook = service["hooks"]["postpackage"]
-        self.assertEqual(hook["posix"]["shell"], "sh")
-        self.assertEqual(hook["windows"]["shell"], "pwsh")
-        for platform in ("posix", "windows"):
-            self.assertIn("ISSUELENS_PACKAGE_CHECK_DIR", hook[platform]["run"])
-            self.assertIn("foundry_deploy.py package-check", hook[platform]["run"])
-            self.assertNotIn("continueOnError", hook[platform])
-        helper = (ROOT / ".github/scripts/foundry_deploy.py").read_text(encoding="utf-8")
-        for forbidden in ('"provision"', '"--from-package"', '"up"', '"role", "assignment"', '"keyvault"'):
-            self.assertNotIn(forbidden, helper)
+        self.assertNotIn("hooks", service)
+        self.assertFalse((ROOT / ".github/scripts/foundry_deploy.py").exists())
+        self.assertNotIn("python", self.commands)
+        self.assertIn(".git", (ROOT / ".agentignore").read_text(encoding="utf-8").splitlines())
 
-    def test_readme_documents_configuration_and_manual_activation(self):
+    def test_readme_documents_the_official_guide_and_all_configuration(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        prepare = next(step for step in self.deploy["steps"] if step.get("run", "").endswith(" prepare"))
-        for reference in re.findall(r"(?:vars|secrets)\.([A-Z_]+)", str(prepare["env"])):
+        for reference in re.findall(r"(?:vars|secrets)\.([A-Z_]+)", self.source):
             self.assertIn(f"`{reference}`", readme)
         for text in (
+            "https://learn.microsoft.com/en-us/azure/foundry/agents/quickstarts/set-up-cicd-hosted-agent",
             "foundry-production", "repo:microsoft/IssueLens:environment:foundry-production",
-            "1.34.2", "1.0.0-beta.16", "azd-code-deploy-", "postpackage",
+            "1.34.2", "1.0.0-beta.2",
             "No automatic retry or rollback", "No live deployment",
         ):
             self.assertIn(text, readme)
