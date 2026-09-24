@@ -45,9 +45,11 @@ import os
 import pathlib
 import sys
 import time
+from collections.abc import Awaitable, Callable
 
 import httpx
 from azure.core.credentials import AccessToken
+from azure.core.credentials_async import AsyncTokenCredential
 from azure.core.exceptions import AzureError
 from dotenv import load_dotenv
 from opentelemetry.instrumentation.utils import suppress_instrumentation
@@ -103,6 +105,19 @@ _telemetry_settings = prepare_environment()
 
 class IssueLensHost(InvocationAgentServerHost, ResponsesAgentServerHost):
     """One host, both protocols — cooperative init merges each one's routes."""
+
+    def shutdown_handler(
+        self, handler: Callable[[], Awaitable[None]],
+    ) -> Callable[[], Awaitable[None]]:
+        # Responses owns the host's single shutdown slot; preserve its handler.
+        async def shutdown() -> None:
+            try:
+                await handler()
+            finally:
+                await _close_model_credential()
+
+        super().shutdown_handler(shutdown)
+        return handler
 
 
 app = IssueLensHost()
@@ -239,9 +254,8 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
 # ── BYOK helpers ─────────────────────────────────────────────────────────────
 
 _MODEL_SCOPE = "https://ai.azure.com/.default"
-_TOKEN_REFRESH_MARGIN_SECONDS = 300
-_model_token: AccessToken | None = None
-_model_token_lock = asyncio.Lock()
+_model_credential: AsyncTokenCredential | None = None
+_model_token_provider: Callable[[], Awaitable[str]] | None = None
 
 
 class FoundryModelError(RuntimeError):
@@ -250,26 +264,34 @@ class FoundryModelError(RuntimeError):
 
 async def _model_bearer(_args: ProviderTokenArgs | None = None) -> str:
     """Resolve a token per model request, including within resumed sessions."""
-    global _model_token
-    async with _model_token_lock:
-        if (
-            _model_token is None
-            or _model_token.expires_on - time.time() < _TOKEN_REFRESH_MARGIN_SECONDS
-        ):
-            from azure.identity.aio import DefaultAzureCredential
+    global _model_credential, _model_token_provider
+    try:
+        with suppress_instrumentation():
+            if _model_token_provider is None:
+                from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
 
-            try:
-                with suppress_instrumentation():
-                    async with DefaultAzureCredential() as credential:
-                        _model_token = await credential.get_token(_MODEL_SCOPE)
-            except (AzureError, ValueError):
-                logger.warning("Foundry model Microsoft Entra token acquisition failed")
-                raise FoundryModelError(
-                    "Could not authenticate to the Foundry model with Microsoft Entra. "
-                    "Check the runtime identity credentials; API-key and GitHub "
-                    "model fallback are disabled."
-                ) from None
-        return _model_token.token
+                _model_credential = DefaultAzureCredential()
+                _model_token_provider = get_bearer_token_provider(_model_credential, _MODEL_SCOPE)
+            return await _model_token_provider()
+    except (AzureError, ValueError):
+        logger.warning("Foundry model Microsoft Entra token acquisition failed")
+        raise FoundryModelError(
+            "Could not authenticate to the Foundry model with Microsoft Entra. "
+            "Check the runtime identity credentials; API-key and GitHub "
+            "model fallback are disabled."
+        ) from None
+
+
+async def _close_model_credential() -> None:
+    """Release model credentials after protocol shutdown."""
+    global _model_credential, _model_token_provider
+    credential = _model_credential
+    _model_credential = _model_token_provider = None
+    if credential is not None:
+        try:
+            await credential.close()
+        except (AzureError, ValueError):
+            raise FoundryModelError("Could not close the Foundry model credential.") from None
 
 
 def _byok_provider() -> tuple[ProviderConfig | None, str | None]:
@@ -756,6 +778,7 @@ async def handle_invoke(request: Request) -> Response:
 _TOOLBOX_ENDPOINT_ENV = "TOOLBOX_ENDPOINT"
 _TOOLBOX_SCOPE = "https://ai.azure.com/.default"
 _CALL_ID_HEADER = "x-agent-foundry-call-id"
+_TOKEN_REFRESH_MARGIN_SECONDS = 300
 
 _ANONYMOUS_CONVERSATION = "anonymous"
 _MAX_CHAT_SESSIONS = 500

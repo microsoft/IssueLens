@@ -953,9 +953,11 @@ Authentication uses **Microsoft Entra bearer tokens only**, requested for
 `https://ai.azure.com/.default` through async `DefaultAzureCredential`. The
 Copilot SDK's per-request `bearer_token_provider` callback (supported by the
 existing minimum SDK 1.0.7) is registered on both new and resumed sessions.
-Tokens are cached only in host memory and renewed when less than five minutes
-remain, including during long-running turns; no static token is saved in session
-configuration. Credential acquisition does not block the host event loop.
+Azure Identity's async `get_bearer_token_provider` owns in-memory token caching,
+early refresh, and concurrent acquisition, including during long-running turns;
+no static token is saved in session configuration. Credential acquisition does
+not block the host event loop. The lazy credential is closed after the existing
+Responses graceful-shutdown handler, without replacing its cleanup.
 
 When hosted, `FOUNDRY_PROJECT_ENDPOINT` is platform-injected; set the deployment
 name in `azure.yaml` / `agent.yaml`. Keep the **project endpoint**, rather than

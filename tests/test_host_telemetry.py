@@ -59,6 +59,10 @@ class InvocationHost:
     def invoke_handler(self, handler):
         return handler
 
+    def shutdown_handler(self, handler):
+        self.shutdown_callback = handler
+        return handler
+
 
 class ResponsesHost:
     def response_handler(self, handler):
@@ -1287,12 +1291,13 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             "AZURE_AI_MODEL_API_KEY": "ignored-model-key",
             "GITHUB_TOKEN": "unused-github-model-token",
         }))
-        credential = AsyncMock()
-        credential.__aenter__.return_value = credential
-        credential.get_token.return_value = AccessToken("offline-model-token", 4_000_000_000)
+        credential = Mock(spec=["get_token", "close"])
+        credential.get_token = AsyncMock(return_value=AccessToken("offline-model-token", 4_000_000_000))
+        credential.close = AsyncMock()
         factory = self.stack.enter_context(patch(
             "azure.identity.aio.DefaultAzureCredential", return_value=credential,
         ))
+        self.addAsyncCleanup(self.host._close_model_credential)
         return credential, factory
 
     def test_foundry_provider_ignores_keys_and_registers_lazy_bearer_callback(self):
@@ -1326,11 +1331,13 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             now.return_value = 1699
             self.assertEqual(await callback(args), "first-token")
             credential.get_token.assert_awaited_once_with("https://ai.azure.com/.default")
-            now.return_value = 1701
+            now.return_value = 1761
             self.assertEqual(await callback(args), "renewed-token")
         self.assertEqual(credential.get_token.await_count, 2)
-        self.assertEqual(factory.call_count, 2)
-        self.assertEqual(credential.__aexit__.await_count, 2)
+        factory.assert_called_once_with()
+        credential.close.assert_not_awaited()
+        await self.host._close_model_credential()
+        credential.close.assert_awaited_once()
 
     async def test_foundry_token_acquisition_is_async_and_serialized(self):
         credential, _ = self.configure_foundry()
@@ -1356,26 +1363,65 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_foundry_token_failure_is_explicit_sanitized_and_never_returns_stale_token(self):
         credential, _ = self.configure_foundry()
-        credential.get_token.side_effect = ClientAuthenticationError(ERROR_SECRET)
-        self.host._model_token = AccessToken("expired-token", 500)
+        credential.get_token.side_effect = [
+            AccessToken("initial-token", 2000),
+            ClientAuthenticationError(ERROR_SECRET),
+            ClientAuthenticationError(ERROR_SECRET),
+        ]
         callback = self.host._byok_provider()[0]["bearer_token_provider"]
-        with patch.object(self.host.time, "time", return_value=1000):
+        args = {"provider_name": "default", "session_id": "offline-session"}
+        with patch.object(self.host.time, "time", return_value=1000) as now:
+            self.assertEqual(await callback(args), "initial-token")
+            now.return_value = 2500
             for _ in range(2):
                 with self.assertLogs(HOST_MODULE, level="WARNING") as logs:
-                    caught, formatted = await self.escaped_error(callback({
-                        "provider_name": "default", "session_id": "offline-session",
-                    }))
+                    caught, formatted = await self.escaped_error(callback(args))
                 self.assertIsInstance(caught, self.host.FoundryModelError)
                 self.assertIn("Could not authenticate", str(caught))
                 self.assertIn("fallback are disabled", str(caught))
                 self.assert_no_canaries(formatted + str(logs.output))
                 self.assertIsNone(caught.__cause__)
                 self.assertTrue(caught.__suppress_context__)
-        self.assertEqual(credential.get_token.await_count, 2)
-        self.assertEqual(credential.__aexit__.await_count, 2)
+        self.assertEqual(credential.get_token.await_count, 3)
+        credential.close.assert_not_awaited()
         self.copilot_constructor.assert_not_called()
         self.assertEqual(self.client.create_calls, [])
         self.assertEqual(self.client.resume_calls, [])
+
+    async def test_model_shutdown_preserves_response_cleanup_and_closes_credential(self):
+        credential, factory = self.configure_foundry()
+        for failure in (None, RuntimeError("response-shutdown-error")):
+            with self.subTest(shutdown_failure=bool(failure)):
+                await self.host._model_bearer()
+
+                async def response_shutdown():
+                    self.assertIsNotNone(self.host._model_credential)
+                    if failure:
+                        raise failure
+
+                self.assertIs(self.host.app.shutdown_handler(response_shutdown), response_shutdown)
+                if failure:
+                    with self.assertRaisesRegex(RuntimeError, "response-shutdown-error"):
+                        await self.host.app.shutdown_callback()
+                else:
+                    await self.host.app.shutdown_callback()
+                self.assertIsNone(self.host._model_credential)
+                self.assertIsNone(self.host._model_token_provider)
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(credential.close.await_count, 2)
+        await self.host._close_model_credential()
+        self.assertEqual(credential.close.await_count, 2)
+
+    async def test_model_credential_close_failure_is_sanitized(self):
+        credential, _ = self.configure_foundry()
+        await self.host._model_bearer()
+        credential.close.side_effect = ClientAuthenticationError(ERROR_SECRET)
+        caught, formatted = await self.escaped_error(self.host._close_model_credential())
+        self.assertIsInstance(caught, self.host.FoundryModelError)
+        self.assertEqual(str(caught), "Could not close the Foundry model credential.")
+        self.assert_no_canaries(formatted)
+        self.assertIsNone(self.host._model_credential)
+        self.assertIsNone(self.host._model_token_provider)
 
     async def test_missing_foundry_model_fails_before_client_start_despite_github_token(self):
         _, factory = self.configure_foundry()
