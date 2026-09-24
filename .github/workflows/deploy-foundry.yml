@@ -1,0 +1,190 @@
+# Adapted from https://learn.microsoft.com/azure/foundry/agents/quickstarts/set-up-cicd-hosted-agent
+name: Deploy IssueLens to Foundry
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: issuelens-foundry-production
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  AZD_ENV_NAME: foundry-production
+  EXPECTED_REPLY: ISSUELENS_DEPLOYMENT_OK
+  AGENT_TEST_PROMPT: >-
+    Reply with exactly ISSUELENS_DEPLOYMENT_OK, with no other text.
+    This is a deployment smoke check. Do not call tools or sub-agents,
+    access repositories, modify GitHub or wiki data, or send notifications.
+    No repository access or write is authorized.
+
+jobs:
+  deploy-and-test:
+    name: Deploy approved commit
+    if: >-
+      github.repository == 'microsoft/IssueLens' &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      github.sha == github.workflow_sha
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: foundry-production
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      AZURE_CORE_OUTPUT: none
+    steps:
+      - name: Checkout the approved commit
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require environment protection and successful CI
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/environments/$AZD_ENV_NAME" --jq '
+            .can_admins_bypass == false and
+            any(.protection_rules[]?; .type == "required_reviewers" and
+              .prevent_self_review == true and (.reviewers | length) > 0)
+          ' | grep -qx true || { echo "::error::Configure required environment reviewers without self-review or bypass."; exit 1; }
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
+            -f event=push -f branch="$DEFAULT_BRANCH" -f head_sha="$GITHUB_SHA" -F per_page=1 \
+            --jq '.workflow_runs[0] | .status == "completed" and .conclusion == "success"' |
+            grep -qx true || { echo "::error::Wait for successful CI on this exact commit before deploying."; exit 1; }
+      - name: Install Azure Developer CLI
+        uses: Azure/setup-azd@0b7e3a35ab00f2eee7080c845eb39c3f0ebfa553 # v2.4.0
+        with:
+          version: '1.34.2'
+      - name: Install and verify the Foundry extension
+        run: |
+          azd extension install microsoft.foundry --version 1.0.0-beta.2 --no-prompt
+          azd ai agent --help >/dev/null
+      - name: Azure login with OIDC
+        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      - name: Configure azd authentication and deployment environment
+        env:
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_LOCATION: ${{ secrets.AZURE_LOCATION }}
+          FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_AI_PROJECT_ID: ${{ secrets.AZURE_AI_PROJECT_ID }}
+          AZURE_AI_MODEL_DEPLOYMENT_NAME: ${{ secrets.AZURE_AI_MODEL_DEPLOYMENT_NAME }}
+          GITHUB_APP_ID: ${{ vars.ISSUELENS_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY_SECRET_URI: ${{ secrets.ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI }}
+          TOOLBOX_ENDPOINT: ${{ secrets.TOOLBOX_ENDPOINT }}
+          MAILING_URL: ${{ secrets.MAILING_URL }}
+          PERSONAL_NOTIFICATION_URL: ${{ secrets.PERSONAL_NOTIFICATION_URL }}
+        run: |
+          required=(AZURE_SUBSCRIPTION_ID AZURE_TENANT_ID AZURE_LOCATION FOUNDRY_PROJECT_ENDPOINT
+                    AZURE_AI_PROJECT_ID AZURE_AI_MODEL_DEPLOYMENT_NAME GITHUB_APP_ID GITHUB_APP_PRIVATE_KEY_SECRET_URI)
+          for name in "${required[@]}"; do
+            [[ -n "${!name}" ]] || { echo "::error::Missing environment configuration: $name"; exit 1; }
+          done
+          (
+            azd config set auth.useAzCliAuth true &&
+            azd env new "$AZD_ENV_NAME" --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt &&
+            for name in "${required[@]}" TOOLBOX_ENDPOINT MAILING_URL PERSONAL_NOTIFICATION_URL; do
+              azd env set --no-prompt -- "$name" "${!name}" || exit 1
+            done
+          ) >"$RUNNER_TEMP/issuelens-configure.log" 2>&1 ||
+            { echo "::error::Azure configuration failed; check the deployment secrets. Details withheld."; exit 1; }
+      - name: Deploy agent
+        id: deploy
+        timeout-minutes: 25
+        run: |
+          azd deploy IssueLens --environment "$AZD_ENV_NAME" --no-prompt --timeout 1200 >"$RUNNER_TEMP/issuelens-deploy.log" 2>&1 ||
+            { echo "::error::Foundry deployment failed; inspect Foundry before retrying. Details withheld."; exit 1; }
+      - name: Check the deployed agent status
+        id: status
+        run: |
+          version="$(azd env get-value AGENT_ISSUELENS_VERSION --environment "$AZD_ENV_NAME" 2>"$RUNNER_TEMP/issuelens-status-errors.txt")" ||
+            { echo "::error::Could not read the deployed version. Details withheld."; exit 1; }
+          azd ai agent show IssueLens --environment "$AZD_ENV_NAME" --output json --no-prompt \
+            >"$RUNNER_TEMP/issuelens-agent.json" 2>"$RUNNER_TEMP/issuelens-status-errors.txt" ||
+            { echo "::error::Could not read agent readiness. Details withheld."; exit 1; }
+          jq -e --arg version "$version" '
+            .name == "IssueLens" and .version == $version and .status == "active" and
+            ($version | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$") and . != "latest")
+          ' "$RUNNER_TEMP/issuelens-agent.json" >/dev/null 2>"$RUNNER_TEMP/issuelens-status-errors.txt" ||
+            { echo "::error::The expected IssueLens version is not active; inspect Foundry before retrying."; exit 1; }
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+      - name: Smoke-test responses
+        id: responses
+        timeout-minutes: 3
+        env:
+          AGENT_VERSION: ${{ steps.status.outputs.version }}
+        run: |
+          ulimit -f 8192
+          azd ai agent invoke IssueLens "$AGENT_TEST_PROMPT" --environment "$AZD_ENV_NAME" \
+            --protocol responses --version "$AGENT_VERSION" --new-session --new-conversation \
+            --timeout 120 --output raw --no-prompt >"$RUNNER_TEMP/issuelens-responses.txt" 2>"$RUNNER_TEMP/issuelens-smoke-errors.txt" ||
+            { echo "::error::Responses invocation failed; inspect Foundry before retrying."; exit 1; }
+          sed -n 's/^data: *//p' "$RUNNER_TEMP/issuelens-responses.txt" | grep -v '^\[DONE\]' |
+            jq -e -s --arg expected "$EXPECTED_REPLY" '
+              all(.[]; .type != "error" and .type != "response.failed" and
+                .type != "response.incomplete" and .type != "response.cancelled") and
+              ([.[] | select(.type == "response.completed") | .response] |
+                length == 1 and .[0].status == "completed" and .[0].error == null and .[0].incomplete_details == null and
+                all(.[0].output[]?; .type == "reasoning" or
+                  (.type == "message" and .role == "assistant" and .status == "completed")) and
+                ([.[0].output[]?.content[]? | select(.type == "output_text") | .text] | join("")) == $expected)
+            ' >/dev/null 2>"$RUNNER_TEMP/issuelens-smoke-errors.txt" ||
+            { echo "::error::Responses did not complete with the expected smoke reply."; exit 1; }
+      - name: Smoke-test invocations
+        id: invocations
+        timeout-minutes: 3
+        env:
+          AGENT_VERSION: ${{ steps.status.outputs.version }}
+        run: |
+          ulimit -f 8192
+          jq -n --arg input "$AGENT_TEST_PROMPT" '{input: $input}' >"$RUNNER_TEMP/issuelens-payload.json"
+          azd ai agent invoke IssueLens --environment "$AZD_ENV_NAME" --protocol invocations \
+            --input-file "$RUNNER_TEMP/issuelens-payload.json" --version "$AGENT_VERSION" --new-session \
+            --timeout 120 --output raw --no-prompt >"$RUNNER_TEMP/issuelens-invocations.txt" 2>"$RUNNER_TEMP/issuelens-smoke-errors.txt" ||
+            { echo "::error::Invocations request failed; inspect Foundry before retrying."; exit 1; }
+          sed -n 's/^data: *//p' "$RUNNER_TEMP/issuelens-invocations.txt" |
+            jq -e -s --arg expected "$EXPECTED_REPLY" '
+              all(.[]; .type != "error" and .type != "session.error" and
+                ((.type // "" | test("^(tool|subagent)\\.")) | not) and (.data.toolRequests // [] | length) == 0) and
+              (.[-1] | (.invocation_id | type) == "string" and (.session_id | type) == "string" and
+                (.invocation_id | length) > 0 and (.session_id | length) > 0) and
+              ([.[] | select(.type == "assistant.message" and .agentId == null and .data.parentToolCallId == null)] |
+                last | .data.content == $expected and (.data.toolRequests // [] | length) == 0)
+            ' >/dev/null 2>"$RUNNER_TEMP/issuelens-smoke-errors.txt" ||
+            { echo "::error::Invocations did not complete with the expected smoke reply."; exit 1; }
+      - name: Deployment summary
+        if: always()
+        env:
+          AGENT_VERSION: ${{ steps.status.outputs.version }}
+          DEPLOY_RESULT: ${{ steps.deploy.outcome }}
+          STATUS_RESULT: ${{ steps.status.outcome }}
+          RESPONSES_RESULT: ${{ steps.responses.outcome }}
+          INVOCATIONS_RESULT: ${{ steps.invocations.outcome }}
+        run: |
+          {
+            printf '## IssueLens Foundry deployment\n\nCommit: `%s`\n\nEnvironment: `%s`\n\nVersion: `%s`\n\n' \
+              "$GITHUB_SHA" "$AZD_ENV_NAME" "${AGENT_VERSION:-not recorded}"
+            printf 'Deploy: %s; readiness: %s; responses: %s; invocations: %s.\n\n' \
+              "$DEPLOY_RESULT" "$STATUS_RESULT" "$RESPONSES_RESULT" "$INVOCATIONS_RESULT"
+            echo 'A version may already exist if deployment or verification fails. No automatic retry or rollback is performed.'
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Remove runner-local deployment files
+        if: always()
+        run: |
+          rm -rf -- .azure
+          rm -f -- "$RUNNER_TEMP/issuelens-agent.json" "$RUNNER_TEMP/issuelens-payload.json" \
+            "$RUNNER_TEMP/issuelens-responses.txt" "$RUNNER_TEMP/issuelens-invocations.txt" "$RUNNER_TEMP/issuelens-smoke-errors.txt" \
+            "$RUNNER_TEMP/issuelens-configure.log" "$RUNNER_TEMP/issuelens-deploy.log" "$RUNNER_TEMP/issuelens-status-errors.txt"

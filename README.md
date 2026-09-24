@@ -229,7 +229,7 @@ are not proof of publication. Sensitive/conflicting changes require human review
    text prompt), with optional inline `attachments`, e.g.
    `{"input": "Triage open issues in owner/repo"}`.
 2. Creates a **fresh Copilot session per request** configured with:
-   - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
+   - the **Foundry model** (BYOK via Microsoft Entra identity) or the **GitHub Copilot model** for inference;
    - the bundled **GitHub App stdio MCP server**, whose process and token cache
      belong only to that Copilot session;
    - the constrained in-process `issuelens-config` tool, backed by a separate
@@ -310,7 +310,10 @@ live ingestion/import validation and any deployment need separate authorization.
 | `AZURE_AI_MODEL_DEPLOYMENT_NAME` | For Foundry model | Model deployment name (e.g. `gpt-4o`) |
 | `GITHUB_TOKEN` | For Copilot model | GitHub fine-grained PAT with **Copilot Requests → Read-only** permission |
 
-If the Foundry variables are set they take precedence over `GITHUB_TOKEN`.
+Setting `FOUNDRY_PROJECT_ENDPOINT` selects Foundry exclusively and requires a
+non-empty `AZURE_AI_MODEL_DEPLOYMENT_NAME`. Missing configuration or failed
+authentication never falls back to GitHub. Foundry uses Microsoft Entra tokens,
+not model API keys; see [identity and migration guidance](#using-your-own-foundry-model).
 
 ### GitHub resource access
 
@@ -946,11 +949,162 @@ AZURE_AI_MODEL_DEPLOYMENT_NAME=gpt-4o \
 python main.py
 ```
 
-Authentication uses Managed Identity via `DefaultAzureCredential`. When deployed as a hosted agent, `FOUNDRY_PROJECT_ENDPOINT` is auto-injected by the platform — you only need to set `AZURE_AI_MODEL_DEPLOYMENT_NAME` in `agent.yaml`.
+Authentication uses **Microsoft Entra bearer tokens only**, requested for
+`https://ai.azure.com/.default` through async `DefaultAzureCredential`. The
+Copilot SDK's per-request `bearer_token_provider` callback (supported by the
+existing minimum SDK 1.0.7) is registered on both new and resumed sessions.
+Azure Identity's async `get_bearer_token_provider` owns in-memory token caching,
+early refresh, and concurrent acquisition, including during long-running turns;
+no static token is saved in session configuration. Credential acquisition does
+not block the host event loop. The lazy credential is closed after the existing
+Responses graceful-shutdown handler, without replacing its cleanup.
+
+When hosted, `FOUNDRY_PROJECT_ENDPOINT` is platform-injected; set the deployment
+name in `azure.yaml` / `agent.yaml`. Keep the **project endpoint**, rather than
+switching to an account-level OpenAI endpoint. Three identities are distinct:
+
+| Identity | Inference/deployment responsibility |
+| --- | --- |
+| Hosted **agent runtime identity** | Foundry supplies a dedicated Microsoft Entra service principal and the runtime credential flow. It has implicit model-inference access through its own project endpoint in the standard hosted case. |
+| **Project managed identity** | Foundry proxies project-endpoint inference to the account's model deployment using this identity. It needs **Foundry User** (formerly **Azure AI User**) on the Foundry account. It is not the agent's runtime token principal. |
+| GitHub Actions **deployment service principal** | OIDC authenticates the runner for deployment. Its `AZURE_CLIENT_ID` is not forwarded into the hosted process and its permissions do not authenticate runtime inference. |
+
+See Microsoft's [hosted agent identities](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents#agent-identity-and-endpoint)
+and [permissions reference](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agent-permissions#agent-access-beyond-defaults).
+An administrator should verify the **actual principal and scope** of any
+existing role assignment; an assignment to a deployment principal is not proof
+of runtime or project-to-account access. This repository change does not verify
+or create Azure role assignments.
+
+For local service-principal execution, use the existing Azure Identity
+environment or workload-identity credential setup for that principal (for
+example, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and a provisioned
+`AZURE_FEDERATED_TOKEN_FILE`). Existing certificate/secret-based service-principal
+credentials are also supported by `DefaultAzureCredential`; keep those values
+outside source control and do not copy deployment credentials into the hosted
+manifest. Without an application credential, local developer credentials can
+also be selected by the default chain. The selected local principal needs
+project-level model data-plane access, such as **Foundry User** or an approved
+narrower custom role. ARM **Contributor** alone is not model authorization.
+
+**Migration and diagnosis:** `AZURE_AI_MODEL_API_KEY` is no longer read for
+authentication, passed by the deployment workflow/manifests, or forwarded to the
+Copilot child process. A stale value cannot enable key authentication. Remove
+obsolete values from local configuration and deployment secret stores through
+your normal approved process; changing this code neither deletes existing
+secrets nor updates a running deployment. Token-acquisition failures indicate a
+missing/unusable runtime credential; check the credential source first. A
+service-side `403` after token acquisition instead requires checking model
+data-plane authorization, including the project identity's account access.
+Neither case falls back to a key or to GitHub. `GITHUB_TOKEN` remains an inference
+option only when the Foundry endpoint is absent.
 
 ## Deploying the Agent to Microsoft Foundry
 
-Once you've tested locally, deploy to Microsoft Foundry:
+### GitHub Actions deployment
+
+[`Deploy IssueLens to Foundry`](.github/workflows/deploy-foundry.yml) follows
+Microsoft's [Set up CI/CD for a hosted agent](https://learn.microsoft.com/en-us/azure/foundry/agents/quickstarts/set-up-cicd-hosted-agent):
+install `azd` and `microsoft.foundry`, log in with Azure OIDC, configure the azd
+environment, run `azd deploy`, inspect status, and invoke the agent.
+It uses the existing repository-root `azure.yaml` Python 3.13 ZIP/remote-build
+service directly, without a custom deployment helper or packaging hook.
+Actions are commit-pinned; azd is **1.34.2** and the Foundry bundle is
+**1.0.0-beta.2**, which installs its compatible component dependencies.
+
+Unlike the quickstart's push trigger, this workflow is **manual only**, restricted
+to this repository's default branch, and requires approval through the fixed
+**`foundry-production`** environment. It checks required reviewers, disabled
+self-review/bypass, and a successful push-CI run for the exact dispatched SHA
+before Azure login. Deployments are serialized without cancelling an active
+publication. No live deployment, provisioning, or permission change is
+authorized by creating or merging the workflow.
+
+**One-time setup**
+
+The Foundry project, model deployment, and `IssueLens` hosted agent must already
+exist, as required by the quickstart. An administrator must create
+`foundry-production` with required reviewers, prevent self-review, disable
+administrator bypass, and allow only the exact default branch (`main`), not tags.
+
+The workflow reuses the repository's existing Azure ID secret names. Reusing
+their names does not grant deployment permissions: if the existing identity is
+invocation-only, override the same secrets in `foundry-production` with a
+**dedicated deployment identity**, rather than expanding the invocation identity's
+permissions. Configure Azure OIDC with issuer `https://token.actions.githubusercontent.com`,
+audience `api://AzureADTokenExchange`, and subject
+`repo:microsoft/IssueLens:environment:foundry-production`. The referenced CI/CD
+guide specifies **Foundry User** plus **Contributor** on the target project for
+code deployment; use an approved narrower equivalent where available. Role
+assignments and initial provisioning are separate administrator operations.
+The hosted agent runtime identity, not the deployer, needs **Key Vault Secrets User**
+on the App-key secret. Model inference always uses Entra authentication with the
+runtime/project identity responsibilities [described above](#using-your-own-foundry-model).
+
+The existing repository secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID`, and variable `ISSUELENS_APP_ID`, are reused directly.
+Store additional deployment-only settings as **environment-scoped secrets** in
+`foundry-production`. Same-named environment secrets override repository secrets.
+Unlike the quickstart's variables, all Azure configuration is kept in secrets
+to avoid exposing infrastructure details:
+
+| Name | Storage | Purpose |
+| --- | --- | --- |
+| `AZURE_CLIENT_ID` | Secret | Existing Azure identity secret; override for a deployment-specific identity if needed. |
+| `AZURE_TENANT_ID` | Secret | Existing Azure tenant secret. |
+| `AZURE_SUBSCRIPTION_ID` | Secret | Existing subscription secret. |
+| `AZURE_LOCATION` | Secret | Existing project's Azure region. |
+| `AZURE_AI_PROJECT_ID` | Secret | Full ARM resource ID ending in `/accounts/<account>/projects/<project>`. |
+| `FOUNDRY_PROJECT_ENDPOINT` | Secret | Existing project's HTTPS endpoint on `*.services.ai.azure.com`. |
+| `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Secret | Existing model deployment used for inference. |
+| `ISSUELENS_APP_ID` | Variable | Existing GitHub App registration variable, passed as runtime `GITHUB_APP_ID`. |
+| `ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Secret | Key Vault secret URI, passed as `GITHUB_APP_PRIVATE_KEY_SECRET_URI`, never PEM contents. |
+| `TOOLBOX_ENDPOINT` | Optional secret | Existing non-GitHub toolbox endpoint in this Foundry project. |
+| `MAILING_URL` | Optional secret | Secret-bearing Logic App email endpoint. |
+| `PERSONAL_NOTIFICATION_URL` | Optional secret | Secret-bearing Logic App Teams endpoint. |
+
+The existing `ISSUELENS_AGENT_URL` secret is an invocation endpoint, not the
+project-level `FOUNDRY_PROJECT_ENDPOINT`; these are not interchangeable.
+The App settings use an `ISSUELENS_` prefix because GitHub reserves `GITHUB_`
+configuration names. IssueLens uses `AZURE_AI_MODEL_DEPLOYMENT_NAME` instead of
+the quickstart's example `FOUNDRY_MODEL_NAME`. No App PEM or GitHub user token is
+passed to deployment. `.agentignore` controls the native code ZIP and excludes
+local credentials, azd state, and Git metadata.
+
+**Run, verify, and recover**
+
+Wait for `CI` on the intended default-branch commit, select **Actions > Deploy
+IssueLens to Foundry > Run workflow**, and approve the environment job. The
+workflow checks that azd's recorded version is `active`, then invokes both
+protocols in fresh version-bound sessions. Responses uses a plain-text prompt;
+Invocations uses IssueLens's `{"input": "..."}` payload, not the quickstart's
+generic `message` example. Both must complete with `ISSUELENS_DEPLOYMENT_OK`;
+CLI headings or merely non-empty output do not count as a successful reply.
+The fixed prompt requests no tools, repository access, wiki writes, or
+notifications. These are protocol/inference smoke checks, not proof of App,
+wiki, or notification access, nor a host-enforced tool-isolation mode.
+
+The job is limited to 40 minutes, the native deployment wait to 20 minutes, and
+each invocation to 120 seconds within a 3-minute step. The summary records the
+commit, logical GitHub environment, version, readiness, and protocol outcomes,
+not Azure identifiers or endpoints. Azure CLI account output is disabled;
+azd configuration/deployment output, readiness details, and raw agent responses
+stay in runner-local files, including on failure. The workflow never prints
+`azd env get-values` or uploads these files. Temporary files and `.azure` are
+removed after the run; abrupt termination also relies on hosted-runner disposal.
+
+No automatic retry or rollback is performed. A failed deployment or smoke
+check may occur **after publication**: inspect Foundry before another attempt.
+Recovery requires a reviewed fix/revert, successful CI, and separately
+authorized deployment with environment approval. Local validation does not
+establish live OIDC, RBAC, or hosted readiness. The configured GitHub-hosted
+runner needs network access to the target project; private-network targets
+require a separately approved runner/network arrangement.
+
+### Manual deployment with azd
+
+Once you've tested locally and explicitly authorized the deployment, deploy to
+Microsoft Foundry:
 
 ```bash
 # Provision Azure resources (skip if already done during local setup)
