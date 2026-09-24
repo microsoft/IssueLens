@@ -58,14 +58,18 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         })
         login = next(step for step in self.steps if step.get("uses", "").startswith("azure/login@"))
         self.assertEqual(login["with"], {
-            "client-id": "${{ vars.AZURE_CLIENT_ID }}",
-            "tenant-id": "${{ vars.AZURE_TENANT_ID }}",
-            "subscription-id": "${{ vars.AZURE_SUBSCRIPTION_ID }}",
+            "client-id": "${{ secrets.AZURE_CLIENT_ID }}",
+            "tenant-id": "${{ secrets.AZURE_TENANT_ID }}",
+            "subscription-id": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
         })
+        for filename in ("issue-triage.yml", "team-memory-post-merge.yml"):
+            caller = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
+            for reference in login["with"].values():
+                self.assertIn(reference, caller)
         configure = next(step for step in self.steps if "azd config set" in step.get("run", ""))
         self.assertIn("azd config set auth.useAzCliAuth true", configure["run"])
         self.assertIn('azd env new "$AZD_ENV_NAME"', configure["run"])
-        self.assertIn('azd env set --no-prompt -- "$name" "${!name}" >/dev/null', configure["run"])
+        self.assertIn('azd env set --no-prompt -- "$name" "${!name}" || exit 1', configure["run"])
         self.assertIn('[[ -n "${!name}" ]]', configure["run"])
         for name in ("AZURE_AI_MODEL_API_KEY", "MAILING_URL", "PERSONAL_NOTIFICATION_URL"):
             self.assertEqual(configure["env"][name], "${{ secrets." + name + " }}")
@@ -73,6 +77,22 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         for name in re.findall(r"\$\{([A-Z_]+)\}", str(manifest)):
             self.assertIn(name, configure["run"])
             self.assertIn(name, self.deploy["env"] | configure["env"])
+
+    def test_azure_configuration_uses_step_scoped_secrets_and_existing_app_variable(self):
+        self.assertEqual(self.deploy["env"], {"AZURE_CORE_OUTPUT": "none"})
+        self.assertEqual(re.findall(r"vars\.([A-Z_]+)", self.source), ["ISSUELENS_APP_ID"])
+        configure = next(step for step in self.steps if "azd config set" in step.get("run", ""))
+        for name in (
+            "AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID", "AZURE_LOCATION", "FOUNDRY_PROJECT_ENDPOINT",
+            "AZURE_AI_PROJECT_ID", "AZURE_AI_MODEL_DEPLOYMENT_NAME", "AZURE_AI_MODEL_API_KEY",
+            "TOOLBOX_ENDPOINT", "MAILING_URL", "PERSONAL_NOTIFICATION_URL",
+        ):
+            self.assertEqual(configure["env"][name], "${{ secrets." + name + " }}")
+        self.assertEqual(configure["env"]["GITHUB_APP_ID"], "${{ vars.ISSUELENS_APP_ID }}")
+        self.assertEqual(configure["env"]["GITHUB_APP_PRIVATE_KEY_SECRET_URI"],
+                         "${{ secrets.ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI }}")
+        self.assertIn('>"$RUNNER_TEMP/issuelens-configure.log" 2>&1', configure["run"])
+        self.assertIn("Details withheld.", configure["run"])
 
     def test_official_actions_and_bundle_are_pinned(self):
         for step in self.steps:
@@ -91,7 +111,10 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         self.assertEqual(self.deploy["timeout-minutes"], "40")
         self.assertEqual(self.deploy["runs-on"], "ubuntu-24.04")
         deploy = next(step for step in self.steps if step.get("id") == "deploy")
-        self.assertEqual(deploy["run"], 'azd deploy IssueLens --environment "$AZD_ENV_NAME" --no-prompt --timeout 1200')
+        self.assertTrue(deploy["run"].startswith(
+            'azd deploy IssueLens --environment "$AZD_ENV_NAME" --no-prompt --timeout 1200 >'))
+        self.assertIn('>"$RUNNER_TEMP/issuelens-deploy.log" 2>&1', deploy["run"])
+        self.assertIn("exit 1", deploy["run"])
         self.assertEqual(deploy["timeout-minutes"], "25")
         for step in self.steps:
             self.assertNotIn("continue-on-error", step)
@@ -125,7 +148,12 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         self.assertEqual(cleanup["if"], "always()")
         self.assertIn("GITHUB_STEP_SUMMARY", summary["run"])
         self.assertIn("No automatic retry or rollback", summary["run"])
+        self.assertIn('"$AZD_ENV_NAME"', summary["run"])
+        for name in ("FOUNDRY_PROJECT_ENDPOINT", "AZURE_AI_PROJECT_ID", "AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID"):
+            self.assertNotIn(name, summary["run"])
         self.assertIn("rm -rf -- .azure", cleanup["run"])
+        for name in ("issuelens-configure.log", "issuelens-deploy.log", "issuelens-status-errors.txt"):
+            self.assertIn(name, cleanup["run"])
         self.assertNotIn("upload-artifact", self.source)
         self.assertNotIn("azd env get-values", self.commands)
         self.assertNotIn("cat ", self.commands)

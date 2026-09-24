@@ -38,12 +38,7 @@ jobs:
       actions: read
       id-token: write
     env:
-      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
-      AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
-      FOUNDRY_PROJECT_ENDPOINT: ${{ vars.FOUNDRY_PROJECT_ENDPOINT }}
-      AZURE_AI_PROJECT_ID: ${{ vars.AZURE_AI_PROJECT_ID }}
-      AZURE_AI_MODEL_DEPLOYMENT_NAME: ${{ vars.AZURE_AI_MODEL_DEPLOYMENT_NAME }}
+      AZURE_CORE_OUTPUT: none
     steps:
       - name: Checkout the approved commit
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -76,15 +71,21 @@ jobs:
       - name: Azure login with OIDC
         uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
         with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       - name: Configure azd authentication and deployment environment
         env:
-          GITHUB_APP_ID: ${{ vars.ISSUELENS_GITHUB_APP_ID }}
-          GITHUB_APP_PRIVATE_KEY_SECRET_URI: ${{ vars.ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_LOCATION: ${{ secrets.AZURE_LOCATION }}
+          FOUNDRY_PROJECT_ENDPOINT: ${{ secrets.FOUNDRY_PROJECT_ENDPOINT }}
+          AZURE_AI_PROJECT_ID: ${{ secrets.AZURE_AI_PROJECT_ID }}
+          AZURE_AI_MODEL_DEPLOYMENT_NAME: ${{ secrets.AZURE_AI_MODEL_DEPLOYMENT_NAME }}
+          GITHUB_APP_ID: ${{ vars.ISSUELENS_APP_ID }}
+          GITHUB_APP_PRIVATE_KEY_SECRET_URI: ${{ secrets.ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI }}
           AZURE_AI_MODEL_API_KEY: ${{ secrets.AZURE_AI_MODEL_API_KEY }}
-          TOOLBOX_ENDPOINT: ${{ vars.TOOLBOX_ENDPOINT }}
+          TOOLBOX_ENDPOINT: ${{ secrets.TOOLBOX_ENDPOINT }}
           MAILING_URL: ${{ secrets.MAILING_URL }}
           PERSONAL_NOTIFICATION_URL: ${{ secrets.PERSONAL_NOTIFICATION_URL }}
         run: |
@@ -93,24 +94,32 @@ jobs:
           for name in "${required[@]}"; do
             [[ -n "${!name}" ]] || { echo "::error::Missing environment configuration: $name"; exit 1; }
           done
-          azd config set auth.useAzCliAuth true
-          azd env new "$AZD_ENV_NAME" --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt
-          for name in "${required[@]}" AZURE_AI_MODEL_API_KEY TOOLBOX_ENDPOINT MAILING_URL PERSONAL_NOTIFICATION_URL; do
-            azd env set --no-prompt -- "$name" "${!name}" >/dev/null
-          done
+          (
+            azd config set auth.useAzCliAuth true &&
+            azd env new "$AZD_ENV_NAME" --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt &&
+            for name in "${required[@]}" AZURE_AI_MODEL_API_KEY TOOLBOX_ENDPOINT MAILING_URL PERSONAL_NOTIFICATION_URL; do
+              azd env set --no-prompt -- "$name" "${!name}" || exit 1
+            done
+          ) >"$RUNNER_TEMP/issuelens-configure.log" 2>&1 ||
+            { echo "::error::Azure configuration failed; check the deployment secrets. Details withheld."; exit 1; }
       - name: Deploy agent
         id: deploy
         timeout-minutes: 25
-        run: azd deploy IssueLens --environment "$AZD_ENV_NAME" --no-prompt --timeout 1200
+        run: |
+          azd deploy IssueLens --environment "$AZD_ENV_NAME" --no-prompt --timeout 1200 >"$RUNNER_TEMP/issuelens-deploy.log" 2>&1 ||
+            { echo "::error::Foundry deployment failed; inspect Foundry before retrying. Details withheld."; exit 1; }
       - name: Check the deployed agent status
         id: status
         run: |
-          version="$(azd env get-value AGENT_ISSUELENS_VERSION --environment "$AZD_ENV_NAME")"
-          azd ai agent show IssueLens --environment "$AZD_ENV_NAME" --output json --no-prompt >"$RUNNER_TEMP/issuelens-agent.json"
+          version="$(azd env get-value AGENT_ISSUELENS_VERSION --environment "$AZD_ENV_NAME" 2>"$RUNNER_TEMP/issuelens-status-errors.txt")" ||
+            { echo "::error::Could not read the deployed version. Details withheld."; exit 1; }
+          azd ai agent show IssueLens --environment "$AZD_ENV_NAME" --output json --no-prompt \
+            >"$RUNNER_TEMP/issuelens-agent.json" 2>"$RUNNER_TEMP/issuelens-status-errors.txt" ||
+            { echo "::error::Could not read agent readiness. Details withheld."; exit 1; }
           jq -e --arg version "$version" '
             .name == "IssueLens" and .version == $version and .status == "active" and
             ($version | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$") and . != "latest")
-          ' "$RUNNER_TEMP/issuelens-agent.json" >/dev/null ||
+          ' "$RUNNER_TEMP/issuelens-agent.json" >/dev/null 2>"$RUNNER_TEMP/issuelens-status-errors.txt" ||
             { echo "::error::The expected IssueLens version is not active; inspect Foundry before retrying."; exit 1; }
           echo "version=$version" >>"$GITHUB_OUTPUT"
       - name: Smoke-test responses
@@ -167,8 +176,8 @@ jobs:
           INVOCATIONS_RESULT: ${{ steps.invocations.outcome }}
         run: |
           {
-            printf '## IssueLens Foundry deployment\n\nCommit: `%s`\n\nTarget: `%s`\n\nVersion: `%s`\n\n' \
-              "$GITHUB_SHA" "$FOUNDRY_PROJECT_ENDPOINT" "${AGENT_VERSION:-not recorded}"
+            printf '## IssueLens Foundry deployment\n\nCommit: `%s`\n\nEnvironment: `%s`\n\nVersion: `%s`\n\n' \
+              "$GITHUB_SHA" "$AZD_ENV_NAME" "${AGENT_VERSION:-not recorded}"
             printf 'Deploy: %s; readiness: %s; responses: %s; invocations: %s.\n\n' \
               "$DEPLOY_RESULT" "$STATUS_RESULT" "$RESPONSES_RESULT" "$INVOCATIONS_RESULT"
             echo 'A version may already exist if deployment or verification fails. No automatic retry or rollback is performed.'
@@ -178,4 +187,5 @@ jobs:
         run: |
           rm -rf -- .azure
           rm -f -- "$RUNNER_TEMP/issuelens-agent.json" "$RUNNER_TEMP/issuelens-payload.json" \
-            "$RUNNER_TEMP/issuelens-responses.txt" "$RUNNER_TEMP/issuelens-invocations.txt" "$RUNNER_TEMP/issuelens-smoke-errors.txt"
+            "$RUNNER_TEMP/issuelens-responses.txt" "$RUNNER_TEMP/issuelens-invocations.txt" "$RUNNER_TEMP/issuelens-smoke-errors.txt" \
+            "$RUNNER_TEMP/issuelens-configure.log" "$RUNNER_TEMP/issuelens-deploy.log" "$RUNNER_TEMP/issuelens-status-errors.txt"
