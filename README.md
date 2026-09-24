@@ -1027,8 +1027,11 @@ exist, as required by the quickstart. An administrator must create
 `foundry-production` with required reviewers, prevent self-review, disable
 administrator bypass, and allow only the exact default branch (`main`), not tags.
 
-Use a **dedicated deployment identity**, not the existing invocation identity.
-Configure Azure OIDC with issuer `https://token.actions.githubusercontent.com`,
+The workflow reuses the repository's existing Azure ID secret names. Reusing
+their names does not grant deployment permissions: if the existing identity is
+invocation-only, override the same secrets in `foundry-production` with a
+**dedicated deployment identity**, rather than expanding the invocation identity's
+permissions. Configure Azure OIDC with issuer `https://token.actions.githubusercontent.com`,
 audience `api://AzureADTokenExchange`, and subject
 `repo:microsoft/IssueLens:environment:foundry-production`. The referenced CI/CD
 guide specifies **Foundry User** plus **Contributor** on the target project for
@@ -1037,27 +1040,32 @@ assignments and initial provisioning are separate administrator operations.
 The hosted runtime identity, not the deployer, needs **Key Vault Secrets User**
 on the App-key secret and appropriate model access when no API key is supplied.
 
-Set the following **environment-scoped** configuration. Azure identity IDs are
-non-secret variables, following the official guide; actual credentials and
-secret-bearing notification URLs remain secrets:
+The existing repository secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID`, and variable `ISSUELENS_APP_ID`, are reused directly.
+Store additional deployment-only settings as **environment-scoped secrets** in
+`foundry-production`. Same-named environment secrets override repository secrets.
+Unlike the quickstart's variables, all Azure configuration is kept in secrets
+to avoid exposing infrastructure details:
 
 | Name | Storage | Purpose |
 | --- | --- | --- |
-| `AZURE_CLIENT_ID` | Variable | Dedicated deployment identity's client ID. |
-| `AZURE_TENANT_ID` | Variable | Its Azure tenant ID. |
-| `AZURE_SUBSCRIPTION_ID` | Variable | Subscription containing the existing project. |
-| `AZURE_LOCATION` | Variable | Existing project's location, such as `eastus`. |
-| `AZURE_AI_PROJECT_ID` | Variable | Full ARM resource ID ending in `/accounts/<account>/projects/<project>`. |
-| `FOUNDRY_PROJECT_ENDPOINT` | Variable | Existing project's HTTPS endpoint on `*.services.ai.azure.com`. |
-| `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Variable | Existing model deployment used for inference. |
+| `AZURE_CLIENT_ID` | Secret | Existing Azure identity secret; override for a deployment-specific identity if needed. |
+| `AZURE_TENANT_ID` | Secret | Existing Azure tenant secret. |
+| `AZURE_SUBSCRIPTION_ID` | Secret | Existing subscription secret. |
+| `AZURE_LOCATION` | Secret | Existing project's Azure region. |
+| `AZURE_AI_PROJECT_ID` | Secret | Full ARM resource ID ending in `/accounts/<account>/projects/<project>`. |
+| `FOUNDRY_PROJECT_ENDPOINT` | Secret | Existing project's HTTPS endpoint on `*.services.ai.azure.com`. |
+| `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Secret | Existing model deployment used for inference. |
 | `AZURE_AI_MODEL_API_KEY` | Optional secret | Model key; omit for runtime managed-identity authentication. |
-| `ISSUELENS_GITHUB_APP_ID` | Variable | IssueLens App registration ID, passed as runtime `GITHUB_APP_ID`. |
-| `ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Variable | Key Vault secret URI, passed as `GITHUB_APP_PRIVATE_KEY_SECRET_URI`, never PEM contents. |
-| `TOOLBOX_ENDPOINT` | Optional variable | Existing non-GitHub toolbox endpoint in this Foundry project. |
+| `ISSUELENS_APP_ID` | Variable | Existing GitHub App registration variable, passed as runtime `GITHUB_APP_ID`. |
+| `ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Secret | Key Vault secret URI, passed as `GITHUB_APP_PRIVATE_KEY_SECRET_URI`, never PEM contents. |
+| `TOOLBOX_ENDPOINT` | Optional secret | Existing non-GitHub toolbox endpoint in this Foundry project. |
 | `MAILING_URL` | Optional secret | Secret-bearing Logic App email endpoint. |
 | `PERSONAL_NOTIFICATION_URL` | Optional secret | Secret-bearing Logic App Teams endpoint. |
 
-The App variables use an `ISSUELENS_` prefix because GitHub reserves `GITHUB_`
+The existing `ISSUELENS_AGENT_URL` secret is an invocation endpoint, not the
+project-level `FOUNDRY_PROJECT_ENDPOINT`; these are not interchangeable.
+The App settings use an `ISSUELENS_` prefix because GitHub reserves `GITHUB_`
 configuration names. IssueLens uses `AZURE_AI_MODEL_DEPLOYMENT_NAME` instead of
 the quickstart's example `FOUNDRY_MODEL_NAME`. No App PEM or GitHub user token is
 passed to deployment. `.agentignore` controls the native code ZIP and excludes
@@ -1078,9 +1086,12 @@ wiki, or notification access, nor a host-enforced tool-isolation mode.
 
 The job is limited to 40 minutes, the native deployment wait to 20 minutes, and
 each invocation to 120 seconds within a 3-minute step. The summary records the
-commit, target, version, readiness, and protocol outcomes. Unlike the sample,
-the workflow never prints `azd env get-values`, deployed definitions, or raw
-agent responses; temporary files and `.azure` are removed after the run.
+commit, logical GitHub environment, version, readiness, and protocol outcomes,
+not Azure identifiers or endpoints. Azure CLI account output is disabled;
+azd configuration/deployment output, readiness details, and raw agent responses
+stay in runner-local files, including on failure. The workflow never prints
+`azd env get-values` or uploads these files. Temporary files and `.azure` are
+removed after the run; abrupt termination also relies on hosted-runner disposal.
 
 No automatic retry or rollback is performed. A failed deployment or smoke
 check may occur **after publication**: inspect Foundry before another attempt.
