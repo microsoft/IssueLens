@@ -160,7 +160,7 @@ class CIWorkflowTests(unittest.TestCase):
 
     def test_validation_tools_and_commands_are_documented(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        syntax = "python -m compileall -q *.py .github/actions/issuelens .github/scripts github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests"
+        syntax = "python -m compileall -q *.py .github/actions/issuelens github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests"
         self.assertIn(syntax, self.commands("application-tests"))
         self.assertIn(syntax, readme)
         lint = self.commands("workflow-validation")

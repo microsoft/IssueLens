@@ -666,7 +666,7 @@ formatting, types, or style.
 python3.13 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt -r requirements-ci.txt
-python -m compileall -q *.py .github/actions/issuelens .github/scripts github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
+python -m compileall -q *.py .github/actions/issuelens github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
@@ -1001,65 +1001,54 @@ option only when the Foundry endpoint is absent.
 
 ## Deploying the Agent to Microsoft Foundry
 
-### Approval-gated GitHub Actions deployment
+### GitHub Actions deployment
 
-[`Deploy IssueLens to Foundry`](.github/workflows/deploy-foundry.yml) deploys the
-existing `IssueLens` agent to an existing Foundry project. It is **manual only**:
-merging a PR or pushing to `main` never deploys an agent. No live deployment,
-resource provisioning, permission changes, or rollback is authorized by adding
-this workflow.
+[`Deploy IssueLens to Foundry`](.github/workflows/deploy-foundry.yml) follows
+Microsoft's [Set up CI/CD for a hosted agent](https://learn.microsoft.com/en-us/azure/foundry/agents/quickstarts/set-up-cicd-hosted-agent):
+install `azd` and `microsoft.foundry`, log in with Azure OIDC, configure the azd
+environment, run `azd deploy`, inspect status, and invoke the agent.
+It uses the existing repository-root `azure.yaml` Python 3.13 ZIP/remote-build
+service directly, without a custom deployment helper or packaging hook.
+Actions are commit-pinned; azd is **1.34.2** and the Foundry bundle is
+**1.0.0-beta.2**, which installs its compatible component dependencies.
 
-The workflow uses the official [`Azure/setup-azd`](https://github.com/Azure/setup-azd)
-and [`azure/login`](https://github.com/Azure/login) actions, pinned to commit
-SHAs. Azure Developer CLI is pinned to **1.34.2** and the hosted-agent component
-of the `microsoft.foundry` bundle, `azure.ai.agents`, to **1.0.0-beta.16**. Only
-that provider is installed; deployment does not need the bundle's editor,
-project-provisioning, or toolbox-management extensions. The existing
-`azure.yaml` Python 3.13 ZIP/remote-build service remains the deployment source
-of truth.
+Unlike the quickstart's push trigger, this workflow is **manual only**, restricted
+to this repository's default branch, and requires approval through the fixed
+**`foundry-production`** environment. It checks required reviewers, disabled
+self-review/bypass, and a successful push-CI run for the exact dispatched SHA
+before Azure login. Deployments are serialized without cancelling an active
+publication. No live deployment, provisioning, or permission change is
+authorized by creating or merging the workflow.
 
-**One-time administrator setup**
+**One-time setup**
 
-Create the dedicated GitHub environment **`foundry-production`**. Do not reuse
-the `copilot` environment. Configure required human reviewers, prevent
-self-review, disable administrator protection bypass, and select **only the
-exact default branch** (`main`), with no tag rules. The preflight checks these
-settings through GitHub's API and fails closed if they are missing,
-inaccessible, or broader than this policy. It does not create or repair them.
+The Foundry project, model deployment, and `IssueLens` hosted agent must already
+exist, as required by the quickstart. An administrator must create
+`foundry-production` with required reviewers, prevent self-review, disable
+administrator bypass, and allow only the exact default branch (`main`), not tags.
 
-Create a dedicated Azure OIDC deployment identity with a federated credential
-whose subject is
-`repo:microsoft/IssueLens:environment:foundry-production`, issuer is
-`https://token.actions.githubusercontent.com`, and audience is
-`api://AzureADTokenExchange`. The environment's branch policy supplies the
-branch restriction; an environment-scoped OIDC subject does not encode a branch.
-Do not expand the permissions of the existing issue-loop invocation identity.
+Use a **dedicated deployment identity**, not the existing invocation identity.
+Configure Azure OIDC with issuer `https://token.actions.githubusercontent.com`,
+audience `api://AzureADTokenExchange`, and subject
+`repo:microsoft/IssueLens:environment:foundry-production`. The referenced CI/CD
+guide specifies **Foundry User** plus **Contributor** on the target project for
+code deployment; use an approved narrower equivalent where available. Role
+assignments and initial provisioning are separate administrator operations.
+The hosted runtime identity, not the deployer, needs **Key Vault Secrets User**
+on the App-key secret and appropriate model access when no API key is supplied.
 
-For deployment to the already initialized project, the
-[source-code deployment guide](https://learn.microsoft.com/azure/foundry/agents/how-to/deploy-hosted-agent-code#required-permissions)
-documents **Foundry Project Manager** (formerly Azure AI Project Manager) at
-project scope. Prefer an organization-approved narrower deployment role where
-available, covering existing-project reads, agent version updates, and smoke
-invocations rather than subscription-wide access. Consult the
-[hosted-agent permissions reference](https://learn.microsoft.com/azure/foundry/agents/concepts/hosted-agent-permissions)
-for the current platform requirements. Initial provisioning and any runtime
-role assignments are separate administrator operations, not workflow steps.
-The deployment identity must not receive the App private key or Key Vault
-secret-read permissions just to deploy. The **hosted runtime identity** still
-needs **Key Vault Secrets User** on the App-key secret and, when the model API
-key is omitted, the appropriate model data-plane access. Notification and
-toolbox permissions also remain runtime concerns.
-
-Set these values **on the protected environment**, not through dispatch inputs:
+Set the following **environment-scoped** configuration. Azure identity IDs are
+non-secret variables, following the official guide; actual credentials and
+secret-bearing notification URLs remain secrets:
 
 | Name | Storage | Purpose |
 | --- | --- | --- |
-| `ISSUELENS_DEPLOY_AZURE_CLIENT_ID` | Secret | Dedicated deployment identity's client ID. |
-| `ISSUELENS_DEPLOY_AZURE_TENANT_ID` | Secret | Its Azure tenant ID. |
-| `ISSUELENS_DEPLOY_AZURE_SUBSCRIPTION_ID` | Secret | Subscription containing the existing project. |
+| `AZURE_CLIENT_ID` | Variable | Dedicated deployment identity's client ID. |
+| `AZURE_TENANT_ID` | Variable | Its Azure tenant ID. |
+| `AZURE_SUBSCRIPTION_ID` | Variable | Subscription containing the existing project. |
 | `AZURE_LOCATION` | Variable | Existing project's location, such as `eastus`. |
 | `AZURE_AI_PROJECT_ID` | Variable | Full ARM resource ID ending in `/accounts/<account>/projects/<project>`. |
-| `FOUNDRY_PROJECT_ENDPOINT` | Variable | Exact HTTPS project endpoint, without a trailing slash, on `*.services.ai.azure.com`. |
+| `FOUNDRY_PROJECT_ENDPOINT` | Variable | Existing project's HTTPS endpoint on `*.services.ai.azure.com`. |
 | `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Variable | Existing model deployment used for inference. |
 | `AZURE_AI_MODEL_API_KEY` | Optional secret | Model key; omit for runtime managed-identity authentication. |
 | `ISSUELENS_GITHUB_APP_ID` | Variable | IssueLens App registration ID, passed as runtime `GITHUB_APP_ID`. |
@@ -1068,75 +1057,38 @@ Set these values **on the protected environment**, not through dispatch inputs:
 | `MAILING_URL` | Optional secret | Secret-bearing Logic App email endpoint. |
 | `PERSONAL_NOTIFICATION_URL` | Optional secret | Secret-bearing Logic App Teams endpoint. |
 
-The workflow uses a fresh runner-local azd environment named
-`foundry-production`. It checks the logged-in tenant/subscription, the project's
-returned ID/location/endpoints, and the existing `IssueLens` agent before
-publication. It does not run `azd init`, `azd up`, `azd provision`, or role
-assignment commands. The hosted platform still injects its runtime
-`FOUNDRY_PROJECT_ENDPOINT`; the workflow value binds the deployment tooling to
-that same project. Missing optional capabilities stay disabled.
-The App settings use an `ISSUELENS_` prefix in GitHub because configuration
-variable names cannot begin with GitHub's reserved `GITHUB_` prefix.
+The App variables use an `ISSUELENS_` prefix because GitHub reserves `GITHUB_`
+configuration names. IssueLens uses `AZURE_AI_MODEL_DEPLOYMENT_NAME` instead of
+the quickstart's example `FOUNDRY_MODEL_NAME`. No App PEM or GitHub user token is
+passed to deployment. `.agentignore` controls the native code ZIP and excludes
+local credentials, azd state, and Git metadata.
 
-**Running and inspecting a deployment**
+**Run, verify, and recover**
 
-Wait for the existing `CI` workflow to succeed on the default-branch commit,
-then select **Actions > Deploy IssueLens to Foundry > Run workflow**, leaving
-the branch set to the default branch. Preflight requires the latest applicable
-push-CI run/attempt for that exact SHA and all six CI jobs to have succeeded;
-missing, running, skipped, failed, or inaccessible checks block deployment.
-Reviewers approve the environment job for that commit. After approval, the
-workflow rechecks CI, ancestry, and environment protections without switching
-to a newer branch tip. Dispatches are serialized per target and never cancel
-an in-progress publication. GitHub concurrency may replace a pending run with
-a newer pending run; it is not a FIFO deployment queue.
+Wait for `CI` on the intended default-branch commit, select **Actions > Deploy
+IssueLens to Foundry > Run workflow**, and approve the environment job. The
+workflow checks that azd's recorded version is `active`, then invokes both
+protocols in fresh version-bound sessions. Responses uses a plain-text prompt;
+Invocations uses IssueLens's `{"input": "..."}` payload, not the quickstart's
+generic `message` example. Both must complete with `ISSUELENS_DEPLOYMENT_OK`;
+CLI headings or merely non-empty output do not count as a successful reply.
+The fixed prompt requests no tools, repository access, wiki writes, or
+notifications. These are protocol/inference smoke checks, not proof of App,
+wiki, or notification access, nor a host-enforced tool-isolation mode.
 
-Publication uses the provider's native `azd deploy` lifecycle. A CI-only service
-`postpackage` hook inspects the single `azd-code-deploy-*.zip` in an isolated
-temporary directory **before upload**. It verifies tracked runtime content,
-prompts, skills, schemas, and MCP sources, and rejects local credentials/state,
-unsafe archive entries, and configured secrets. `.agentignore` controls this
-ZIP; `.azdignore` controls template initialization, not this upload. The hook is
-inactive for ordinary local deployments. Do not replace this with
-`azd deploy --from-package`: the pinned core CLI does not preserve the
-Foundry provider's required `code-zip` artifact metadata on that path.
+The job is limited to 40 minutes, the native deployment wait to 20 minutes, and
+each invocation to 120 seconds within a 3-minute step. The summary records the
+commit, target, version, readiness, and protocol outcomes. Unlike the sample,
+the workflow never prints `azd env get-values`, deployed definitions, or raw
+agent responses; temporary files and `.azure` are removed after the run.
 
-After publication, the workflow verifies the concrete agent version recorded
-by azd, waits for `active`, and invokes **both protocols in fresh sessions bound
-to that version**. The fixed, non-empty smoke prompt requests only
-`ISSUELENS_DEPLOYMENT_OK` and authorizes no repository, tool use, wiki update, or
-notification. HTTP success, an empty-input greeting, an incomplete stream, or
-an error message in a completed stream does not pass. Smoke checks establish
-basic protocol/inference readiness, **not** GitHub App token access, wiki
-publication, or notification delivery; they do not introduce a new
-host-enforced tool-isolation mode.
-
-The job summary records the source SHA, target, ZIP digest, agent version, and
-per-protocol outcome. Raw agent output, azd environment dumps, deployed
-definitions, and credential-bearing CLI diagnostics are withheld and are not
-uploaded as artifacts. Runner-local `.azure` configuration and deployment
-scratch files are removed in an always-run cleanup step; abrupt runner
-termination also relies on hosted-runner disposal.
-The preflight job is limited to 5 minutes and the approved job to 40 minutes,
-with a 20-minute deployment wait and bounded readiness/smoke requests.
-
-**Failure and recovery**
-
-No automatic retry or rollback is performed. An azd timeout or failed
-post-deployment verification may occur **after a version has been created**;
-the summary preserves that uncertainty rather than claiming that no write
-occurred. Inspect the target agent/version and Foundry deployment logs before
-requesting another run. Do not paste secret-bearing diagnostic output into
-public issues or Actions summaries.
-
-Recover source changes through a reviewed revert/fix PR, wait for CI on the
-new default-branch SHA, and separately authorize another manual deployment and
-environment approval. Any direct Foundry version rollback likewise requires
-separate human authorization. Local mocked tests and workflow lint do not
-establish live OIDC federation, Azure permissions, network reachability, or
-successful hosted deployment. This workflow targets Azure public cloud;
-private-network projects additionally need an approved runner with network
-access before activation.
+No automatic retry or rollback is performed. A failed deployment or smoke
+check may occur **after publication**: inspect Foundry before another attempt.
+Recovery requires a reviewed fix/revert, successful CI, and separately
+authorized deployment with environment approval. Local validation does not
+establish live OIDC, RBAC, or hosted readiness. The configured GitHub-hosted
+runner needs network access to the target project; private-network targets
+require a separately approved runner/network arrangement.
 
 ### Manual deployment with azd
 
