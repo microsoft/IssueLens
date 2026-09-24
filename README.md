@@ -988,7 +988,7 @@ project-level model data-plane access, such as **Foundry User** or an approved
 narrower custom role. ARM **Contributor** alone is not model authorization.
 
 **Migration and diagnosis:** `AZURE_AI_MODEL_API_KEY` is no longer read for
-authentication, passed by deployment manifests, or forwarded to the
+authentication, passed by the deployment workflow/manifests, or forwarded to the
 Copilot child process. A stale value cannot enable key authentication. Remove
 obsolete values from local configuration and deployment secret stores through
 your normal approved process; changing this code neither deletes existing
@@ -1037,8 +1037,9 @@ audience `api://AzureADTokenExchange`, and subject
 guide specifies **Foundry User** plus **Contributor** on the target project for
 code deployment; use an approved narrower equivalent where available. Role
 assignments and initial provisioning are separate administrator operations.
-The hosted runtime identity, not the deployer, needs **Key Vault Secrets User**
-on the App-key secret and appropriate model access when no API key is supplied.
+The hosted agent runtime identity, not the deployer, needs **Key Vault Secrets User**
+on the App-key secret. Model inference always uses Entra authentication with the
+runtime/project identity responsibilities [described above](#using-your-own-foundry-model).
 
 The existing repository secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
 `AZURE_SUBSCRIPTION_ID`, and variable `ISSUELENS_APP_ID`, are reused directly.
@@ -1056,7 +1057,6 @@ to avoid exposing infrastructure details:
 | `AZURE_AI_PROJECT_ID` | Secret | Full ARM resource ID ending in `/accounts/<account>/projects/<project>`. |
 | `FOUNDRY_PROJECT_ENDPOINT` | Secret | Existing project's HTTPS endpoint on `*.services.ai.azure.com`. |
 | `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Secret | Existing model deployment used for inference. |
-| `AZURE_AI_MODEL_API_KEY` | Optional secret | Model key; omit for runtime managed-identity authentication. |
 | `ISSUELENS_APP_ID` | Variable | Existing GitHub App registration variable, passed as runtime `GITHUB_APP_ID`. |
 | `ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Secret | Key Vault secret URI, passed as `GITHUB_APP_PRIVATE_KEY_SECRET_URI`, never PEM contents. |
 | `TOOLBOX_ENDPOINT` | Optional secret | Existing non-GitHub toolbox endpoint in this Foundry project. |
