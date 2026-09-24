@@ -13,6 +13,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
+import yaml
 from azure.ai.agentserver.responses import (
     CreateResponse,
     PlatformContext,
@@ -1299,6 +1300,22 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.addAsyncCleanup(self.host._close_model_credential)
         return credential, factory
+
+    def test_model_manifests_do_not_forward_keys_or_deployer_credentials(self):
+        for filename, key in (("azure.yaml", "environmentVariables"),
+                              ("agent.yaml", "environment_variables")):
+            with self.subTest(manifest=filename):
+                manifest = yaml.load(
+                    (ROOT / filename).read_text(encoding="utf-8"), Loader=yaml.BaseLoader,
+                )
+                service = manifest["services"]["IssueLens"] if filename == "azure.yaml" else manifest
+                names = {item["name"] for item in service[key]}
+                self.assertIn("AZURE_AI_MODEL_DEPLOYMENT_NAME", names)
+                self.assertTrue(names.isdisjoint({
+                    "AZURE_AI_MODEL_API_KEY", "AZURE_CLIENT_ID", "AZURE_TENANT_ID",
+                    "AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PATH",
+                    "AZURE_FEDERATED_TOKEN_FILE", "GITHUB_TOKEN",
+                }))
 
     def test_foundry_provider_ignores_keys_and_registers_lazy_bearer_callback(self):
         _, factory = self.configure_foundry()
