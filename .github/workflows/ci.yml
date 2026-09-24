@@ -36,7 +36,7 @@ jobs:
       - name: Install application and test dependencies
         run: python -m pip install -r requirements.txt -r requirements-ci.txt
       - name: Validate Python syntax
-        run: python -m compileall -q *.py .github/actions/issuelens github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
+        run: python -m compileall -q *.py .github/actions/issuelens .github/scripts github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
       - name: Run application tests
         run: python -m unittest discover -s tests -p 'test_*.py' -v
 
