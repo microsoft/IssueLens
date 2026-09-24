@@ -27,9 +27,10 @@ request-local clients and never return credentials to the model.
 Model (inference) auth is selected automatically:
 
 * FOUNDRY_PROJECT_ENDPOINT + AZURE_AI_MODEL_DEPLOYMENT_NAME set
-      → BYOK Foundry model. Uses AZURE_AI_MODEL_API_KEY when set (key auth),
-        otherwise a Managed Identity token via DefaultAzureCredential.
-* GITHUB_TOKEN set → GitHub Copilot model.
+      → BYOK Foundry model using Microsoft Entra bearer tokens from
+        DefaultAzureCredential (the platform-provided identity when hosted).
+* FOUNDRY_PROJECT_ENDPOINT absent + GITHUB_TOKEN set → GitHub Copilot model.
+  An incomplete Foundry configuration or token failure never changes backends.
 
 Notifications are delivered by in-process function tools — ``send-email`` and
 ``send-teams-notification`` — that POST to Logic App HTTP endpoints
@@ -47,6 +48,7 @@ import time
 
 import httpx
 from azure.core.credentials import AccessToken
+from azure.core.exceptions import AzureError
 from dotenv import load_dotenv
 from opentelemetry.instrumentation.utils import suppress_instrumentation
 from starlette.requests import Request
@@ -61,7 +63,7 @@ from azure.ai.agentserver.responses import (
     ResponsesAgentServerHost,
 )
 from copilot import CopilotClient, PermissionHandler, ProviderConfig
-from copilot.session import CustomAgentConfig
+from copilot.session import CustomAgentConfig, ProviderTokenArgs
 from copilot.session_events import (
     AssistantMessageDeltaData,
     SessionEventType,
@@ -236,6 +238,39 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
 
 # ── BYOK helpers ─────────────────────────────────────────────────────────────
 
+_MODEL_SCOPE = "https://ai.azure.com/.default"
+_TOKEN_REFRESH_MARGIN_SECONDS = 300
+_model_token: AccessToken | None = None
+_model_token_lock = asyncio.Lock()
+
+
+class FoundryModelError(RuntimeError):
+    """A model configuration/authentication failure safe to surface to callers."""
+
+
+async def _model_bearer(_args: ProviderTokenArgs | None = None) -> str:
+    """Resolve a token per model request, including within resumed sessions."""
+    global _model_token
+    async with _model_token_lock:
+        if (
+            _model_token is None
+            or _model_token.expires_on - time.time() < _TOKEN_REFRESH_MARGIN_SECONDS
+        ):
+            from azure.identity.aio import DefaultAzureCredential
+
+            try:
+                with suppress_instrumentation():
+                    async with DefaultAzureCredential() as credential:
+                        _model_token = await credential.get_token(_MODEL_SCOPE)
+            except (AzureError, ValueError):
+                logger.warning("Foundry model Microsoft Entra token acquisition failed")
+                raise FoundryModelError(
+                    "Could not authenticate to the Foundry model with Microsoft Entra. "
+                    "Check the runtime identity credentials; API-key and GitHub "
+                    "model fallback are disabled."
+                ) from None
+        return _model_token.token
+
 
 def _byok_provider() -> tuple[ProviderConfig | None, str | None]:
     """Return (provider, model) for BYOK mode, or (None, None) for Copilot mode.
@@ -243,38 +278,24 @@ def _byok_provider() -> tuple[ProviderConfig | None, str | None]:
     Uses the FOUNDRY_PROJECT_ENDPOINT directly as a project-level OpenAI
     endpoint (e.g. https://<resource>.services.ai.azure.com/api/projects/<proj>/openai/v1).
 
-    Model auth precedence:
-
-    1. ``AZURE_AI_MODEL_API_KEY`` set → key auth (``api-key`` header). No Azure
-       identity/RBAC needed; requires the account to allow local (key) auth.
-    2. Otherwise → a Managed Identity bearer token via ``DefaultAzureCredential``
-       (requires the runtime identity to have model data-plane access).
+    The SDK requests a bearer token before each outbound model request. Never
+    serialize a static credential into session configuration or use model keys.
     """
-    endpoint = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "")
-    model = os.environ.get("AZURE_AI_MODEL_DEPLOYMENT_NAME", "")
-    if not endpoint or not model:
+    endpoint = os.environ.get("FOUNDRY_PROJECT_ENDPOINT", "").strip()
+    if not endpoint:
         return None, None
-
-    api_key = os.environ.get("AZURE_AI_MODEL_API_KEY", "")
-    if api_key:
-        provider = ProviderConfig(
-            type="azure",
-            base_url=endpoint,
-            wire_api="responses",
-            api_key=api_key,
+    model = os.environ.get("AZURE_AI_MODEL_DEPLOYMENT_NAME", "").strip()
+    if not model:
+        raise FoundryModelError(
+            "AZURE_AI_MODEL_DEPLOYMENT_NAME is required when "
+            "FOUNDRY_PROJECT_ENDPOINT is set; GitHub model fallback is disabled."
         )
-        return provider, model
-
-    from azure.identity import DefaultAzureCredential
-    token = DefaultAzureCredential().get_token(
-        "https://ai.azure.com/.default"
-    ).token
 
     provider = ProviderConfig(
         type="azure",
         base_url=endpoint,
         wire_api="responses",
-        bearer_token=token,
+        bearer_token_provider=_model_bearer,
     )
     return provider, model
 
@@ -317,11 +338,15 @@ async def _ensure_client() -> CopilotClient:
     """Start the shared Copilot runtime client once (lazy)."""
     global _client
     async with _client_lock:
+        provider, _ = _byok_provider()
+        if provider:
+            await _model_bearer()
         if _client is not None:
             return _client
 
-        provider, _ = _byok_provider()
         github_token = os.environ.get("GITHUB_TOKEN")
+        client_environment = copilot_environment()
+        client_environment.pop("AZURE_AI_MODEL_API_KEY", None)
 
         # Isolate the runtime's home dir so it never picks up an ambient GitHub
         # identity from a developer's machine login (which would make GitHub
@@ -332,18 +357,18 @@ async def _ensure_client() -> CopilotClient:
         os.makedirs(base_dir, exist_ok=True)
 
         if provider:
-            # BYOK mode: Foundry model via Managed Identity — no token needed.
+            # BYOK mode: Entra model authentication — no GitHub token needed.
             # Disable the runtime's logged-in-user GitHub identity so GitHub
             # actions go through our configured MCP server (installation token →
             # App bot), not the machine's logged-in user.
             client = CopilotClient(
                 use_logged_in_user=False, base_directory=base_dir,
-                env=copilot_environment())
+                env=client_environment)
         elif github_token:
             # Copilot mode: use GitHub token for the model.
             client = CopilotClient(
                 github_token=github_token, base_directory=base_dir,
-                env=copilot_environment())
+                env=client_environment)
         else:
             raise RuntimeError(
                 "Set GITHUB_TOKEN (Copilot model) or "
@@ -652,6 +677,9 @@ async def _stream_response(
         if status not in {"completed", "failed", "rejected"}:
             status, error_type = "cancelled", "cancelled"
         raise
+    except FoundryModelError:
+        status, error_type = "failed", "configuration"
+        raise
     except Exception:
         status, error_type = "failed", "execution_error"
         raise RuntimeError("Could not run the IssueLens invocation.") from None
@@ -728,7 +756,6 @@ async def handle_invoke(request: Request) -> Response:
 _TOOLBOX_ENDPOINT_ENV = "TOOLBOX_ENDPOINT"
 _TOOLBOX_SCOPE = "https://ai.azure.com/.default"
 _CALL_ID_HEADER = "x-agent-foundry-call-id"
-_TOKEN_REFRESH_MARGIN_SECONDS = 300
 
 _ANONYMOUS_CONVERSATION = "anonymous"
 _MAX_CHAT_SESSIONS = 500
@@ -1005,6 +1032,9 @@ async def handle_chat(
         if guarded_conversation is not None and status != "completed":
             _chat_session_ids.pop(guarded_conversation, None)
         raise
+    except FoundryModelError:
+        status, error_type = "failed", "configuration"
+        raise
     except Exception:
         status, error_type = "failed", "execution_error"
         raise RuntimeError("Could not initialize the IssueLens chat turn.") from None
@@ -1029,10 +1059,11 @@ async def handle_chat(
 
 if __name__ == "__main__":
     has_token = bool(os.environ.get("GITHUB_TOKEN"))
-    has_byok = bool(
-        os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
-        and os.environ.get("AZURE_AI_MODEL_DEPLOYMENT_NAME")
-    )
+    try:
+        provider, _ = _byok_provider()
+    except FoundryModelError as error:
+        sys.exit(f"Error: {error}")
+    has_byok = provider is not None
     if not has_token and not has_byok:
         sys.exit(
             "Error: Set GITHUB_TOKEN (Copilot model) or "

@@ -229,7 +229,7 @@ are not proof of publication. Sensitive/conflicting changes require human review
    text prompt), with optional inline `attachments`, e.g.
    `{"input": "Triage open issues in owner/repo"}`.
 2. Creates a **fresh Copilot session per request** configured with:
-   - the **Foundry model** (BYOK via Managed Identity) or the **GitHub Copilot model** for inference;
+   - the **Foundry model** (BYOK via Microsoft Entra identity) or the **GitHub Copilot model** for inference;
    - the bundled **GitHub App stdio MCP server**, whose process and token cache
      belong only to that Copilot session;
    - the constrained in-process `issuelens-config` tool, backed by a separate
@@ -310,7 +310,10 @@ live ingestion/import validation and any deployment need separate authorization.
 | `AZURE_AI_MODEL_DEPLOYMENT_NAME` | For Foundry model | Model deployment name (e.g. `gpt-4o`) |
 | `GITHUB_TOKEN` | For Copilot model | GitHub fine-grained PAT with **Copilot Requests → Read-only** permission |
 
-If the Foundry variables are set they take precedence over `GITHUB_TOKEN`.
+Setting `FOUNDRY_PROJECT_ENDPOINT` selects Foundry exclusively and requires a
+non-empty `AZURE_AI_MODEL_DEPLOYMENT_NAME`. Missing configuration or failed
+authentication never falls back to GitHub. Foundry uses Microsoft Entra tokens,
+not model API keys; see [identity and migration guidance](#using-your-own-foundry-model).
 
 ### GitHub resource access
 
@@ -946,7 +949,53 @@ AZURE_AI_MODEL_DEPLOYMENT_NAME=gpt-4o \
 python main.py
 ```
 
-Authentication uses Managed Identity via `DefaultAzureCredential`. When deployed as a hosted agent, `FOUNDRY_PROJECT_ENDPOINT` is auto-injected by the platform — you only need to set `AZURE_AI_MODEL_DEPLOYMENT_NAME` in `agent.yaml`.
+Authentication uses **Microsoft Entra bearer tokens only**, requested for
+`https://ai.azure.com/.default` through async `DefaultAzureCredential`. The
+Copilot SDK's per-request `bearer_token_provider` callback (supported by the
+existing minimum SDK 1.0.7) is registered on both new and resumed sessions.
+Tokens are cached only in host memory and renewed when less than five minutes
+remain, including during long-running turns; no static token is saved in session
+configuration. Credential acquisition does not block the host event loop.
+
+When hosted, `FOUNDRY_PROJECT_ENDPOINT` is platform-injected; set the deployment
+name in `azure.yaml` / `agent.yaml`. Keep the **project endpoint**, rather than
+switching to an account-level OpenAI endpoint. Three identities are distinct:
+
+| Identity | Inference/deployment responsibility |
+| --- | --- |
+| Hosted **agent runtime identity** | Foundry supplies a dedicated Microsoft Entra service principal and the runtime credential flow. It has implicit model-inference access through its own project endpoint in the standard hosted case. |
+| **Project managed identity** | Foundry proxies project-endpoint inference to the account's model deployment using this identity. It needs **Foundry User** (formerly **Azure AI User**) on the Foundry account. It is not the agent's runtime token principal. |
+| GitHub Actions **deployment service principal** | OIDC authenticates the runner for deployment. Its `AZURE_CLIENT_ID` is not forwarded into the hosted process and its permissions do not authenticate runtime inference. |
+
+See Microsoft's [hosted agent identities](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents#agent-identity-and-endpoint)
+and [permissions reference](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agent-permissions#agent-access-beyond-defaults).
+An administrator should verify the **actual principal and scope** of any
+existing role assignment; an assignment to a deployment principal is not proof
+of runtime or project-to-account access. This repository change does not verify
+or create Azure role assignments.
+
+For local service-principal execution, use the existing Azure Identity
+environment or workload-identity credential setup for that principal (for
+example, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and a provisioned
+`AZURE_FEDERATED_TOKEN_FILE`). Existing certificate/secret-based service-principal
+credentials are also supported by `DefaultAzureCredential`; keep those values
+outside source control and do not copy deployment credentials into the hosted
+manifest. Without an application credential, local developer credentials can
+also be selected by the default chain. The selected local principal needs
+project-level model data-plane access, such as **Foundry User** or an approved
+narrower custom role. ARM **Contributor** alone is not model authorization.
+
+**Migration and diagnosis:** `AZURE_AI_MODEL_API_KEY` is no longer read for
+authentication, passed by deployment manifests, or forwarded to the
+Copilot child process. A stale value cannot enable key authentication. Remove
+obsolete values from local configuration and deployment secret stores through
+your normal approved process; changing this code neither deletes existing
+secrets nor updates a running deployment. Token-acquisition failures indicate a
+missing/unusable runtime credential; check the credential source first. A
+service-side `403` after token acquisition instead requires checking model
+data-plane authorization, including the project identity's account access.
+Neither case falls back to a key or to GitHub. `GITHUB_TOKEN` remains an inference
+option only when the Foundry endpoint is absent.
 
 ## Deploying the Agent to Microsoft Foundry
 
