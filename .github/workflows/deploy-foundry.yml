@@ -84,7 +84,6 @@ jobs:
           AZURE_AI_MODEL_DEPLOYMENT_NAME: ${{ secrets.AZURE_AI_MODEL_DEPLOYMENT_NAME }}
           GITHUB_APP_ID: ${{ vars.ISSUELENS_APP_ID }}
           GITHUB_APP_PRIVATE_KEY_SECRET_URI: ${{ secrets.ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI }}
-          AZURE_AI_MODEL_API_KEY: ${{ secrets.AZURE_AI_MODEL_API_KEY }}
           TOOLBOX_ENDPOINT: ${{ secrets.TOOLBOX_ENDPOINT }}
           MAILING_URL: ${{ secrets.MAILING_URL }}
           PERSONAL_NOTIFICATION_URL: ${{ secrets.PERSONAL_NOTIFICATION_URL }}
@@ -97,7 +96,7 @@ jobs:
           (
             azd config set auth.useAzCliAuth true &&
             azd env new "$AZD_ENV_NAME" --subscription "$AZURE_SUBSCRIPTION_ID" --location "$AZURE_LOCATION" --no-prompt &&
-            for name in "${required[@]}" AZURE_AI_MODEL_API_KEY TOOLBOX_ENDPOINT MAILING_URL PERSONAL_NOTIFICATION_URL; do
+            for name in "${required[@]}" TOOLBOX_ENDPOINT MAILING_URL PERSONAL_NOTIFICATION_URL; do
               azd env set --no-prompt -- "$name" "${!name}" || exit 1
             done
           ) >"$RUNNER_TEMP/issuelens-configure.log" 2>&1 ||

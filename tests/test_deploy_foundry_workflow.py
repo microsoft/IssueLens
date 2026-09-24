@@ -71,7 +71,7 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         self.assertIn('azd env new "$AZD_ENV_NAME"', configure["run"])
         self.assertIn('azd env set --no-prompt -- "$name" "${!name}" || exit 1', configure["run"])
         self.assertIn('[[ -n "${!name}" ]]', configure["run"])
-        for name in ("AZURE_AI_MODEL_API_KEY", "MAILING_URL", "PERSONAL_NOTIFICATION_URL"):
+        for name in ("MAILING_URL", "PERSONAL_NOTIFICATION_URL"):
             self.assertEqual(configure["env"][name], "${{ secrets." + name + " }}")
         manifest = yaml.load((ROOT / "azure.yaml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
         for name in re.findall(r"\$\{([A-Z_]+)\}", str(manifest)):
@@ -84,7 +84,7 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         configure = next(step for step in self.steps if "azd config set" in step.get("run", ""))
         for name in (
             "AZURE_SUBSCRIPTION_ID", "AZURE_TENANT_ID", "AZURE_LOCATION", "FOUNDRY_PROJECT_ENDPOINT",
-            "AZURE_AI_PROJECT_ID", "AZURE_AI_MODEL_DEPLOYMENT_NAME", "AZURE_AI_MODEL_API_KEY",
+            "AZURE_AI_PROJECT_ID", "AZURE_AI_MODEL_DEPLOYMENT_NAME",
             "TOOLBOX_ENDPOINT", "MAILING_URL", "PERSONAL_NOTIFICATION_URL",
         ):
             self.assertEqual(configure["env"][name], "${{ secrets." + name + " }}")
@@ -93,6 +93,9 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
                          "${{ secrets.ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI }}")
         self.assertIn('>"$RUNNER_TEMP/issuelens-configure.log" 2>&1', configure["run"])
         self.assertIn("Details withheld.", configure["run"])
+
+    def test_model_api_keys_are_not_used_by_deployment(self):
+        self.assertNotIn("AZURE_AI_MODEL_API_KEY", self.source)
 
     def test_official_actions_and_bundle_are_pinned(self):
         for step in self.steps:
