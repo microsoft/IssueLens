@@ -1,11 +1,25 @@
+import json
+import os
 import pathlib
 import re
+import shutil
+import subprocess
 import unittest
 
 import yaml
 
 
 ROOT = pathlib.Path(__file__).parents[1]
+FOUNDRY_EXTENSIONS = {
+    "azure.ai.agents": "1.0.0-beta.16",
+    "azure.ai.connections": "1.0.0-beta.7",
+    "azure.ai.inspector": "1.0.0-beta.7",
+    "azure.ai.projects": "1.0.0-beta.11",
+    "azure.ai.routines": "1.0.0-beta.6",
+    "azure.ai.skills": "1.0.0-beta.6",
+    "azure.ai.toolboxes": "1.0.0-beta.7",
+    "microsoft.foundry": "1.0.0-beta.2",
+}
 
 
 class FoundryDeploymentWorkflowTests(unittest.TestCase):
@@ -16,6 +30,39 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         cls.deploy = cls.workflow["jobs"]["deploy-and-test"]
         cls.steps = cls.deploy["steps"]
         cls.commands = "\n".join(step.get("run", "") for step in cls.steps)
+        cls.extensions = next(step for step in cls.steps
+                              if step["name"] == "Install and verify the Foundry extension")
+
+    def extension_inventory(self):
+        return [
+            {"id": name, "installedVersion": version, "version": "1.0.0-beta.999", "source": "azd"}
+            for name, version in FOUNDRY_EXTENSIONS.items()
+        ]
+
+    def run_extension_setup(self, inventory, *, install_exit=0, list_exit=0):
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "Executable workflow tests require Bash")
+        self.assertIsNotNone(shutil.which("jq"), "Executable workflow tests require jq")
+        stub = """
+azd() {
+  printf 'AZD_CALL: %s\\n' "$*" >&2
+  case "$1 $2" in
+    "extension install") return "$INSTALL_EXIT" ;;
+    "extension list") printf '%s\\n' "$EXTENSION_INVENTORY"; return "$LIST_EXIT" ;;
+    "ai agent") return 0 ;;
+    *) return 99 ;;
+  esac
+}
+"""
+        return subprocess.run(
+            [bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", stub + self.extensions["run"]],
+            env=os.environ | self.extensions.get("env", {}) | {
+                "EXTENSION_INVENTORY": inventory,
+                "INSTALL_EXIT": str(install_exit),
+                "LIST_EXIT": str(list_exit),
+            },
+            capture_output=True, text=True, timeout=15,
+        )
 
     def test_manual_default_branch_dispatch_requires_environment_approval(self):
         self.assertEqual(self.workflow["on"], {"workflow_dispatch": ""})
@@ -104,8 +151,69 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         self.assertEqual(self.steps[0]["with"], {"ref": "${{ github.sha }}", "persist-credentials": "false"})
         setup = next(step for step in self.steps if step.get("uses", "").startswith("Azure/setup-azd@"))
         self.assertEqual(setup["with"]["version"], "1.34.2")
-        self.assertIn("azd extension install microsoft.foundry --version 1.0.0-beta.2 --no-prompt", self.commands)
+        self.assertEqual(json.loads(self.extensions.get("env", {}).get("FOUNDRY_EXTENSION_VERSIONS", "{}")),
+                         FOUNDRY_EXTENSIONS)
+        self.assertIn('--version "$version" --source azd --no-dependencies --no-prompt', self.extensions["run"])
+        self.assertIn("azd extension list --installed --output json", self.extensions["run"])
+        login = next(index for index, step in enumerate(self.steps)
+                     if step.get("uses", "").startswith("azure/login@"))
+        self.assertLess(self.steps.index(self.extensions), login)
         self.assertIn("azd ai agent --help >/dev/null", self.commands)
+
+    def test_extension_setup_installs_and_verifies_exact_versions_not_registry_latest(self):
+        result = self.run_extension_setup(json.dumps(self.extension_inventory()[::-1]))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [line for line in result.stderr.splitlines() if line.startswith("AZD_CALL:")]
+        self.assertEqual(calls, [
+            f"AZD_CALL: extension install {name} --version {version} --source azd --no-dependencies --no-prompt"
+            for name, version in FOUNDRY_EXTENSIONS.items()
+        ] + ["AZD_CALL: extension list --installed --output json", "AZD_CALL: ai agent --help"])
+
+    def test_extension_setup_rejects_missing_or_changed_components(self):
+        for index, name in enumerate(FOUNDRY_EXTENSIONS):
+            for change in ("missing", "upgraded", "uninstalled"):
+                with self.subTest(component=name, change=change):
+                    inventory = self.extension_inventory()
+                    if change == "missing":
+                        del inventory[index]
+                    else:
+                        inventory[index]["installedVersion"] = "1.0.0-beta.999" if change == "upgraded" else ""
+                    result = self.run_extension_setup(json.dumps(inventory))
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("::error::Foundry component versions do not match the reviewed pins.", result.stdout)
+                    self.assertNotIn("AZD_CALL: ai agent", result.stderr)
+
+    def test_extension_setup_rejects_extra_duplicate_and_invalid_inventories(self):
+        inventory = self.extension_inventory()
+        cases = {
+            "extra": json.dumps(inventory + [{"id": "unexpected", "installedVersion": "1.0.0"}]),
+            "duplicate": json.dumps(inventory + [inventory[0]]),
+            "empty": "[]",
+            "no output": "",
+            "invalid JSON": "not JSON",
+            "wrong shape": "{}",
+            "null": "null",
+            "multiple documents": json.dumps(inventory) + "\n" + json.dumps(inventory),
+        }
+        for name, payload in cases.items():
+            with self.subTest(case=name):
+                result = self.run_extension_setup(payload)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::Foundry component versions do not match the reviewed pins.", result.stdout)
+                self.assertNotIn("AZD_CALL: ai agent", result.stderr)
+
+    def test_extension_setup_stops_on_install_or_inventory_command_failure(self):
+        for command in ("install", "list"):
+            with self.subTest(command=command):
+                result = self.run_extension_setup(
+                    json.dumps(self.extension_inventory()),
+                    install_exit=9 if command == "install" else 0,
+                    list_exit=9 if command == "list" else 0,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("AZD_CALL: ai agent", result.stderr)
+                if command == "install":
+                    self.assertNotIn("AZD_CALL: extension list", result.stderr)
 
     def test_native_deployment_is_bounded_and_serialized(self):
         self.assertEqual(self.workflow["concurrency"], {
@@ -183,8 +291,11 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
             "foundry-production", "repo:microsoft/IssueLens:environment:foundry-production",
             "1.34.2", "1.0.0-beta.2",
             "No automatic retry or rollback", "No live deployment",
+            "installedVersion", "--no-dependencies", "Bash and jq",
         ):
             self.assertIn(text, readme)
+        for name, version in FOUNDRY_EXTENSIONS.items():
+            self.assertIn(f"| `{name}` | `{version}` |", readme)
 
 
 if __name__ == "__main__":

@@ -65,8 +65,28 @@ jobs:
         with:
           version: '1.34.2'
       - name: Install and verify the Foundry extension
+        env:
+          FOUNDRY_EXTENSION_VERSIONS: >-
+            {"azure.ai.agents":"1.0.0-beta.16",
+             "azure.ai.connections":"1.0.0-beta.7",
+             "azure.ai.inspector":"1.0.0-beta.7",
+             "azure.ai.projects":"1.0.0-beta.11",
+             "azure.ai.routines":"1.0.0-beta.6",
+             "azure.ai.skills":"1.0.0-beta.6",
+             "azure.ai.toolboxes":"1.0.0-beta.7",
+             "microsoft.foundry":"1.0.0-beta.2"}
         run: |
-          azd extension install microsoft.foundry --version 1.0.0-beta.2 --no-prompt
+          pins="$(jq -erb 'to_entries[] | [.key, .value] | @tsv' <<<"$FOUNDRY_EXTENSION_VERSIONS")"
+          while IFS=$'\t' read -r extension version; do
+            azd extension install "$extension" --version "$version" --source azd --no-dependencies --no-prompt
+          done <<<"$pins"
+          azd extension list --installed --output json |
+            jq -e -s --argjson expected "$FOUNDRY_EXTENSION_VERSIONS" '
+              length == 1 and
+              ((.[0] | sort_by(.id) | map({key: .id, value: .installedVersion})) ==
+               ($expected | to_entries | sort_by(.key)))
+            ' >/dev/null ||
+            { echo "::error::Foundry component versions do not match the reviewed pins."; exit 1; }
           azd ai agent --help >/dev/null
       - name: Azure login with OIDC
         uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2

@@ -1010,7 +1010,26 @@ environment, run `azd deploy`, inspect status, and invoke the agent.
 It uses the existing repository-root `azure.yaml` Python 3.13 ZIP/remote-build
 service directly, without a custom deployment helper or packaging hook.
 Actions are commit-pinned; azd is **1.34.2** and the Foundry bundle is
-**1.0.0-beta.2**, which installs its compatible component dependencies.
+**1.0.0-beta.2**. The bundle's dependency ranges are not a version lock, so the
+workflow explicitly installs each component with `--no-dependencies` and verifies
+the complete installed set's `installedVersion` fields before Azure login:
+
+| Extension | Pinned version |
+| --- | --- |
+| `azure.ai.agents` | `1.0.0-beta.16` |
+| `azure.ai.connections` | `1.0.0-beta.7` |
+| `azure.ai.inspector` | `1.0.0-beta.7` |
+| `azure.ai.projects` | `1.0.0-beta.11` |
+| `azure.ai.routines` | `1.0.0-beta.6` |
+| `azure.ai.skills` | `1.0.0-beta.6` |
+| `azure.ai.toolboxes` | `1.0.0-beta.7` |
+| `microsoft.foundry` | `1.0.0-beta.2` |
+
+These component releases come from the [azd 1.34.2 registry snapshot](https://github.com/Azure/azure-dev/blob/azure-dev-cli_1.34.2/cli/azd/extensions/registry.json).
+Missing, extra, duplicate, or mismatched installed components stop the job.
+New registry releases do not change these pins; upgrades require a reviewed
+workflow, test, and documentation change. The executable workflow regression
+tests require Bash and jq, both provided by the configured Ubuntu runner.
 
 Unlike the quickstart's push trigger, this workflow is **manual only**, restricted
 to this repository's default branch, and requires approval through the fixed
