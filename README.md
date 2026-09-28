@@ -1105,6 +1105,10 @@ CLI headings or merely non-empty output do not count as a successful reply.
 The fixed prompt requests no tools, repository access, wiki writes, or
 notifications. These are protocol/inference smoke checks, not proof of App,
 wiki, or notification access, nor a host-enforced tool-isolation mode.
+Invocations permits the SDK's root `subagent.selected` event for `issuelens`
+only when `agentId`, `data.parentToolCallId`, and `data.toolCallId` are absent
+or null. Its available-tools inventory is not tool execution; tool requests,
+tool events, and all other sub-agent events still fail the smoke check.
 
 The job is limited to 40 minutes, the native deployment wait to 20 minutes, and
 each invocation to 120 seconds within a 3-minute step. The summary records the
