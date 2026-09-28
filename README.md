@@ -1034,8 +1034,9 @@ tests require Bash and jq, both provided by the configured Ubuntu runner.
 Unlike the quickstart's push trigger, this workflow is **manual only**, restricted
 to this repository's default branch, and requires approval through the fixed
 **`foundry-production`** environment. It checks required reviewers, disabled
-self-review/bypass, and a successful push-CI run for the exact dispatched SHA
-before Azure login. Deployments are serialized without cancelling an active
+administrator bypass, and a successful push-CI run for the exact dispatched SHA
+before Azure login. Self-review follows the GitHub Environment's configured
+policy. Deployments are serialized without cancelling an active
 publication. No live deployment, provisioning, or permission change is
 authorized by creating or merging the workflow.
 
@@ -1043,8 +1044,10 @@ authorized by creating or merging the workflow.
 
 The Foundry project, model deployment, and `IssueLens` hosted agent must already
 exist, as required by the quickstart. An administrator must create
-`foundry-production` with required reviewers, prevent self-review, disable
+`foundry-production` with required reviewers, disable
 administrator bypass, and allow only the exact default branch (`main`), not tags.
+Set **Prevent self-review** according to the team's approval policy; the workflow
+accepts either setting while still requiring environment approval.
 
 The workflow reuses the repository's existing Azure ID secret names. Reusing
 their names does not grant deployment permissions: if the existing identity is

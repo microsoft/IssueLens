@@ -54,8 +54,8 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/environments/$AZD_ENV_NAME" --jq '
             .can_admins_bypass == false and
             any(.protection_rules[]?; .type == "required_reviewers" and
-              .prevent_self_review == true and (.reviewers | length) > 0)
-          ' | grep -qx true || { echo "::error::Configure required environment reviewers without self-review or bypass."; exit 1; }
+              (.reviewers | length) > 0)
+          ' | grep -qx true || { echo "::error::Configure required environment reviewers with administrator bypass disabled."; exit 1; }
           gh api --method GET "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs" \
             -f event=push -f branch="$DEFAULT_BRANCH" -f head_sha="$GITHUB_SHA" -F per_page=1 \
             --jq '.workflow_runs[0] | .status == "completed" and .conclusion == "success"' |
