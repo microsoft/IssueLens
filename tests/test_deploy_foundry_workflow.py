@@ -30,8 +30,56 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         cls.deploy = cls.workflow["jobs"]["deploy-and-test"]
         cls.steps = cls.deploy["steps"]
         cls.commands = "\n".join(step.get("run", "") for step in cls.steps)
+        cls.gate = cls.steps[1]
         cls.extensions = next(step for step in cls.steps
                               if step["name"] == "Install and verify the Foundry extension")
+
+    def run_workflow_step(self, step, stub, env):
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "Executable workflow tests require Bash")
+        self.assertIsNotNone(shutil.which("jq"), "Executable workflow tests require jq")
+        return subprocess.run(
+            [str(pathlib.Path(bash).resolve()), "--noprofile", "--norc", "-eo", "pipefail",
+             "-c", stub + step["run"]],
+            env=os.environ | step.get("env", {}) | env,
+            capture_output=True, text=True, timeout=15,
+        )
+
+    def protected_environment(self, prevent_self_review):
+        return {
+            "can_admins_bypass": False,
+            "protection_rules": [{
+                "type": "required_reviewers", "prevent_self_review": prevent_self_review,
+                "reviewers": [{"type": "User", "reviewer": {"id": 1}}],
+            }],
+        }
+
+    def run_github_gates(self, environment, runs, *, environment_exit=0, ci_exit=0):
+        stub = """
+gh() {
+  printf 'GH_CALL: %s\\n' "$*" >&2
+  case "$*" in
+    "api repos/$GITHUB_REPOSITORY/environments/$AZD_ENV_NAME --jq "*)
+      jq -rb "${@: -1}" <<<"$ENVIRONMENT"
+      return "$ENVIRONMENT_EXIT" ;;
+    "api --method GET repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs -f event=push -f branch=$DEFAULT_BRANCH -f head_sha=$GITHUB_SHA -F per_page=1 --jq "*)
+      jq -rb "${@: -1}" <<<"$CI_RUNS"
+      return "$CI_EXIT" ;;
+    *) return 99 ;;
+  esac
+}
+"""
+        return self.run_workflow_step(self.gate, stub, {
+            "GH_TOKEN": "test-token",
+            "GITHUB_REPOSITORY": "microsoft/IssueLens",
+            "AZD_ENV_NAME": "foundry-production",
+            "DEFAULT_BRANCH": "main",
+            "GITHUB_SHA": "a" * 40,
+            "ENVIRONMENT": json.dumps(environment),
+            "CI_RUNS": json.dumps({"workflow_runs": runs}),
+            "ENVIRONMENT_EXIT": str(environment_exit),
+            "CI_EXIT": str(ci_exit),
+        })
 
     def extension_inventory(self):
         return [
@@ -40,9 +88,6 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         ]
 
     def run_extension_setup(self, inventory, *, install_exit=0, list_exit=0):
-        bash = shutil.which("bash")
-        self.assertIsNotNone(bash, "Executable workflow tests require Bash")
-        self.assertIsNotNone(shutil.which("jq"), "Executable workflow tests require jq")
         stub = """
 azd() {
   printf 'AZD_CALL: %s\\n' "$*" >&2
@@ -54,15 +99,11 @@ azd() {
   esac
 }
 """
-        return subprocess.run(
-            [bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", stub + self.extensions["run"]],
-            env=os.environ | self.extensions.get("env", {}) | {
-                "EXTENSION_INVENTORY": inventory,
-                "INSTALL_EXIT": str(install_exit),
-                "LIST_EXIT": str(list_exit),
-            },
-            capture_output=True, text=True, timeout=15,
-        )
+        return self.run_workflow_step(self.extensions, stub, {
+            "EXTENSION_INVENTORY": inventory,
+            "INSTALL_EXIT": str(install_exit),
+            "LIST_EXIT": str(list_exit),
+        })
 
     def test_manual_default_branch_dispatch_requires_environment_approval(self):
         self.assertEqual(self.workflow["on"], {"workflow_dispatch": ""})
@@ -87,7 +128,7 @@ azd() {
         })
         for condition in (
             '.can_admins_bypass == false', '.type == "required_reviewers"',
-            ".prevent_self_review == true", "(.reviewers | length) > 0",
+            "(.reviewers | length) > 0",
             "/actions/workflows/ci.yml/runs", "-f event=push",
             '-f branch="$DEFAULT_BRANCH"', '-f head_sha="$GITHUB_SHA"', "-F per_page=1",
             '.status == "completed" and .conclusion == "success"',
@@ -98,6 +139,73 @@ azd() {
         login = next(index for index, step in enumerate(self.steps)
                      if step.get("uses", "").startswith("azure/login@"))
         self.assertGreater(login, 1)
+
+    def test_github_gates_accept_both_environment_self_review_policies(self):
+        for prevent_self_review in (True, False):
+            with self.subTest(prevent_self_review=prevent_self_review):
+                result = self.run_github_gates(
+                    self.protected_environment(prevent_self_review),
+                    [{"status": "completed", "conclusion": "success"}],
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stderr.count("GH_CALL:"), 2)
+                self.assertIn(
+                    "api --method GET repos/microsoft/IssueLens/actions/workflows/ci.yml/runs "
+                    f"-f event=push -f branch=main -f head_sha={'a' * 40} -F per_page=1 --jq ",
+                    result.stderr,
+                )
+
+    def test_github_gates_reject_missing_reviewers_and_admin_bypass(self):
+        for prevent_self_review in (True, False):
+            for change in ("missing rules", "empty rules", "wrong rule type",
+                           "missing reviewers", "empty reviewers", "admin bypass"):
+                with self.subTest(prevent_self_review=prevent_self_review, change=change):
+                    environment = self.protected_environment(prevent_self_review)
+                    rule = environment["protection_rules"][0]
+                    if change == "missing rules":
+                        del environment["protection_rules"]
+                    elif change == "empty rules":
+                        environment["protection_rules"] = []
+                    elif change == "wrong rule type":
+                        rule["type"] = "wait_timer"
+                    elif change == "missing reviewers":
+                        del rule["reviewers"]
+                    elif change == "empty reviewers":
+                        rule["reviewers"] = []
+                    else:
+                        environment["can_admins_bypass"] = True
+                    result = self.run_github_gates(
+                        environment, [{"status": "completed", "conclusion": "success"}],
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("::error::Configure required environment reviewers", result.stdout)
+                    self.assertNotIn("/actions/workflows/ci.yml/runs", result.stderr)
+
+    def test_github_gates_still_require_successful_ci_for_both_self_review_policies(self):
+        for prevent_self_review in (True, False):
+            for runs in (
+                [], [{"status": "in_progress", "conclusion": "success"}],
+                [{"status": "completed", "conclusion": conclusion}
+                 for conclusion in ("failure", "success")],
+                [{"status": "completed", "conclusion": "cancelled"}],
+                [{"status": "completed", "conclusion": None}],
+            ):
+                with self.subTest(prevent_self_review=prevent_self_review, runs=runs):
+                    result = self.run_github_gates(self.protected_environment(prevent_self_review), runs)
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("::error::Wait for successful CI on this exact commit", result.stdout)
+
+    def test_github_gates_stop_on_api_failure_even_with_successful_output(self):
+        for environment_exit, ci_exit in ((9, 0), (0, 9)):
+            with self.subTest(environment_exit=environment_exit, ci_exit=ci_exit):
+                result = self.run_github_gates(
+                    self.protected_environment(False),
+                    [{"status": "completed", "conclusion": "success"}],
+                    environment_exit=environment_exit, ci_exit=ci_exit,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stderr.count("GH_CALL:"), 1 if environment_exit else 2)
+                self.assertIn("::error::", result.stdout)
 
     def test_official_oidc_and_azd_configuration_pattern(self):
         self.assertEqual(self.deploy["permissions"], {
