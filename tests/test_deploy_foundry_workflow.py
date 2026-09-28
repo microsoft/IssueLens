@@ -4,6 +4,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 import yaml
@@ -33,14 +34,15 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         cls.gate = cls.steps[1]
         cls.extensions = next(step for step in cls.steps
                               if step["name"] == "Install and verify the Foundry extension")
+        cls.invocations = next(step for step in cls.steps if step.get("id") == "invocations")
 
     def run_workflow_step(self, step, stub, env):
         bash = shutil.which("bash")
         self.assertIsNotNone(bash, "Executable workflow tests require Bash")
         self.assertIsNotNone(shutil.which("jq"), "Executable workflow tests require jq")
         return subprocess.run(
-            [str(pathlib.Path(bash).resolve()), "--noprofile", "--norc", "-eo", "pipefail",
-             "-c", stub + step["run"]],
+            [str(pathlib.Path(bash).resolve()), "--noprofile", "--norc", "-eo", "pipefail"],
+            input=stub + step["run"],
             env=os.environ | step.get("env", {}) | env,
             capture_output=True, text=True, timeout=15,
         )
@@ -104,6 +106,187 @@ azd() {
             "INSTALL_EXIT": str(install_exit),
             "LIST_EXIT": str(list_exit),
         })
+
+    def invocation_events(self):
+        return [
+            {
+                "type": "subagent.selected",
+                "data": {
+                    "agentName": "issuelens", "agentDisplayName": "IssueLens",
+                    "tools": ["get_issue", "get_file", "task"],
+                },
+            },
+            {"type": "assistant.message", "data": {"content": "ISSUELENS_DEPLOYMENT_OK"}},
+            {"invocation_id": "test-invocation", "session_id": "test-session"},
+        ]
+
+    def invocations_sse(self, events):
+        return "".join(
+            f"event: {event.get('type', 'done')}\ndata: {json.dumps(event)}\n\n"
+            for event in events
+        )
+
+    def run_invocations_smoke(self, stream, *, invocation_exit=0):
+        stub = """
+azd() {
+  if [[ "$*" != "ai agent invoke IssueLens --environment $AZD_ENV_NAME --protocol invocations --input-file $RUNNER_TEMP/issuelens-payload.json --version $AGENT_VERSION --new-session --timeout 120 --output raw --no-prompt" ]]; then
+    return 99
+  fi
+  jq -e --arg input "$AGENT_TEST_PROMPT" '. == {input: $input}' "$RUNNER_TEMP/issuelens-payload.json" >/dev/null || return 98
+  printf '%s' "$INVOCATIONS_SSE"
+  return "$INVOCATIONS_EXIT"
+}
+"""
+        if os.name == "nt":
+            # Git Bash cannot set RLIMIT_FSIZE; Linux CI exercises the real limit.
+            stub += '\nulimit() { [[ "$*" == "-f 8192" ]]; }\n'
+        with tempfile.TemporaryDirectory() as directory:
+            return self.run_workflow_step(self.invocations, stub, self.workflow["env"] | {
+                "RUNNER_TEMP": pathlib.Path(directory).as_posix(),
+                "AGENT_VERSION": "40",
+                "INVOCATIONS_SSE": stream,
+                "INVOCATIONS_EXIT": str(invocation_exit),
+            })
+
+    def test_invocations_accept_root_selection_with_available_tools(self):
+        result = self.run_invocations_smoke(self.invocations_sse(self.invocation_events()))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_invocations_accept_stream_without_selection(self):
+        result = self.run_invocations_smoke(self.invocations_sse(self.invocation_events()[1:]))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_invocations_accept_explicit_null_root_identifiers(self):
+        events = self.invocation_events()
+        events[0]["agentId"] = None
+        events[0]["data"] |= {"parentToolCallId": None, "toolCallId": None, "toolRequests": []}
+        events[1]["agentId"] = None
+        events[1]["data"] |= {"parentToolCallId": None, "toolRequests": None}
+        result = self.run_invocations_smoke(self.invocations_sse(events))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_invocations_reject_other_or_unidentified_agent_selection(self):
+        for name in ("triage", "plan", "find-criticals", "team-memory", "IssueLens", "", None):
+            with self.subTest(agent_name=name):
+                events = self.invocation_events()
+                events[0]["data"]["agentName"] = name
+                result = self.run_invocations_smoke(self.invocations_sse(events))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::Invocations did not complete", result.stdout)
+        events = self.invocation_events()
+        del events[0]["data"]["agentName"]
+        result = self.run_invocations_smoke(self.invocations_sse(events))
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_invocations_reject_nested_root_agent_selection(self):
+        for field in ("agentId", "parentToolCallId", "toolCallId"):
+            for value in ("nested-call", "", False, 0, [], {}):
+                with self.subTest(field=field, value=value):
+                    events = self.invocation_events()
+                    target = events[0] if field == "agentId" else events[0]["data"]
+                    target[field] = value
+                    result = self.run_invocations_smoke(self.invocations_sse(events))
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("::error::Invocations did not complete", result.stdout)
+
+    def test_invocations_reject_delegation_and_tool_events(self):
+        for event_type in (
+            "subagent.started", "subagent.completed", "subagent.failed", "subagent.deselected",
+            "subagent.unknown", "tool.execution_start", "tool.execution_complete", "tool.unknown",
+        ):
+            for after_answer in (False, True):
+                with self.subTest(event_type=event_type, after_answer=after_answer):
+                    events = self.invocation_events()
+                    events.insert(2 if after_answer else 1, {
+                        "type": event_type, "data": {"agentName": "issuelens"},
+                    })
+                    result = self.run_invocations_smoke(self.invocations_sse(events))
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("::error::Invocations did not complete", result.stdout)
+
+    def test_invocations_reject_tool_requests_on_any_event(self):
+        for index in range(3):
+            with self.subTest(event_index=index):
+                events = self.invocation_events()
+                events[index].setdefault("data", {})["toolRequests"] = [{"name": "get_issue"}]
+                result = self.run_invocations_smoke(self.invocations_sse(events))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::Invocations did not complete", result.stdout)
+
+    def test_invocations_reject_errors_even_after_the_answer(self):
+        for event_type in ("error", "session.error"):
+            for index in (0, 2, 3):
+                with self.subTest(event_type=event_type, index=index):
+                    events = self.invocation_events()
+                    events.insert(index, {"type": event_type, "data": {"message": "synthetic-error"}})
+                    result = self.run_invocations_smoke(self.invocations_sse(events))
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("::error::Invocations did not complete", result.stdout)
+                    self.assertNotIn("synthetic-error", result.stdout + result.stderr)
+
+    def test_invocations_require_exact_final_root_reply(self):
+        for content in ("", "wrong", " ISSUELENS_DEPLOYMENT_OK", "ISSUELENS_DEPLOYMENT_OK\n", None):
+            with self.subTest(content=content):
+                events = self.invocation_events()
+                events.insert(2, {"type": "assistant.message", "data": {"content": content}})
+                result = self.run_invocations_smoke(self.invocations_sse(events))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::Invocations did not complete", result.stdout)
+        for nesting in ("agentId", "parentToolCallId", "missing answer", "delta only"):
+            with self.subTest(nesting=nesting):
+                events = self.invocation_events()
+                if nesting == "missing answer":
+                    del events[1]
+                elif nesting == "delta only":
+                    events[1]["type"] = "assistant.message_delta"
+                else:
+                    target = events[1] if nesting == "agentId" else events[1]["data"]
+                    target[nesting] = "nested-call"
+                result = self.run_invocations_smoke(self.invocations_sse(events))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::Invocations did not complete", result.stdout)
+
+    def test_invocations_require_nonempty_string_terminal_identifiers(self):
+        for field in ("invocation_id", "session_id"):
+            for value in ("", None, 40, [], {}):
+                with self.subTest(field=field, value=value):
+                    events = self.invocation_events()
+                    events[-1][field] = value
+                    result = self.run_invocations_smoke(self.invocations_sse(events))
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("::error::Invocations did not complete", result.stdout)
+            events = self.invocation_events()
+            del events[-1][field]
+            result = self.run_invocations_smoke(self.invocations_sse(events))
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_invocations_reject_empty_malformed_and_truncated_streams(self):
+        events = self.invocation_events()
+        valid = self.invocations_sse(events)
+        cases = {
+            "empty": "",
+            "CLI heading only": "Invoking agent IssueLens\n",
+            "malformed JSON": valid + "event: session.idle\ndata: not JSON\n\n",
+            "truncated JSON": valid + 'event: session.idle\ndata: {"type":',
+            "missing completion": self.invocations_sse(events[:-1]),
+            "empty completion": self.invocations_sse(events[:-1]) + "event: done\ndata:\n\n",
+            "wrong completion shape": self.invocations_sse(events[:-1]) + "event: done\ndata: []\n\n",
+            "completion before answer": self.invocations_sse([events[0], events[2], events[1]]),
+        }
+        for name, stream in cases.items():
+            with self.subTest(case=name):
+                result = self.run_invocations_smoke(stream)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::Invocations did not complete", result.stdout)
+
+    def test_invocations_reject_nonzero_azd_exit_even_with_valid_output(self):
+        result = self.run_invocations_smoke(
+            self.invocations_sse(self.invocation_events()), invocation_exit=9,
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::error::Invocations request failed", result.stdout)
+        self.assertNotIn("::error::Invocations did not complete", result.stdout)
 
     def test_manual_default_branch_dispatch_requires_environment_approval(self):
         self.assertEqual(self.workflow["on"], {"workflow_dispatch": ""})

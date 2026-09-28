@@ -178,7 +178,10 @@ jobs:
           sed -n 's/^data: *//p' "$RUNNER_TEMP/issuelens-invocations.txt" |
             jq -e -s --arg expected "$EXPECTED_REPLY" '
               all(.[]; .type != "error" and .type != "session.error" and
-                ((.type // "" | test("^(tool|subagent)\\.")) | not) and (.data.toolRequests // [] | length) == 0) and
+                (((.type // "" | test("^(tool|subagent)\\.")) | not) or
+                  (.type == "subagent.selected" and .data.agentName == "issuelens" and
+                    .agentId == null and .data.parentToolCallId == null and .data.toolCallId == null)) and
+                (.data.toolRequests // [] | length) == 0) and
               (.[-1] | (.invocation_id | type) == "string" and (.session_id | type) == "string" and
                 (.invocation_id | length) > 0 and (.session_id | length) > 0) and
               ([.[] | select(.type == "assistant.message" and .agentId == null and .data.parentToolCallId == null)] |
