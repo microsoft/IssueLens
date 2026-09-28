@@ -20,8 +20,6 @@ services:
               value: "false"
             - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
               value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
-            - name: AZURE_AI_MODEL_API_KEY
-              value: ${AZURE_AI_MODEL_API_KEY}
             - name: GITHUB_APP_ID
               value: ${GITHUB_APP_ID}
             - name: GITHUB_APP_PRIVATE_KEY_SECRET_URI

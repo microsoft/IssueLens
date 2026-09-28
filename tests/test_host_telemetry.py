@@ -11,8 +11,9 @@ from collections import deque
 from contextlib import ExitStack
 from pathlib import Path
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import yaml
 from azure.ai.agentserver.responses import (
     CreateResponse,
     PlatformContext,
@@ -27,7 +28,11 @@ from azure.ai.agentserver.responses.models import (
 )
 from azure.ai.agentserver.responses.models.runtime import ResponseModeFlags
 from azure.ai.agentserver.responses.streaming._sse import encode_sse_event
+from azure.core.credentials import AccessToken
+from azure.core.exceptions import ClientAuthenticationError
+from copilot import CopilotClient, PermissionHandler
 from copilot.generated.session_events import SessionEvent, SessionEventType
+from copilot.session import ProviderTokenAcquireRequest
 from opentelemetry.trace import StatusCode
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
@@ -53,6 +58,10 @@ TOKEN_FIELDS = (
 
 class InvocationHost:
     def invoke_handler(self, handler):
+        return handler
+
+    def shutdown_handler(self, handler):
+        self.shutdown_callback = handler
         return handler
 
 
@@ -1276,12 +1285,282 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assert_closed(invocation_session)
         self.assert_closed(chat_session)
 
+    def configure_foundry(self):
+        self.stack.enter_context(patch.dict(os.environ, {
+            "FOUNDRY_PROJECT_ENDPOINT": "https://foundry.invalid/api/projects/offline",
+            "AZURE_AI_MODEL_DEPLOYMENT_NAME": "offline-model",
+            "AZURE_AI_MODEL_API_KEY": "ignored-model-key",
+            "GITHUB_TOKEN": "unused-github-model-token",
+        }))
+        credential = Mock(spec=["get_token", "close"])
+        credential.get_token = AsyncMock(return_value=AccessToken("offline-model-token", 4_000_000_000))
+        credential.close = AsyncMock()
+        factory = self.stack.enter_context(patch(
+            "azure.identity.aio.DefaultAzureCredential", return_value=credential,
+        ))
+        self.addAsyncCleanup(self.host._close_model_credential)
+        return credential, factory
+
+    def test_model_manifests_do_not_forward_keys_or_deployer_credentials(self):
+        for filename, key in (("azure.yaml", "environmentVariables"),
+                              ("agent.yaml", "environment_variables")):
+            with self.subTest(manifest=filename):
+                manifest = yaml.load(
+                    (ROOT / filename).read_text(encoding="utf-8"), Loader=yaml.BaseLoader,
+                )
+                service = manifest["services"]["IssueLens"] if filename == "azure.yaml" else manifest
+                names = {item["name"] for item in service[key]}
+                self.assertIn("AZURE_AI_MODEL_DEPLOYMENT_NAME", names)
+                self.assertTrue(names.isdisjoint({
+                    "AZURE_AI_MODEL_API_KEY", "AZURE_CLIENT_ID", "AZURE_TENANT_ID",
+                    "AZURE_CLIENT_SECRET", "AZURE_CLIENT_CERTIFICATE_PATH",
+                    "AZURE_FEDERATED_TOKEN_FILE", "GITHUB_TOKEN",
+                }))
+
+    def test_foundry_provider_ignores_keys_and_registers_lazy_bearer_callback(self):
+        _, factory = self.configure_foundry()
+        provider, model = self.host._byok_provider()
+        self.assertEqual(model, "offline-model")
+        self.assertEqual(provider, {
+            "type": "azure",
+            "base_url": "https://foundry.invalid/api/projects/offline",
+            "wire_api": "responses",
+            "bearer_token_provider": self.host._model_bearer,
+        })
+        factory.assert_not_called()
+        wire = CopilotClient.__new__(CopilotClient)._convert_provider_to_wire_format(provider)
+        self.assertEqual(wire, {
+            "type": "azure",
+            "baseUrl": provider["base_url"],
+            "wireApi": "responses",
+            "hasBearerTokenProvider": True,
+        })
+
+    async def test_foundry_token_cache_refreshes_within_a_long_running_session(self):
+        credential, factory = self.configure_foundry()
+        credential.get_token.side_effect = [
+            AccessToken("first-token", 2000), AccessToken("renewed-token", 4000),
+        ]
+        callback = self.host._byok_provider()[0]["bearer_token_provider"]
+        args = {"provider_name": "default", "session_id": "same-long-running-session"}
+        with patch.object(self.host.time, "time", return_value=1000) as now:
+            self.assertEqual(await callback(args), "first-token")
+            now.return_value = 1699
+            self.assertEqual(await callback(args), "first-token")
+            credential.get_token.assert_awaited_once_with("https://ai.azure.com/.default")
+            now.return_value = 1761
+            self.assertEqual(await callback(args), "renewed-token")
+        self.assertEqual(credential.get_token.await_count, 2)
+        factory.assert_called_once_with()
+        credential.close.assert_not_awaited()
+        await self.host._close_model_credential()
+        credential.close.assert_awaited_once()
+
+    async def test_foundry_token_acquisition_is_async_and_serialized(self):
+        credential, _ = self.configure_foundry()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def acquire(scope):
+            entered.set()
+            await release.wait()
+            return AccessToken("shared-token", 4000)
+
+        credential.get_token.side_effect = acquire
+        args = {"provider_name": "default", "session_id": "concurrent-session"}
+        with patch.object(self.host.time, "time", return_value=1000):
+            pending = [asyncio.create_task(self.host._model_bearer(args)) for _ in range(3)]
+            try:
+                await asyncio.wait_for(entered.wait(), timeout=2)
+                self.assertTrue(all(not task.done() for task in pending))
+            finally:
+                release.set()
+                results = await asyncio.gather(*pending)
+        self.assertEqual(results, ["shared-token"] * 3)
+        credential.get_token.assert_awaited_once_with("https://ai.azure.com/.default")
+
+    async def test_foundry_token_failure_is_explicit_sanitized_and_never_returns_stale_token(self):
+        credential, _ = self.configure_foundry()
+        credential.get_token.side_effect = [
+            AccessToken("initial-token", 2000),
+            ClientAuthenticationError(ERROR_SECRET),
+            ClientAuthenticationError(ERROR_SECRET),
+        ]
+        callback = self.host._byok_provider()[0]["bearer_token_provider"]
+        args = {"provider_name": "default", "session_id": "offline-session"}
+        with patch.object(self.host.time, "time", return_value=1000) as now:
+            self.assertEqual(await callback(args), "initial-token")
+            now.return_value = 2500
+            for _ in range(2):
+                with self.assertLogs(HOST_MODULE, level="WARNING") as logs:
+                    caught, formatted = await self.escaped_error(callback(args))
+                self.assertIsInstance(caught, self.host.FoundryModelError)
+                self.assertIn("Could not authenticate", str(caught))
+                self.assertIn("fallback are disabled", str(caught))
+                self.assert_no_canaries(formatted + str(logs.output))
+                self.assertIsNone(caught.__cause__)
+                self.assertTrue(caught.__suppress_context__)
+        self.assertEqual(credential.get_token.await_count, 3)
+        credential.close.assert_not_awaited()
+        self.copilot_constructor.assert_not_called()
+        self.assertEqual(self.client.create_calls, [])
+        self.assertEqual(self.client.resume_calls, [])
+
+    async def test_model_shutdown_preserves_response_cleanup_and_closes_credential(self):
+        credential, factory = self.configure_foundry()
+        for failure in (None, RuntimeError("response-shutdown-error")):
+            with self.subTest(shutdown_failure=bool(failure)):
+                await self.host._model_bearer()
+
+                async def response_shutdown():
+                    self.assertIsNotNone(self.host._model_credential)
+                    if failure:
+                        raise failure
+
+                self.assertIs(self.host.app.shutdown_handler(response_shutdown), response_shutdown)
+                if failure:
+                    with self.assertRaisesRegex(RuntimeError, "response-shutdown-error"):
+                        await self.host.app.shutdown_callback()
+                else:
+                    await self.host.app.shutdown_callback()
+                self.assertIsNone(self.host._model_credential)
+                self.assertIsNone(self.host._model_token_provider)
+        self.assertEqual(factory.call_count, 2)
+        self.assertEqual(credential.close.await_count, 2)
+        await self.host._close_model_credential()
+        self.assertEqual(credential.close.await_count, 2)
+
+    async def test_model_credential_close_failure_is_sanitized(self):
+        credential, _ = self.configure_foundry()
+        await self.host._model_bearer()
+        credential.close.side_effect = ClientAuthenticationError(ERROR_SECRET)
+        caught, formatted = await self.escaped_error(self.host._close_model_credential())
+        self.assertIsInstance(caught, self.host.FoundryModelError)
+        self.assertEqual(str(caught), "Could not close the Foundry model credential.")
+        self.assert_no_canaries(formatted)
+        self.assertIsNone(self.host._model_credential)
+        self.assertIsNone(self.host._model_token_provider)
+
+    async def test_missing_foundry_model_fails_before_client_start_despite_github_token(self):
+        _, factory = self.configure_foundry()
+        self.host._client = None
+        for value in ("", "   "):
+            with self.subTest(model=value), patch.dict(os.environ, {"AZURE_AI_MODEL_DEPLOYMENT_NAME": value}):
+                with self.assertRaisesRegex(self.host.FoundryModelError, "AZURE_AI_MODEL_DEPLOYMENT_NAME is required"):
+                    await self.host._ensure_client()
+        self.copilot_constructor.assert_not_called()
+        factory.assert_not_called()
+
+    async def test_both_protocols_surface_missing_foundry_model_without_fallback(self):
+        self.configure_foundry()
+        with patch.dict(os.environ, {"AZURE_AI_MODEL_DEPLOYMENT_NAME": ""}):
+            for protocol in ("invocations", "responses"):
+                with self.subTest(protocol=protocol):
+                    with self.assertRaisesRegex(self.host.FoundryModelError, "AZURE_AI_MODEL_DEPLOYMENT_NAME is required"):
+                        await self.complete_protocol(protocol)
+                    summary = self.summary(protocol=protocol)
+                    self.assertEqual(summary["execution_status"], "failed")
+                    self.assertFalse(summary["model_request_sent"])
+        self.assertEqual(self.client.create_calls, [])
+        self.assertEqual(self.client.resume_calls, [])
+        self.assert_content_free_telemetry()
+
+    async def test_both_protocols_surface_token_failures_before_model_send(self):
+        credential, _ = self.configure_foundry()
+        credential.get_token.side_effect = ClientAuthenticationError(ERROR_SECRET)
+        for protocol in ("invocations", "responses"):
+            with self.subTest(protocol=protocol), self.assertLogs(HOST_MODULE, level="WARNING"):
+                caught, formatted = await self.escaped_error(self.complete_protocol(protocol))
+                self.assertIsInstance(caught, self.host.FoundryModelError)
+                self.assertIn("Could not authenticate", str(caught))
+                self.assert_no_canaries(formatted)
+                summary = self.summary(protocol=protocol)
+                self.assertEqual(summary["execution_status"], "failed")
+                self.assertFalse(summary["model_request_sent"])
+        self.assertEqual(self.client.create_calls, [])
+        self.assertEqual(self.client.resume_calls, [])
+        self.copilot_constructor.assert_not_called()
+        self.assert_content_free_telemetry()
+
+    async def test_foundry_client_disables_github_login_and_drops_stale_key_from_child(self):
+        _, factory = self.configure_foundry()
+        self.host._client = None
+        self.copilot_constructor.side_effect = None
+        self.copilot_constructor.return_value = self.client
+        with patch.object(self.host.os, "makedirs"):
+            await self.host._ensure_client()
+        options = self.copilot_constructor.call_args.kwargs
+        self.assertFalse(options["use_logged_in_user"])
+        self.assertNotIn("github_token", options)
+        self.assertNotIn("AZURE_AI_MODEL_API_KEY", options["env"])
+        self.assertEqual(os.environ["AZURE_AI_MODEL_API_KEY"], "ignored-model-key")
+        factory.assert_called_once_with()
+
+    async def test_fresh_invocations_and_resumed_chat_keep_the_token_callback(self):
+        _, factory = self.configure_foundry()
+        self.session(answer(), session_id="invocation-session")
+        await self.complete_protocol("invocations")
+        self.session(turns=[answer(), answer()], session_id="chat-session")
+        await self.chat()
+        await self.chat(response_id="response2")
+        self.assertEqual(len(self.client.create_calls), 2)
+        self.assertEqual(len(self.client.resume_calls), 1)
+        self.assertEqual(self.client.resume_calls[0][0], "chat-session")
+        for options in [*self.client.create_calls, self.client.resume_calls[0][1]]:
+            self.assertEqual(options["model"], "offline-model")
+            self.assertIs(options["provider"]["bearer_token_provider"], self.host._model_bearer)
+            self.assertNotIn("api_key", options["provider"])
+            self.assertNotIn("bearer_token", options["provider"])
+        factory.assert_called_once_with()
+
+    async def test_real_sdk_create_and_resume_register_and_refresh_bearer_callback(self):
+        credential, _ = self.configure_foundry()
+        credential.get_token.side_effect = [
+            AccessToken("initial-token", 2000), AccessToken("resumed-token", 4000),
+            ClientAuthenticationError(ERROR_SECRET),
+        ]
+        with patch.object(CopilotClient, "_resolve_runtime_entrypoint", return_value="offline-cli"):
+            sdk = CopilotClient(use_logged_in_user=False)
+        transport = Mock()
+        transport.request = AsyncMock(return_value={"sessionId": "offline-session"})
+        sdk._client = transport
+        provider, model = self.host._byok_provider()
+        params = ProviderTokenAcquireRequest(provider_name="default", session_id="offline-session")
+        with patch.object(sdk, "start", side_effect=AssertionError("Live SDK start")), patch.object(
+            self.host.time, "time", return_value=1000,
+        ) as now:
+            session = await sdk.create_session(
+                session_id="offline-session", provider=provider, model=model,
+                on_permission_request=PermissionHandler.approve_all,
+            )
+            token = await session._client_session_apis.provider_token.get_token(params)
+            self.assertEqual(token.token, "initial-token")
+            now.return_value = 2500
+            resumed = await sdk.resume_session(
+                session.session_id, provider=self.host._byok_provider()[0], model=model,
+                on_permission_request=PermissionHandler.approve_all,
+            )
+            token = await resumed._client_session_apis.provider_token.get_token(params)
+            self.assertEqual(token.token, "resumed-token")
+            now.return_value = 4500
+            with self.assertLogs(HOST_MODULE, level="WARNING"):
+                with self.assertRaisesRegex(self.host.FoundryModelError, "Could not authenticate"):
+                    await resumed._client_session_apis.provider_token.get_token(params)
+        self.assertEqual(transport.request.await_count, 2)
+        for call, method in zip(transport.request.await_args_list, ("session.create", "session.resume")):
+            self.assertEqual(call.args[0], method)
+            wire = call.args[1]["provider"]
+            self.assertTrue(wire["hasBearerTokenProvider"])
+            self.assertNotIn("apiKey", wire)
+            self.assertNotIn("bearerToken", wire)
+        self.assertEqual(credential.get_token.await_count, 3)
+
     async def test_client_start_disables_native_exporter_only_in_child_environment(self):
         self.host._client = None
         self.copilot_constructor.side_effect = None
         self.copilot_constructor.return_value = self.client
         environment = {
             "GITHUB_TOKEN": "offline-model-token",
+            "AZURE_AI_MODEL_API_KEY": "ignored-model-key",
             "OTEL_EXPORTER_OTLP_ENDPOINT": "https://exporter.invalid",
             "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=offline-secret",
             "COPILOT_OTEL_ENABLED": "true",
@@ -1292,6 +1571,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             original = dict(os.environ)
             self.assertIs(await self.host._ensure_client(), self.client)
             self.assertIs(await self.host._ensure_client(), self.client)
+            self.assertEqual(self.host._byok_provider(), (None, None))
             self.assertEqual(dict(os.environ), original)
         mkdir.assert_called_once()
         self.copilot_constructor.assert_called_once()
@@ -1303,6 +1583,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(child_environment["OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT"], "false")
         self.assertFalse(any(key.startswith("OTEL_EXPORTER_OTLP") for key in child_environment))
         self.assertNotIn("COPILOT_OTEL_CAPTURE_CONTENT", child_environment)
+        self.assertNotIn("AZURE_AI_MODEL_API_KEY", child_environment)
 
 
 if __name__ == "__main__":

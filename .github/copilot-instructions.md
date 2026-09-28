@@ -99,10 +99,18 @@ protocol for chat.
     arbitrary download URLs.
   - **Model (inference) auth (auto-selected):** BYOK Foundry model
     (`FOUNDRY_PROJECT_ENDPOINT` + `AZURE_AI_MODEL_DEPLOYMENT_NAME`, using
-    `AZURE_AI_MODEL_API_KEY` or a Managed Identity token), or the GitHub Copilot
-    model (`GITHUB_TOKEN`). If `FOUNDRY_PROJECT_ENDPOINT` is set, always use the
-    BYOK Foundry model; fall back to the GitHub Copilot model (`GITHUB_TOKEN`)
-    only when `FOUNDRY_PROJECT_ENDPOINT` is absent.
+    Microsoft Entra bearer tokens only), or the GitHub Copilot model
+    (`GITHUB_TOKEN`) only when `FOUNDRY_PROJECT_ENDPOINT` is absent. A configured
+    Foundry endpoint requires a model name; configuration/token failures never
+    switch backends. The SDK per-request bearer callback uses async
+    `DefaultAzureCredential`, caching tokens in host memory and refreshing before
+    expiry for fresh and resumed sessions. Model API keys are unsupported and
+    are not forwarded by deployment or to the Copilot process.
+    The platform-provided agent runtime identity is distinct from the project
+    managed identity (which proxies model calls to the account) and the Actions
+    deployment principal. Preserve the project endpoint and do not inject the
+    deployer's client ID into the runtime. Local execution can use existing
+    Azure Identity service-principal/workload or developer credentials.
 - **Custom agents** (registered in `main.py`):
   - **`issuelens`** — the global agent identity. Its system prompt lives in
     `agents/issuelens.md`. It routes issue-level analysis to `triage` and

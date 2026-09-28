@@ -14,12 +14,10 @@ environment_variables:
   # Metadata-only telemetry. Foundry owns the Application Insights connection.
   - name: OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT
     value: "false"
-  # Model (inference) — Foundry BYOK. Key auth via AZURE_AI_MODEL_API_KEY
-  # (no managed-identity model RBAC required).
+  # Model (inference) — Microsoft Entra bearer auth using the hosted agent's
+  # platform-provided runtime identity, not the GitHub Actions deployer.
   - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
     value: ${AZURE_AI_MODEL_DEPLOYMENT_NAME}
-  - name: AZURE_AI_MODEL_API_KEY
-    value: ${AZURE_AI_MODEL_API_KEY}
   # Both protocols — GitHub App registration and Key Vault-backed private key.
   - name: GITHUB_APP_ID
     value: ${GITHUB_APP_ID}
