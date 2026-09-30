@@ -318,7 +318,10 @@ def create_server(
             Paths must be relative Markdown pages: 1-20 pages, at most 64 KiB per
             page and 256 KiB per batch. The single-line message is at most 512
             bytes. The backend validates all paths, refs, and limits and rejects
-            conflicting snapshots. Commits use the verified App Bot identity.
+            conflicting page changes. It can rebase onto a descendant when
+            requested pages are unchanged or already match, with one retry for
+            a confirmed ref race. Unknown push outcomes are never retried.
+            Commits use the verified App Bot identity.
             """
             return await github.write_wiki_pages(
                 repository, pages, expected_base, message,

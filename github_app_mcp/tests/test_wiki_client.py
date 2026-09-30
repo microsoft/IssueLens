@@ -970,6 +970,15 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(result.is_error)
                     self.assertNotIn(TOKEN, str(result.content))
                     self.assertEqual(self.tip(), updated["sha"])
+                rebased = await call_json(client, "write_wiki_pages", {
+                    **write, "pages": {"Home.md": write["pages"]["Home.md"], "Other.md": "Independent update\n"},
+                })
+                self.assertEqual(rebased["status"], "updated")
+                self.assertEqual(rebased["pages"], ["Other.md"])
+                self.assertEqual(self.tip(), rebased["sha"])
+                self.assertEqual(self.parents(), [updated["sha"]])
+                preserved = await call_json(client, "get_wiki_page", {"repository": REPOSITORY, "path": "Home.md"})
+                self.assertEqual(preserved["content"], write["pages"]["Home.md"])
                 opened_before_denial = len(self.opened_repositories)
                 denied = await client.call_tool("write_wiki_pages", {
                     **write, "repository": "microsoft/other", "expected_wiki_repository": "microsoft/other",

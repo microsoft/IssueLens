@@ -165,14 +165,16 @@ with patch.object(subprocess, "Popen", side_effect=AssertionError("no subprocess
                 return generate(*args, **kwargs)
 
             with patch.object(repository._repo.object_store, "generate_pack_data", side_effect=race):
-                with check.assertRaisesRegex(wiki_module.WikiError, "conflict or outcome unknown"):
-                    repository.write({"Lost.md": "Must not win\n"}, result["sha"], "Race", **identity)
-            check.assertEqual(remote.refs[branch], concurrent.id)
-            check.assertEqual(repository.snapshot()["sha"], result["sha"])
+                rebased = repository.write({"New.md": "Independent update\n"}, result["sha"], "Race", **identity)
+            check.assertEqual(rebased["status"], "updated")
+            check.assertEqual(remote.refs[branch], rebased["sha"].encode("ascii"))
+            check.assertEqual(remote.object_store[remote.refs[branch]].parents, [concurrent.id])
+            check.assertEqual(repository.snapshot()["sha"], rebased["sha"])
+            check.assertEqual(repository.page("New.md")["content"], "Independent update\n")
             check.assertEqual(list(temporary.iterdir()), [])
         check.assertFalse(temporary.exists())
         with LocalWiki("example/repository") as repository:
-            check.assertEqual(repository.snapshot()["sha"], concurrent.id.decode("ascii"))
+            check.assertEqual(repository.snapshot()["sha"], rebased["sha"])
             check.assertEqual(repository.page("Notes/Build.md")["content"], pages["Notes/Build.md"])
     remote.close()
     for name, module in tuple(sys.modules.items()):

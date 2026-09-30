@@ -111,7 +111,12 @@ write. Limits are 20 `.md` pages, 64 KiB each, 256 KiB total; deletion/rename ar
 unsupported. Unchanged assets are preserved byte-for-byte; diffs report binary
 changes as notices, not binary patches. Only SHA-1 Git repositories (GitHub's
 current format) are supported; SHA-256 repositories are rejected.
-Stale conflicts require re-reading and regeneration; a lost response
+The writer can rebase onto a descendant when requested pages are unchanged or
+already match the desired content, preserving edits to other pages. Confirmed
+revision races get at most one internal retry within the original budgets.
+Same-page conflicts, deletions, mode changes, rewritten history, and unknown
+push outcomes are not automatically reconciled; there is no line-level merge.
+Remaining stale conflicts require re-reading and regeneration; a lost response
 requires comparing current content before retrying. Only tool-confirmed status
 and wiki SHAs are reported. On a destination mismatch, read a fresh snapshot and
 re-establish destination, authorization, and evidence; never overwrite

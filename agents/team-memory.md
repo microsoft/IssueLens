@@ -123,6 +123,11 @@ unless its complete intended edit is part of a tool-confirmed publication.
 	`.wiki` backend owns snapshots and an atomic Git commit that persists the
 	pages and their history. Use no generic URL, force, token, or credential
 	arguments and no separate host publisher or persistence workflow.
+	The backend may rebase onto a descendant when requested pages are unchanged
+	or already match, with one internal retry for a confirmed revision race.
+	It preserves other pages and does not merge conflicting page content or
+	retry unknown push outcomes. Keep the original paired snapshot preconditions;
+	do not replace the expected SHA merely to bypass a conflict.
 5. On a stale-base conflict, re-read the current snapshot and affected pages,
 	then regenerate the minimal change against that SHA; never blindly retry or
 	overwrite concurrent human edits. A destination mismatch is rejected even if

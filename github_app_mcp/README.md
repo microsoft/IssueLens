@@ -267,10 +267,22 @@ preserved byte-for-byte and page deletion is unsupported.
 
 The backend in [src/issuelens_github_mcp/wiki.py](src/issuelens_github_mcp/wiki.py)
 owns snapshots and an atomic Git commit, persisting knowledge and history with
-a non-force update against `expected_base`. No separate host publisher,
-database, or proposal/approval persistence is involved. If no knowledge changes,
-do not write. On a stale-base conflict, re-read and regenerate against the new
-snapshot; never blindly retry. If a response was lost, compare desired contents
+a non-force, exact-old-ref update. `expected_base` remains the original full-SHA
+content baseline. The backend can rebase onto a verified descendant when each
+requested page is unchanged from that baseline or already has the desired
+content, preserving concurrent edits to other pages and assets. Same-page
+conflicts, deleted pages, mode changes, and rewritten history are rejected;
+there is no line-level merge or force push. A pre-upload ref race or a recognized
+CAS rejection with verified remote advancement allows **one** internal retry,
+within the same time, request, byte, and object budgets. The new commit's only
+parent and ref lease are the refreshed tip. Transport/authentication failures,
+unrecognized rejections, missing acknowledgements, and post-push verification
+failures are not retried.
+
+No separate host publisher, database, or proposal/approval persistence is
+involved. If no knowledge changes, do not write. On a remaining stale-base
+conflict, re-read and regenerate against the new snapshot; never blindly retry.
+If a response was lost, compare desired contents
 with current pages first. On a destination mismatch, read a fresh snapshot and
 re-establish destination, authorization, and evidence; never automatically
 overwrite or reuse edits against another wiki, or merely replace the expected
