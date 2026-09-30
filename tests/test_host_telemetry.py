@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import yaml
+import httpx
 from azure.ai.agentserver.responses import (
     CreateResponse,
     PlatformContext,
@@ -33,6 +34,7 @@ from azure.core.exceptions import ClientAuthenticationError
 from copilot import CopilotClient, PermissionHandler
 from copilot.generated.session_events import SessionEvent, SessionEventType
 from copilot.session import ProviderTokenAcquireRequest
+from copilot.tools import ToolInvocation
 from opentelemetry.trace import StatusCode
 from starlette.requests import Request
 from starlette.responses import StreamingResponse
@@ -225,6 +227,84 @@ class FakeCopilotClient:
 
 
 class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_notification_tools_submit_once_and_return_safe_explicit_outcomes(self):
+        with patch.dict(os.environ, {
+            "MAILING_URL": "https://example.invalid/email?sig=URL-CANARY",
+            "PERSONAL_NOTIFICATION_URL": "https://example.invalid/teams?sig=URL-CANARY",
+            "RECIPIENTS": "user@example.invalid",
+        }):
+            tools = self.host._notification_tools()
+        self.assertEqual({tool.name for tool in tools}, {"send-email", "send-teams-notification"})
+        for tool in tools:
+            for status, expected_outcome in ((202, "completed"), (403, "not_applied"), (503, "unknown")):
+                with self.subTest(tool=tool.name, status=status):
+                    with patch.object(self.host.httpx, "AsyncClient") as factory:
+                        post = AsyncMock(return_value=httpx.Response(status, text="BODY-CANARY"))
+                        factory.return_value.__aenter__.return_value.post = post
+                        result = await tool.handler(ToolInvocation(arguments={
+                            "title": "Report", "body": "PRIVATE-CONTENT", "message": "PRIVATE-CONTENT",
+                            "recipients": ["user@example.invalid"], "recipient": "user@example.invalid",
+                        }))
+                    payload = json.loads(result.text_result_for_llm)
+                    self.assertEqual(payload["success"], status == 202)
+                    self.assertEqual(payload["outcome"], expected_outcome)
+                    self.assertEqual(result.result_type, "success" if status == 202 else "failure")
+                    if status == 202:
+                        self.assertEqual(payload["result"], {"status": "accepted", "http_status": status})
+                    else:
+                        self.assertEqual(payload["error"]["http_status"], status)
+                        self.assertEqual(json.loads(result.error), payload)
+                    post.assert_awaited_once()
+                    for secret in ("URL-CANARY", "BODY-CANARY", "PRIVATE-CONTENT"):
+                        self.assertNotIn(secret, result.text_result_for_llm)
+
+    async def test_notification_timeout_is_unknown_and_validation_is_not_applied(self):
+        with patch.dict(os.environ, {"MAILING_URL": "https://example.invalid/?sig=PRIVATE-CANARY"}):
+            tool, = self.host._notification_tools()
+        with patch.object(self.host.httpx, "AsyncClient") as factory:
+            post = AsyncMock(side_effect=httpx.ReadTimeout("PRIVATE-CANARY"))
+            factory.return_value.__aenter__.return_value.post = post
+            result = await tool.handler(ToolInvocation(arguments={
+                "title": "Report", "body": "Report", "recipients": ["user@example.invalid"],
+            }))
+            post.assert_awaited_once()
+            failure = json.loads(result.text_result_for_llm)
+            self.assertEqual(failure["outcome"], "unknown")
+            self.assertEqual(failure["error"]["type"], "timeout")
+            self.assertIsNone(failure["error"]["http_status"])
+            self.assertNotIn("PRIVATE-CANARY", result.text_result_for_llm)
+            factory.reset_mock()
+            for arguments in ({}, {"title": {}, "body": "Report", "recipients": ["user@example.invalid"]}):
+                result = await tool.handler(ToolInvocation(arguments=arguments))
+                failure = json.loads(result.text_result_for_llm)
+                self.assertEqual(failure["outcome"], "not_applied")
+                self.assertEqual(failure["error"]["type"], "invalid_input")
+                factory.assert_not_called()
+
+    async def test_notification_defaults_never_replace_explicit_invalid_inputs(self):
+        with patch.dict(os.environ, {
+            "MAILING_URL": "https://example.invalid/email",
+            "RECIPIENTS": "default@example.invalid",
+        }), patch.object(self.host.httpx, "AsyncClient") as factory:
+            tool, = self.host._notification_tools()
+            post = AsyncMock(return_value=httpx.Response(202))
+            factory.return_value.__aenter__.return_value.post = post
+            for field in ("recipients", "timeFrame", "workflowRunUrl"):
+                for invalid in (None, [], False, ""):
+                    with self.subTest(field=field, invalid=invalid):
+                        result = await tool.handler(ToolInvocation(arguments={
+                            "title": "Report", "body": "Report", field: invalid,
+                        }))
+                        failure = json.loads(result.text_result_for_llm)
+                        self.assertEqual(failure["outcome"], "not_applied")
+                        self.assertEqual(failure["error"]["type"], "invalid_input")
+                        factory.assert_not_called()
+            result = await tool.handler(ToolInvocation(arguments={"title": "Report", "body": "Report"}))
+            self.assertEqual(result.result_type, "success")
+            post.assert_awaited_once_with("https://example.invalid/email", json={
+                "title": "Report", "body": "Report", "recipients": ["default@example.invalid"],
+            })
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

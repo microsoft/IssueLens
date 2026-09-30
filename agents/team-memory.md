@@ -87,8 +87,9 @@ separated safely. Report every requested source, including deferred or failed
 ones, in the caller's requested format. Never claim that a source was updated
 unless its complete intended edit is part of a tool-confirmed publication.
 
-1. Load the policy above, then use `read_snapshot = get_wiki_snapshot(repository=source_project)`
-	for the mapped, existing initialized wiki. Pin `list_wiki_pages`,
+1. Load the policy above, then call `get_wiki_snapshot(repository=source_project)`
+	for the mapped, existing initialized wiki. Check the execution envelope and use
+	the successful `result` payload as `read_snapshot`. Pin `list_wiki_pages`,
 	`get_wiki_page`, `search_wiki`, `list_wiki_history`, and `get_wiki_diff` to
 	the same full wiki SHA, using explicit comparison SHAs for diffs. Retain
 	this snapshot's `wiki_repository` and `sha` together for the write. Apply the
@@ -112,7 +113,7 @@ unless its complete intended edit is part of a tool-confirmed publication.
 	Stay within 20 pages, 64 KiB UTF-8 per page, and 256 KiB total per call. Reads
 	accept only `HEAD` or a full SHA; use the pinned full SHA for this job.
 4. After confirming authorization, call
-	`write_wiki_pages(repository=source_project, pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot.wiki_repository, expected_base=read_snapshot.sha, message=short_summary)`.
+	`write_wiki_pages(repository=source_project, pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot["wiki_repository"], expected_base=read_snapshot["sha"], message=short_summary)`.
 	Both expected values are required. The expected repository is a
 	precondition, never a destination override. The writer compares it
 	case-insensitively with the freshly resolved policy destination before any
@@ -123,13 +124,13 @@ unless its complete intended edit is part of a tool-confirmed publication.
 	`.wiki` backend owns snapshots and an atomic Git commit that persists the
 	pages and their history. Use no generic URL, force, token, or credential
 	arguments and no separate host publisher or persistence workflow.
-	The backend may rebase onto a descendant when requested pages are unchanged
-	or already match, with one internal retry for a confirmed revision race.
-	It preserves other pages and does not merge conflicting page content or
-	retry unknown push outcomes. Keep the original paired snapshot preconditions;
-	do not replace the expected SHA merely to bypass a conflict.
-5. On a stale-base conflict, re-read the current snapshot and affected pages,
-	then regenerate the minimal change against that SHA; never blindly retry or
+	The backend makes at most one atomic publication attempt against the supplied
+	SHA, with no internal rebase or retry. Interpret the common execution envelope
+	using the preloaded `tool-results` skill; snapshot and publication fields
+	are in `result`, and failures retain their error type and known outcome.
+5. You own recovery decisions. On a stale-base conflict or rejected publication,
+	re-read the current snapshot and affected pages, then decide whether to
+	regenerate the minimal change against that SHA; never blindly retry or
 	overwrite concurrent human edits. A destination mismatch is rejected even if
 	the SHA is unchanged. Read a fresh snapshot and re-establish the destination,
 	authorization, and cited evidence; do not automatically overwrite or reuse
@@ -137,6 +138,8 @@ unless its complete intended edit is part of a tool-confirmed publication.
 	If a previous response was lost, compare
 	desired content with current pages before attempting another write. Matching
 	content needs no repeat write and does not prove who performed the update.
+	Default to at most one corrective write attempt after reconciliation. Stop
+	for human direction when intent conflicts or the corrective attempt fails.
 6. Report updated only after the `write_wiki_pages` tool's
 	publication result confirms the wiki commit. Return the actual status and
 	new wiki SHA only as confirmed by that result. Otherwise report no-change,

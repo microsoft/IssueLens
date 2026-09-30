@@ -583,6 +583,58 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(span.status.status_code, trace.StatusCode.ERROR)
         self.assertIn("failed", [attrs.get("status") for _, _, attrs in self.backend.metrics])
 
+    def test_structured_tool_failure_preserves_only_allowlisted_diagnostics(self):
+        for source in ("result", "error"):
+            identifier = "failure-" + source
+            self.tool_start(identifier, "wiki-writer-write_wiki_pages", issue_number=None)
+            envelope = {
+                "success": False, "outcome": "unknown", "result": None,
+                "error": {"type": "upstream_error", "message": "PRIVATE-CANARY", "http_status": 503},
+            }
+            completion = {"toolCallId": identifier, "success": source == "result"}
+            if source == "result":
+                completion["result"] = {"structuredContent": envelope}
+            else:
+                completion["error"] = {"message": json.dumps(envelope)}
+            self.run.observe(event("tool.execution_complete", completion))
+        summary = self.complete()
+        self.assertEqual(summary["tools_failed"], 2)
+        self.assertEqual(summary["write_operations_succeeded"], 0)
+        failures = self.backend.facts("issuelens.run.error")
+        self.assertEqual(len(failures), 2)
+        for failure in failures:
+            self.assertEqual(failure["error_type"], "upstream_error")
+            self.assertEqual(failure["http_status"], 503)
+            self.assertEqual(failure["tool_outcome"], "unknown")
+        spans = [span for span in self.backend.exporter.get_finished_spans() if span.name.startswith("execute_tool")]
+        for span in spans:
+            self.assertEqual(span.attributes["error.type"], "upstream_error")
+            self.assertEqual(span.attributes["http.response.status_code"], 503)
+            self.assertEqual(span.attributes["issuelens.tool.outcome"], "unknown")
+        self.assertNotIn("PRIVATE-CANARY", json.dumps(self.backend.events))
+        self.assertNotIn("PRIVATE-CANARY", str([dict(span.attributes) for span in spans]))
+
+    def test_successful_enveloped_wiki_result_still_records_confirmed_publication(self):
+        self.tool_start("write", "wiki-writer-write_wiki_pages", issue_number=None)
+        self.run.observe(event("tool.execution_complete", {
+            "toolCallId": "write", "success": True, "result": {"content": json.dumps({
+                "success": True, "outcome": "completed", "error": None,
+                "result": {"source_repository": "org/repo", "wiki_repository": "org/repo", "status": "updated"},
+            })},
+        }))
+        self.assertEqual(self.complete()["write_operations_succeeded"], 1)
+
+    def test_malformed_tool_diagnostics_do_not_escape_allowlists(self):
+        for error_type, status in (("PRIVATE-CANARY", 0), (["conflict"], True), ({"type": "conflict"}, 999)):
+            metadata = result_metadata({"structuredContent": {
+                "success": False, "outcome": "unknown", "result": None,
+                "error": {"type": error_type, "message": "PRIVATE-CANARY", "http_status": status},
+            }})
+            self.assertEqual(metadata, {"is_error": True, "tool_outcome": "unknown"})
+        self.assertEqual(result_metadata({"structuredContent": {
+            "success": False, "outcome": ["unknown"], "error": {"message": "PRIVATE-CANARY"},
+        }}), {"is_error": True, "is_pull_request": False})
+
     def test_successful_write_then_failure_is_partial_not_success(self):
         self.tool_start("write", "github-add_issue_comment", body="SECRET")
         self.tool_end("write", id=123)

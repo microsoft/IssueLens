@@ -507,6 +507,34 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.provider.get_bot_identity.assert_not_awaited()
 
+    async def test_cleanup_failure_after_unconfirmed_publication_remains_unknown(self):
+        def lost_response(wiki):
+            wiki._publication_started = True
+            raise WikiError("wiki response lost", error_type="outcome_unknown", outcome="unknown")
+
+        with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+            backend.return_value.__enter__.return_value._publication_started = False
+            backend.return_value.__exit__.side_effect = WikiError("wiki temporary storage cleanup failed")
+            with self.assertRaises(GitHubAppError) as failure:
+                self.github._wiki_operation(REPOSITORY, WIKI_REPOSITORY, TOKEN, lost_response, write=True)
+        self.assertEqual(failure.exception.outcome, "unknown")
+        self.assertNotIn(TOKEN, str(failure.exception))
+
+    async def test_policy_read_failure_retains_classification_before_any_wiki_access(self):
+        self.get_file.side_effect = GitHubAppError(
+            "GitHub API request failed with HTTP 403", error_type="permission_denied", http_status=403,
+        )
+        with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+            with self.assertRaises(GitHubAppError) as failure:
+                await self.writer().write_wiki_pages(
+                    REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
+                )
+        self.assertEqual(failure.exception.error_type, "permission_denied")
+        self.assertEqual(failure.exception.http_status, 403)
+        self.assertEqual(failure.exception.outcome, "not_applied")
+        backend.assert_not_called()
+        self.provider.get_token.assert_not_awaited()
+
     async def test_list_and_text_reads_include_identity_and_preserve_payloads(self):
         for destination in (REPOSITORY, WIKI_REPOSITORY):
             if destination != REPOSITORY:
@@ -887,12 +915,12 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                     "message": "Document Unicode content",
                 })
                 self.assertFalse(written.is_error, written.content)
-                snapshot = json.loads(written.content[0].text)["sha"]
+                snapshot = json.loads(written.content[0].text)["result"]["sha"]
                 result = await client.call_tool("get_wiki_page", {
                     "repository": REPOSITORY, "path": "Unicode.md", "ref": snapshot,
                 })
                 self.assertFalse(result.is_error, result.content)
-                self.assertEqual(json.loads(result.content[0].text)["content"], content)
+                self.assertEqual(json.loads(result.content[0].text)["result"]["content"], content)
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="mocked-app-jwt")
     async def test_real_mcp_write_changes_local_sha_and_supports_pinned_reads(self, _):
@@ -910,7 +938,12 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(TOKEN, item.text)
                 self.assertNotIn("mocked-app-jwt", item.text)
             self.assertEqual(len(result.content), 1)
-            payload = json.loads(result.content[0].text)
+            envelope = json.loads(result.content[0].text)
+            self.assertEqual(set(envelope), {"success", "outcome", "result", "error"})
+            self.assertTrue(envelope["success"])
+            self.assertEqual(envelope["outcome"], "completed")
+            self.assertIsNone(envelope["error"])
+            payload = envelope["result"]
             self.assertEqual(payload["source_repository"], REPOSITORY)
             self.assertEqual(payload["wiki_repository"], WIKI_REPOSITORY)
             return payload
@@ -970,12 +1003,23 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(result.is_error)
                     self.assertNotIn(TOKEN, str(result.content))
                     self.assertEqual(self.tip(), updated["sha"])
-                rebased = await call_json(client, "write_wiki_pages", {
+                conflict = await client.call_tool("write_wiki_pages", {
                     **write, "pages": {"Home.md": write["pages"]["Home.md"], "Other.md": "Independent update\n"},
                 })
-                self.assertEqual(rebased["status"], "updated")
-                self.assertEqual(rebased["pages"], ["Other.md"])
-                self.assertEqual(self.tip(), rebased["sha"])
+                failure = json.loads(conflict.content[0].text)
+                self.assertTrue(conflict.is_error)
+                self.assertFalse(failure["success"])
+                self.assertEqual(failure["error"]["type"], "conflict")
+                self.assertEqual(failure["outcome"], "not_applied")
+                self.assertEqual(self.tip(), updated["sha"])
+                fresh = await call_json(client, "get_wiki_snapshot", {"repository": REPOSITORY})
+                reconciled = await call_json(client, "write_wiki_pages", {
+                    **write, "expected_base": fresh["sha"], "expected_wiki_repository": fresh["wiki_repository"],
+                    "pages": {"Other.md": "Independent update\n"},
+                })
+                self.assertEqual(reconciled["status"], "updated")
+                self.assertEqual(reconciled["pages"], ["Other.md"])
+                self.assertEqual(self.tip(), reconciled["sha"])
                 self.assertEqual(self.parents(), [updated["sha"]])
                 preserved = await call_json(client, "get_wiki_page", {"repository": REPOSITORY, "path": "Home.md"})
                 self.assertEqual(preserved["content"], write["pages"]["Home.md"])
@@ -1109,7 +1153,7 @@ class WikiMCPRoundTripTests(unittest.IsolatedAsyncioTestCase):
             async with Client(create_server(self.github_client())) as client:
                 result = await client.call_tool("get_wiki_snapshot", {"repository": REPOSITORY})
                 self.assertFalse(result.is_error, result.content)
-                snapshot = json.loads(result.content[0].text)
+                snapshot = json.loads(result.content[0].text)["result"]
                 self.assertEqual(snapshot["sha"], self.base)
                 self.assertEqual(snapshot["wiki_repository"], WIKI_REPOSITORY)
         source_reads = [

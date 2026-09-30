@@ -71,7 +71,7 @@ from copilot.session_events import (
     SessionEventType,
     SessionIdleData,
 )
-from copilot.tools import Tool, ToolInvocation, ToolResult
+from copilot.tools import Tool, ToolInvocation
 
 from github_app_mcp.src.issuelens_github_mcp.auth import (
     GitHubAppError,
@@ -82,6 +82,7 @@ from github_app_mcp.src.issuelens_github_mcp.config import (
     GitHubAppConfig,
 )
 from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient
+from github_app_mcp.src.issuelens_github_mcp.outcomes import ToolFailure, http_error_type
 from issue_image_context import issue_image_attachments
 from issuelens_config_tool import create_tool as create_issuelens_config_tool
 from media_inputs import (
@@ -92,6 +93,7 @@ from media_inputs import (
 )
 from telemetry import RunTelemetry, copilot_environment, prepare_environment
 from telemetry_export import OpenTelemetryBackend
+from tool_results import tool_handler
 
 _project_dir = pathlib.Path(__file__).parent
 _github_mcp_src = _project_dir / "github_app_mcp" / "src"
@@ -154,7 +156,7 @@ _ISSUELENS_AGENT: CustomAgentConfig = {
         "project wiki maintenance to the team-memory agent."
     ),
     "prompt": _load_prompt(_agents_dir / "issuelens.md"),
-    "skills": ["issuelens-config", "team-memory"],
+    "skills": ["issuelens-config", "team-memory", "tool-results"],
 }
 
 
@@ -169,6 +171,7 @@ _TRIAGE_AGENT: CustomAgentConfig = {
     "skills": [
         "issuelens-config",
         "team-memory",
+        "tool-results",
         "find-duplicates",
         "label-issue",
         "assign-issue",
@@ -187,7 +190,7 @@ _FIND_CRITICALS_AGENT: CustomAgentConfig = {
         "and regression issues."
     ),
     "prompt": _load_prompt(_agents_dir / "find-criticals.md"),
-    "skills": ["issuelens-config", "team-memory"],
+    "skills": ["issuelens-config", "team-memory", "tool-results"],
     "infer": True,
 }
 
@@ -203,6 +206,7 @@ _PLAN_AGENT: CustomAgentConfig = {
     "skills": [
         "issuelens-config",
         "team-memory",
+        "tool-results",
         "label-issue",
         "assign-issue",
         "notify",
@@ -219,7 +223,7 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
         "customization and bounded MCP wiki read/write tools."
     ),
     "prompt": _load_prompt(_agents_dir / "team-memory.md"),
-    "skills": ["issuelens-config", "team-memory", "change-analysis"],
+    "skills": ["issuelens-config", "team-memory", "change-analysis", "tool-results"],
     "tools": [
         "issuelens-config",
         "github-get_repository",
@@ -476,26 +480,31 @@ def _default_recipients() -> list[str]:
     return [r.strip() for r in raw.replace(";", ",").split(",") if r.strip()]
 
 
-async def _post_logicapp(url: str, payload: dict) -> ToolResult:
+def _notification_text(arguments: dict, name: str) -> str:
+    value = arguments.get(name)
+    if not isinstance(value, str) or not value.strip():
+        raise ToolFailure(f"Notification {name} must be nonempty text.", error_type="invalid_input")
+    return value
+
+
+async def _post_logicapp(url: str, payload: dict) -> dict:
     """POST a JSON payload to a Logic App endpoint and map the result for the LLM."""
     try:
         with suppress_instrumentation():
             async with httpx.AsyncClient(timeout=30) as http:
                 resp = await http.post(url, json=payload)
-    except Exception as exc:  # network / timeout
-        return ToolResult(
-            text_result_for_llm=f"Notification failed: {exc}",
-            result_type="failure",
-            error=str(exc),
-        )
+    except httpx.HTTPError as error:
+        raise ToolFailure(
+            "Notification submission was not confirmed; inspect delivery state before resending.",
+            error_type="timeout" if isinstance(error, httpx.TimeoutException) else "transport_error",
+            outcome="unknown",
+        ) from None
     if 200 <= resp.status_code < 300:
-        return ToolResult(
-            text_result_for_llm=f"Notification sent (HTTP {resp.status_code}).")
-    return ToolResult(
-        text_result_for_llm=(
-            f"Notification failed: HTTP {resp.status_code} {resp.text[:200]}"),
-        result_type="failure",
-        error=f"HTTP {resp.status_code}",
+        return {"status": "accepted", "http_status": resp.status_code}
+    raise ToolFailure(
+        f"Notification endpoint returned HTTP {resp.status_code}.",
+        error_type=http_error_type(resp.status_code), http_status=resp.status_code,
+        outcome="unknown" if resp.status_code >= 500 or resp.status_code == 408 else "not_applied",
     )
 
 
@@ -511,25 +520,23 @@ def _notification_tools() -> list[Tool]:
 
     mailing_url = os.environ.get(_MAILING_URL_ENV)
     if mailing_url:
-        async def _send_email(inv: ToolInvocation) -> ToolResult:
+        async def _send_email(inv: ToolInvocation) -> dict:
             args = inv.arguments or {}
-            recipients = args.get("recipients") or _default_recipients()
-            if not recipients:
-                return ToolResult(
-                    text_result_for_llm=(
-                        "No recipients provided and RECIPIENTS is not configured."),
-                    result_type="failure",
-                    error="no recipients",
+            recipients = args.get("recipients", _default_recipients())
+            if not isinstance(recipients, list) or not recipients or any(not isinstance(value, str) or not value.strip() for value in recipients):
+                raise ToolFailure(
+                    "Provide a nonempty recipient list, or configure RECIPIENTS and omit recipients.",
+                    error_type="invalid_input",
                 )
             payload: dict = {
-                "title": args.get("title"),
-                "body": args.get("body"),
+                "title": _notification_text(args, "title"),
+                "body": _notification_text(args, "body"),
                 "recipients": recipients,
             }
-            if args.get("timeFrame"):
-                payload["timeFrame"] = args["timeFrame"]
-            if args.get("workflowRunUrl"):
-                payload["workflowRunUrl"] = args["workflowRunUrl"]
+            if "timeFrame" in args:
+                payload["timeFrame"] = _notification_text(args, "timeFrame")
+            if "workflowRunUrl" in args:
+                payload["workflowRunUrl"] = _notification_text(args, "workflowRunUrl")
             return await _post_logicapp(mailing_url, payload)
 
         tools.append(Tool(
@@ -566,20 +573,20 @@ def _notification_tools() -> list[Tool]:
                 },
                 "required": ["title", "body"],
             },
-            handler=_send_email,
+            handler=tool_handler(_send_email, write=True),
         ))
 
     personal_url = os.environ.get(_PERSONAL_NOTIFICATION_URL_ENV)
     if personal_url:
-        async def _send_teams(inv: ToolInvocation) -> ToolResult:
+        async def _send_teams(inv: ToolInvocation) -> dict:
             args = inv.arguments or {}
             payload: dict = {
-                "title": args.get("title"),
-                "message": args.get("message"),
-                "recipient": args.get("recipient"),
+                "title": _notification_text(args, "title"),
+                "message": _notification_text(args, "message"),
+                "recipient": _notification_text(args, "recipient"),
             }
-            if args.get("workflowRunUrl"):
-                payload["workflowRunUrl"] = args["workflowRunUrl"]
+            if "workflowRunUrl" in args:
+                payload["workflowRunUrl"] = _notification_text(args, "workflowRunUrl")
             return await _post_logicapp(personal_url, payload)
 
         tools.append(Tool(
@@ -606,7 +613,7 @@ def _notification_tools() -> list[Tool]:
                 },
                 "required": ["title", "message", "recipient"],
             },
-            handler=_send_teams,
+            handler=tool_handler(_send_teams, write=True),
         ))
 
     return tools

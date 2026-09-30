@@ -3,16 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import functools
+import inspect
+import json
 import os
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Annotated, Any, Literal
 
 from mcp.server import MCPServer
-from pydantic import Field
+from mcp.server.mcpserver.context import Context
+from mcp.types import CallToolResult, TextContent
+from pydantic import Field, ValidationError
 
 from .auth import GitHubAppError, GitHubAppTokenProvider
 from .config import ConfigurationError, GitHubAppConfig
-from .github import CommitDetail, GitHubClient, ReactionTarget
+from .github import CommitDetail, GitHubClient, ReactionTarget, _MAX_RESULT_BYTES, _MAX_WIKI_RESULT_BYTES
+from .outcomes import WRITE_TOOLS, ToolFailure, ToolOutcome, failure_result, success_result
 
 
 _ENABLE_WRITES_ENV = "GITHUB_MCP_ENABLE_WRITES"
@@ -20,11 +26,71 @@ _PerPage = Annotated[int, Field(strict=True, ge=1, le=100)]
 _FilePage = Annotated[int, Field(strict=True, ge=1, le=3000)]
 
 
+def _mcp_result(outcome: ToolOutcome) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(outcome, ensure_ascii=True, allow_nan=False))],
+        structured_content=outcome, is_error=not outcome["success"],
+    )
+
+
+class _OutcomeServer(MCPServer):
+    def add_tool(self, fn: Callable[..., Any], **options: Any) -> None:
+        name = options.get("name") or fn.__name__
+
+        @functools.wraps(fn)
+        async def execute(*args: Any, **kwargs: Any) -> CallToolResult:
+            try:
+                result = fn(*args, **kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                outcome = success_result(result)
+                limit = _MAX_WIKI_RESULT_BYTES if "wiki" in name else _MAX_RESULT_BYTES
+                if len(json.dumps(outcome, ensure_ascii=True, allow_nan=False).encode("utf-8")) > limit:
+                    raise ToolFailure(
+                        "Tool response is too large; narrow the request.",
+                        error_type="limit_exceeded",
+                        outcome="unknown" if name in WRITE_TOOLS else "not_applied",
+                    )
+                return _mcp_result(outcome)
+            except ToolFailure as error:
+                return _mcp_result(failure_result(error))
+            except Exception:
+                return _mcp_result(failure_result(ToolFailure(
+                    "Tool execution failed unexpectedly; inspect current state before another write.",
+                    error_type="internal_error",
+                    outcome="unknown" if name in WRITE_TOOLS else "not_applied",
+                )))
+
+        super().add_tool(execute, **options)
+
+    async def call_tool(
+        self, name: str, arguments: dict[str, Any], context: Context | None = None,
+    ) -> CallToolResult:
+        try:
+            if name not in {tool.name for tool in await self.list_tools()}:
+                return _mcp_result(failure_result(ToolFailure(
+                    "Tool is not available in this server.",
+                    error_type="permission_denied" if name in WRITE_TOOLS else "invalid_input",
+                )))
+            result = await super().call_tool(name, arguments, context)
+            if isinstance(result, CallToolResult):
+                return result
+            raise TypeError("Unsupported tool result")
+        except Exception as error:
+            invalid = isinstance(error, ValidationError) or isinstance(error.__cause__, ValidationError)
+            return _mcp_result(failure_result(ToolFailure(
+                "Tool arguments do not match the declared schema." if invalid else
+                "The tool could not be executed; check tool availability and arguments.",
+                error_type="invalid_input" if invalid else "internal_error",
+                outcome="not_applied" if invalid or name not in WRITE_TOOLS else "unknown",
+            )))
+
+
 def create_server(
     github: GitHubClient,
 ) -> MCPServer:
     """Create the IssueLens GitHub MCP server around a bounded client."""
-    server = MCPServer(
+    server = _OutcomeServer(
         name="issuelens-github",
         title="IssueLens GitHub",
         description=(
@@ -38,6 +104,11 @@ def create_server(
             "For wiki tools, repository is always the source project. Its "
             "validated team-memory customization selects the wiki repository, "
             "which requires App access; wiki operations never use anonymous access."
+            " Each tool performs one logical operation and never retries or rebases "
+            "a failed business operation. Results contain success, outcome, result, "
+            "and error (type, message, http_status). Read payloads from result. "
+            "The agent decides recovery; unknown outcomes require state inspection, "
+            "not a blind repeat write."
         ),
         version="0.1.0",
     )
@@ -318,9 +389,9 @@ def create_server(
             Paths must be relative Markdown pages: 1-20 pages, at most 64 KiB per
             page and 256 KiB per batch. The single-line message is at most 512
             bytes. The backend validates all paths, refs, and limits and rejects
-            conflicting page changes. It can rebase onto a descendant when
-            requested pages are unchanged or already match, with one retry for
-            a confirmed ref race. Unknown push outcomes are never retried.
+            conflicting snapshots. It attempts at most one atomic publication
+            against expected_base, without rebasing or retrying. Inspect the
+            returned error and outcome before deciding how to recover.
             Commits use the verified App Bot identity.
             """
             return await github.write_wiki_pages(

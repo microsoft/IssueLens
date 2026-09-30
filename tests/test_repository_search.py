@@ -860,13 +860,13 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                 results.append(result)
                 lookup.assert_awaited_once_with(REPOSITORY, {"contents": "read"})
                 self.assertEqual(len(self.requests), 66)
-                self.assertEqual(len(self.auth_requests), 2)
-                self.assertEqual(len(self.requests) + len(self.auth_requests), 68)
+                self.assertEqual(len(self.auth_requests), 2 if installed else 1)
+                self.assertEqual(len(self.requests) + len(self.auth_requests), 68 if installed else 67)
                 installation_path = f"/repos/{REPOSITORY}/installation"
-                self.assertEqual([request.url.path for request in self.auth_requests], [
-                    installation_path,
-                    "/app/installations/1234/access_tokens" if installed else installation_path,
-                ])
+                expected_auth_paths = [installation_path]
+                if installed:
+                    expected_auth_paths.append("/app/installations/1234/access_tokens")
+                self.assertEqual([request.url.path for request in self.auth_requests], expected_auth_paths)
                 expected_auth = "Bearer fake-repository-token" if installed else None
                 self.assertTrue(all(request.headers.get("Authorization") == expected_auth for request in self.requests))
                 self.requests.clear()
@@ -875,22 +875,22 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(repeated, result)
                 self.assertEqual(lookup.await_count, 2)
                 self.assertEqual(len(self.requests), 66)
-                self.assertEqual(len(self.auth_requests), 0 if installed else 2)
+                self.assertEqual(len(self.auth_requests), 0 if installed else 1)
         self.assertEqual(*results)
 
-    async def test_next_scan_retries_installation_after_anonymous_success(self):
+    async def test_next_scan_rechecks_installation_after_anonymous_success(self):
         self.add_file("file.txt", b"needle")
         lookup = self.use_real_provider(installed=False)
         anonymous = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
         self.assertTrue(all("Authorization" not in request.headers for request in self.requests))
-        self.assertEqual(len(self.auth_requests), 2)
+        self.assertEqual(len(self.auth_requests), 1)
 
         self.installation_available = True
         self.requests.clear()
         authenticated = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
         self.assertEqual(authenticated, anonymous)
         self.assertEqual(lookup.await_count, 2)
-        self.assertEqual(len(self.auth_requests), 4)
+        self.assertEqual(len(self.auth_requests), 3)
         self.assertEqual(len(self.requests), 3)
         self.assertTrue(all(request.headers.get("Authorization") == "Bearer fake-repository-token" for request in self.requests))
 
@@ -907,7 +907,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                         await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
                     self.assertNotIn("secret-response-sentinel", str(raised.exception))
                     self.assertEqual(len(self.requests), completed)
-                    self.assertEqual(len(self.auth_requests), 2)
+                    self.assertEqual(len(self.auth_requests), 1)
                     lookup.assert_awaited_once_with(REPOSITORY, {"contents": "read"})
                     self.assertTrue(all("Authorization" not in request.headers for request in self.requests))
 
@@ -917,7 +917,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
                     result = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
                     self.assertEqual(result["total_count"], 1)
                     self.assertEqual(lookup.await_count, 2)
-                    self.assertEqual(len(self.auth_requests), 4)
+                    self.assertEqual(len(self.auth_requests), 3)
                     self.assertEqual(len(self.requests), 3)
                     self.assertTrue(all(request.headers.get("Authorization") == "Bearer fake-repository-token" for request in self.requests))
 

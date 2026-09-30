@@ -47,7 +47,7 @@ class TeamMemoryPolicyToolTests(unittest.IsolatedAsyncioTestCase):
             "repository": "microsoft/IssueLens", "domain": "team_memory",
         }))
         self.assertEqual(result.result_type, "success")
-        payload = json.loads(result.text_result_for_llm)
+        payload = json.loads(result.text_result_for_llm)["result"]
         self.assertEqual(payload["source"], "configured")
         self.assertEqual(payload["content"], policy)
         self.assertNotIn("Unrelated planning policy", result.text_result_for_llm)
@@ -62,7 +62,7 @@ class TeamMemoryPolicyToolTests(unittest.IsolatedAsyncioTestCase):
                     arguments={"repository": "microsoft/IssueLens", "domain": "team_memory"}
                 ))
                 self.assertEqual(result.result_type, "success")
-                payload = json.loads(result.text_result_for_llm)
+                payload = json.loads(result.text_result_for_llm)["result"]
                 self.assertEqual(payload["source"], "built-in")
                 self.assertIsNone(payload["content"])
 
@@ -78,7 +78,10 @@ class TeamMemoryPolicyToolTests(unittest.IsolatedAsyncioTestCase):
                     "repository": "microsoft/IssueLens", "domain": "team_memory",
                 }))
                 self.assertEqual(result.result_type, "failure")
-                self.assertIn("IssueLens configuration failed", result.text_result_for_llm)
+                payload = json.loads(result.text_result_for_llm)
+                self.assertFalse(payload["success"])
+                self.assertEqual(payload["outcome"], "not_applied")
+                self.assertEqual(payload["error"]["type"], "configuration_error")
 
 
 class TeamMemoryInstructionTests(unittest.TestCase):
@@ -103,6 +106,7 @@ class TeamMemoryInstructionTests(unittest.TestCase):
             with self.subTest(agent=name):
                 self.assertIn("issuelens-config", skills)
                 self.assertIn("team-memory", skills)
+                self.assertIn("tool-results", skills)
 
     def test_writer_requires_validated_policy_and_confirmed_publication(self):
         prompt = (ROOT / "agents" / "team-memory.md").read_text(encoding="utf-8")
@@ -123,8 +127,8 @@ class TeamMemoryInstructionTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 text = " ".join((ROOT / path).read_text(encoding="utf-8").split())
-                self.assertIn("expected_wiki_repository=read_snapshot.wiki_repository", text)
-                self.assertIn("expected_base=read_snapshot.sha", text)
+                self.assertIn('expected_wiki_repository=read_snapshot["wiki_repository"]', text)
+                self.assertIn('expected_base=read_snapshot["sha"]', text)
                 self.assertIn("precondition, never a destination override", text)
                 self.assertIn("even if the SHA is unchanged", text)
                 self.assertIn("read a fresh snapshot", text.lower())

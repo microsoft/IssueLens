@@ -46,6 +46,43 @@ through bounded anonymous reads without an installation.
 
 ## Tools
 
+### Execution contract
+
+Every tool returns the same envelope in both MCP text and structured content:
+
+```json
+{
+  "success": false,
+  "outcome": "not_applied",
+  "result": null,
+  "error": {
+    "type": "conflict",
+    "message": "wiki base conflict; re-read the snapshot and reconcile changes before writing",
+    "http_status": null
+  }
+}
+```
+
+On success, `success` is true, `outcome` is `completed`, `result` contains the
+documented domain payload, and `error` is null. Empty lists and no-change results
+are still successful operations. On failure, MCP `isError` is true as well;
+`not_applied` means no requested effect was applied, while `unknown` means a
+write may already have happened. A timeout, missing acknowledgement, invalid
+write response, or failed publication verification must not be treated as
+proof that no write occurred. Known HTTP status codes are retained; null does
+not mean HTTP 0. Unhandled exceptions produce a safe `internal_error`, not raw
+exception text. Result byte limits include the envelope.
+
+Tools perform one logical operation. Scoped authentication, input validation,
+bounded read scans, and publication verification are implementation steps,
+not additional business operations. Failed operations are not retried or rebased
+inside tools. Stale installation-cache entries are invalidated without retrying
+token minting in the same call. Public read-only access selection remains
+supported, never as a fallback for writes. The owning agent interprets the
+result and decides whether to correct inputs, reconcile state, retry within its
+budget, or escalate. This is the same contract used by the host configuration
+and notification tools.
+
 The shared server registers these REST read tools. The permission shown is used when an App
 installation is available; public repositories can fall back to anonymous
 access:
@@ -232,12 +269,15 @@ an existing initialized wiki. For source
 the tool still accepts the source project, not the destination:
 
 ```python
-read_snapshot = get_wiki_snapshot(repository="microsoft/project")
-write_wiki_pages(
+snapshot_response = get_wiki_snapshot(repository="microsoft/project")
+if not snapshot_response["success"]:
+  raise RuntimeError(snapshot_response["error"]["message"])
+read_snapshot = snapshot_response["result"]
+write_response = write_wiki_pages(
   repository="microsoft/project",
   pages={"Architecture.md": full_utf8_content},
-  expected_wiki_repository=read_snapshot.wiki_repository,
-  expected_base=read_snapshot.sha,
+  expected_wiki_repository=read_snapshot["wiki_repository"],
+  expected_base=read_snapshot["sha"],
   message=short_summary,
 )
 ```
@@ -249,7 +289,7 @@ resolved policy destination case-insensitively before any destination metadata,
 token lookup, or wiki access. Policy still selects the actual destination and
 scoped App credentials. A mismatch is rejected even if the SHA is unchanged.
 
-`read_snapshot.sha` is the full SHA returned by the snapshot read. Supply complete UTF-8
+`read_snapshot["sha"]` is the full SHA returned by the snapshot read. Supply complete UTF-8
 contents for changed `.md` pages, not patches: at most 20 pages, 64 KiB per page,
 and 256 KiB total. Create/update only; deletion and rename are unsupported. The
 pages cite evidence and include the full source commit SHA, not an abbreviation,
@@ -267,21 +307,22 @@ preserved byte-for-byte and page deletion is unsupported.
 
 The backend in [src/issuelens_github_mcp/wiki.py](src/issuelens_github_mcp/wiki.py)
 owns snapshots and an atomic Git commit, persisting knowledge and history with
-a non-force, exact-old-ref update. `expected_base` remains the original full-SHA
-content baseline. The backend can rebase onto a verified descendant when each
-requested page is unchanged from that baseline or already has the desired
-content, preserving concurrent edits to other pages and assets. Same-page
-conflicts, deleted pages, mode changes, and rewritten history are rejected;
-there is no line-level merge or force push. A pre-upload ref race or a recognized
-CAS rejection with verified remote advancement allows **one** internal retry,
-within the same time, request, byte, and object budgets. The new commit's only
-parent and ref lease are the refreshed tip. Transport/authentication failures,
-unrecognized rejections, missing acknowledgements, and post-push verification
-failures are not retried.
+a non-force, exact-old-ref update. The new commit's only parent and ref lease are
+the supplied `expected_base`. A call attempts at most one publication, without
+an internal rebase or retry. Stale bases and ref races return `conflict`;
+explicit receive-pack rejections return `conflict` when recognized or
+`publish_rejected` otherwise, with `outcome: not_applied`. Missing
+acknowledgements, lost responses, and failed post-push verification return
+`outcome: unknown`. Messages are safe diagnostics, never raw remote stderr.
+An entirely matching batch may return no-change on a verified descendant;
+partially matching batches, mode changes, and rewritten history remain conflicts.
 
 No separate host publisher, database, or proposal/approval persistence is
-involved. If no knowledge changes, do not write. On a remaining stale-base
-conflict, re-read and regenerate against the new snapshot; never blindly retry.
+involved. If no knowledge changes, do not write. On a stale-base conflict, the
+agent may re-read and regenerate against a fresh snapshot in separate calls,
+then submit at most one corrective write by default. It must preserve concurrent
+edits, re-establish authorization if the destination changed, and stop on
+ambiguous human intent or repeated failure; never blindly retry.
 If a response was lost, compare desired contents
 with current pages first. On a destination mismatch, read a fresh snapshot and
 re-establish destination, authorization, and evidence; never automatically

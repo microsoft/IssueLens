@@ -818,6 +818,40 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(requests, [])
 
+    async def test_write_failures_are_classified_and_never_automatically_retried(self):
+        for status, outcome in ((401, "not_applied"), (409, "not_applied"), (429, "not_applied"), (503, "unknown")):
+            requests = []
+
+            def handler(request):
+                requests.append(request)
+                return httpx.Response(status, text="PRIVATE-CANARY")
+
+            client = GitHubClient(self.provider, writes_enabled=True, transport=httpx.MockTransport(handler))
+            with self.subTest(status=status), self.assertRaises(GitHubAppError) as failure:
+                await client.add_issue_comment("microsoft/IssueLens", 7, "Comment")
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(failure.exception.http_status, status)
+            self.assertEqual(failure.exception.outcome, outcome)
+            self.assertNotIn("PRIVATE-CANARY", str(failure.exception))
+
+    async def test_lost_or_invalid_write_response_is_unknown_without_retry(self):
+        for response in (None, httpx.Response(201, text="not JSON")):
+            requests = []
+
+            def handler(request):
+                requests.append(request)
+                if response is None:
+                    raise httpx.ReadTimeout("PRIVATE-CANARY")
+                return response
+
+            client = GitHubClient(self.provider, writes_enabled=True, transport=httpx.MockTransport(handler))
+            with self.subTest(response=response), self.assertRaises(GitHubAppError) as failure:
+                await client.add_issue_comment("microsoft/IssueLens", 7, "Comment")
+            self.assertEqual(len(requests), 1)
+            self.assertEqual(failure.exception.outcome, "unknown")
+            self.assertEqual(failure.exception.error_type, "timeout" if response is None else "invalid_response")
+            self.assertNotIn("PRIVATE-CANARY", str(failure.exception))
+
     async def test_multiple_comments_are_allowed_in_one_session(self):
         client = self.client(writes_enabled=True)
 

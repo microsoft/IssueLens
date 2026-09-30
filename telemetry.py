@@ -666,15 +666,29 @@ class RunTelemetry:
             return
         tool.finished = True
         metadata = result_metadata(_get(data, "result"))
+        if "error_type" not in metadata:
+            error_metadata = result_metadata({"content": _get(_get(data, "error"), "message")})
+            if error_metadata.get("is_error"):
+                metadata.update(error_metadata)
         success = _get(data, "success") is True and not metadata.get("is_error")
         tool.owner.tools_completed += 1
         tool.owner.tools_failed += int(not success)
+        if "tool_outcome" in metadata:
+            tool.span.set_attribute("issuelens.tool.outcome", metadata["tool_outcome"])
         if not success:
+            error_type = metadata.get("error_type", "tool_error")
             tool.span.set_status(StatusCode.ERROR)
-            tool.span.set_attribute("error.type", "tool_error")
+            tool.span.set_attribute("error.type", error_type)
+            details = {}
+            if "http_status" in metadata:
+                details["http_status"] = metadata["http_status"]
+                tool.span.set_attribute("http.response.status_code", metadata["http_status"])
+            if "tool_outcome" in metadata:
+                details["tool_outcome"] = metadata["tool_outcome"]
             self._event("issuelens.run.error", {
-                "stage": "tool", "error_type": "tool_error", "tool": tool.name,
+                "stage": "tool", "error_type": error_type, "tool": tool.name,
                 "role": tool.owner.role, "agent_run_id": tool.owner.identity,
+                **details,
             })
         tool.span.end(end_time=self.wall_clock())
         self._metric("gen_ai.execute_tool.duration", self.clock() - tool.started,

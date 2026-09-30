@@ -134,13 +134,20 @@ class WikiTests(WikiFixture, unittest.TestCase):
             with self.assertRaises(KeyError):
                 self.object_id(self.tip(), "New.md")
 
-    def test_stale_base_rebases_independent_pages_and_preserves_assets(self) -> None:
+    def test_stale_base_requires_caller_reconciliation_and_preserves_assets(self) -> None:
         with self.local_wiki("example/repository") as wiki:
             concurrent = self.seed_entries({"Other.md": ("100644", b"Concurrent page\n"),
                                            "images/logo.bin": ("100755", b"\x00\xffNew asset")})
             with patch.object(wiki._transport, "send_pack", wraps=wiki._transport.send_pack) as send:
-                result = self.write(wiki, {"Home.md": "Updated home\n", "notes/New.md": "New page\n"})
-            self.assertEqual(send.call_count, 1)
+                with self.assertRaisesRegex(WikiError, "base conflict") as failure:
+                    self.write(wiki, {"Home.md": "Updated home\n", "notes/New.md": "New page\n"})
+            send.assert_not_called()
+            self.assertEqual(failure.exception.error_type, "conflict")
+            self.assertEqual(failure.exception.outcome, "not_applied")
+            self.assertEqual(self.tip(), concurrent)
+            snapshot = wiki.snapshot()
+            self.assertEqual(wiki.page("Other.md", snapshot["sha"])["content"], "Concurrent page\n")
+            result = self.write(wiki, {"Home.md": "Updated home\n", "notes/New.md": "New page\n"}, snapshot["sha"])
             self.assertEqual(set(result), {"status", "sha", "branch", "pages", "repository"})
             self.assertEqual(result["status"], "updated")
             self.assertEqual(result["pages"], ["Home.md", "notes/New.md"])
@@ -154,11 +161,14 @@ class WikiTests(WikiFixture, unittest.TestCase):
                 self.assertEqual(wiki._inventory(result["sha"])[path], wiki._inventory(concurrent)[path])
             self.assertEqual(wiki.history(), [result["sha"], concurrent, self.base])
 
-    def test_stale_batch_rebases_only_pages_not_already_applied(self) -> None:
+    def test_partially_applied_stale_batch_is_a_conflict_not_an_internal_rebase(self) -> None:
         concurrent = self.seed_entries({"Home.md": ("100644", b"Desired home\n"),
                                        "Existing.md": ("100644", b"Already added\n")})
         with self.local_wiki("example/repository") as wiki:
-            result = self.write(wiki, {"Home.md": "Desired home\n", "Existing.md": "Already added\n", "New.md": "New\n"})
+            with self.assertRaisesRegex(WikiError, "conflict"):
+                self.write(wiki, {"Home.md": "Desired home\n", "Existing.md": "Already added\n", "New.md": "New\n"})
+            self.assertEqual(self.tip(), concurrent)
+            result = self.write(wiki, {"Home.md": "Desired home\n", "Existing.md": "Already added\n", "New.md": "New\n"}, concurrent)
             self.assertEqual(result["status"], "updated")
             self.assertEqual(result["pages"], ["New.md"])
             self.assertEqual(self.remote_repo.object_store[result["sha"].encode("ascii")].parents,
@@ -180,7 +190,7 @@ class WikiTests(WikiFixture, unittest.TestCase):
         self.remote_repo.refs[self.branch] = commit.id
         with self.local_wiki("example/repository") as wiki:
             with patch.object(wiki._transport, "send_pack", wraps=wiki._transport.send_pack) as send:
-                with self.assertRaisesRegex(WikiError, "requested page changed"):
+                with self.assertRaisesRegex(WikiError, "base conflict"):
                     self.write(wiki, {"Home.md": "Stale replacement\n", "New.md": "Must not be published\n"})
             send.assert_not_called()
             self.assertEqual(self.tip(), commit.id.decode("ascii"))
@@ -324,7 +334,7 @@ class WikiTests(WikiFixture, unittest.TestCase):
             with self.assertRaisesRegex(WikiError, "output budget"):
                 wiki.diff(self.base, newer)
 
-    def test_publish_race_retries_once_with_a_new_exact_base_lease(self) -> None:
+    def test_publish_race_returns_conflict_without_retry(self) -> None:
         with self.local_wiki("example/repository") as first, self.local_wiki("example/repository") as second:
             send_pack = first._client.send_pack
             concurrent = {}
@@ -334,15 +344,16 @@ class WikiTests(WikiFixture, unittest.TestCase):
                     concurrent.update(self.write(second, {"Other.md": "Concurrent writer"}))
                 return send_pack(*arguments, **keywords)
             with patch.object(first._client, "send_pack", side_effect=race) as send:
-                result = self.write(first, {"New.md": "Rebased writer"})
-            self.assertEqual(send.call_count, 2)
-            self.assertEqual(self.tip(), result["sha"])
-            self.assertEqual(first.page("New.md")["content"], "Rebased writer")
-            self.assertEqual(first.page("Other.md")["content"], "Concurrent writer")
-            self.assertEqual(self.remote_repo.object_store[result["sha"].encode("ascii")].parents,
-                             [concurrent["sha"].encode("ascii")])
+                with self.assertRaisesRegex(WikiError, "conflict") as failure:
+                    self.write(first, {"New.md": "Not published"})
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(failure.exception.error_type, "conflict")
+            self.assertEqual(failure.exception.outcome, "not_applied")
+            self.assertEqual(self.tip(), concurrent["sha"])
+            with self.assertRaises(KeyError):
+                self.object_id(self.tip(), "New.md")
 
-    def test_repeated_publish_races_stop_after_one_retry(self) -> None:
+    def test_persistent_publish_race_still_makes_only_one_attempt(self) -> None:
         with self.local_wiki("example/repository") as wiki:
             send_pack = wiki._client.send_pack
             concurrent = []
@@ -352,15 +363,15 @@ class WikiTests(WikiFixture, unittest.TestCase):
                 return send_pack(*arguments, **keywords)
 
             with patch.object(wiki._client, "send_pack", side_effect=race) as send:
-                with self.assertRaisesRegex(WikiError, "retry limit reached"):
+                with self.assertRaisesRegex(WikiError, "conflict"):
                     self.write(wiki, {"New.md": "Must not be published"})
-            self.assertEqual(send.call_count, 2)
-            self.assertEqual(len(concurrent), 2)
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(len(concurrent), 1)
             self.assertEqual(self.tip(), concurrent[-1])
             with self.assertRaises(KeyError):
                 self.object_id(self.tip(), "New.md")
 
-    def test_retry_rechecks_target_content_mode_and_history_against_original_base(self) -> None:
+    def test_pre_publication_ref_changes_do_not_start_recovery(self) -> None:
         for change in ("content", "mode", "history", "branch"):
             with self.subTest(change=change):
                 base = self.tip()
@@ -392,27 +403,7 @@ class WikiTests(WikiFixture, unittest.TestCase):
                     finally:
                         self.remote_repo.refs.set_symbolic_ref(b"HEAD", self.branch)
 
-    def test_retry_rejects_rewritten_intervening_history(self) -> None:
-        self.seed_entries({"Other.md": ("100644", b"Initial intervening commit")})
-        with self.local_wiki("example/repository") as wiki:
-            send_pack = wiki._client.send_pack
-            rewritten = []
-
-            def race(*args, **kwargs):
-                if not rewritten:
-                    rewritten.append(self.seed_entries({"Other.md": ("100644", b"Rewritten")},
-                                                       parents=[self.base.encode("ascii")]))
-                return send_pack(*args, **kwargs)
-
-            with patch.object(wiki._client, "send_pack", side_effect=race) as send:
-                with self.assertRaisesRegex(WikiError, "remote history changed"):
-                    self.write(wiki, {"New.md": "Must not be published"})
-            self.assertEqual(send.call_count, 1)
-            self.assertEqual(self.tip(), rewritten[0])
-            with self.assertRaises(KeyError):
-                self.object_id(self.tip(), "New.md")
-
-    def test_retry_retains_operation_deadline_and_request_budget(self) -> None:
+    def test_conflict_does_not_reset_operation_deadline_or_request_budget(self) -> None:
         for budget in ("requests", "time"):
             with self.subTest(budget=budget), self.local_wiki("example/repository") as wiki:
                 send_pack = wiki._client.send_pack
@@ -431,19 +422,19 @@ class WikiTests(WikiFixture, unittest.TestCase):
                             wiki._deadline = time.monotonic() - 1
 
                 with patch.object(wiki._client, "send_pack", side_effect=race) as send:
-                    with self.assertRaisesRegex(WikiError, "budget"):
+                    with self.assertRaisesRegex(WikiError, "conflict"):
                         self.write(wiki, {"New.md": "Must not be published"}, base)
                 self.assertEqual(send.call_count, 1)
                 self.assertEqual(self.tip(), concurrent[0])
                 if budget == "requests":
-                    self.assertEqual(wiki._requests, wiki.MAX_REQUESTS + 1)
+                    self.assertEqual(wiki._requests, wiki.MAX_REQUESTS)
                     self.assertEqual(wiki._deadline, deadline)
                 else:
                     self.assertLess(wiki._deadline, time.monotonic())
                 with self.assertRaises(KeyError):
                     self.object_id(self.tip(), "New.md")
 
-    def test_ref_rejections_without_confirmed_revision_race_are_not_retried(self) -> None:
+    def test_ref_rejections_and_missing_acknowledgements_are_distinct_and_never_retried(self) -> None:
         for reason in ("failed to update ref", "pre-receive hook declined", "permission denied", "unknown failure", None):
             with self.subTest(reason=reason), self.local_wiki("example/repository") as wiki:
                 base = self.tip()
@@ -454,8 +445,11 @@ class WikiTests(WikiFixture, unittest.TestCase):
                     return SimpleNamespace(ref_status=None if reason is None else {self.branch: reason})
 
                 with patch.object(wiki._client, "send_pack", side_effect=reject) as send:
-                    with self.assertRaisesRegex(WikiError, "outcome unknown"):
+                    with self.assertRaises(WikiError) as failure:
                         self.write(wiki, {"New.md": "Must not be published"}, base)
+                self.assertEqual(failure.exception.outcome, "unknown" if reason is None else "not_applied")
+                self.assertEqual(failure.exception.error_type, "outcome_unknown" if reason is None else
+                                 "conflict" if reason == "failed to update ref" else "publish_rejected")
                 self.assertEqual(send.call_count, 1)
                 with self.assertRaises(KeyError):
                     self.object_id(self.tip(), "New.md")
@@ -473,6 +467,8 @@ class WikiTests(WikiFixture, unittest.TestCase):
                     self.write(wiki, {"New.md": "Published but unconfirmed"})
             self.assertEqual(send.call_count, 1)
             self.assertNotIn("sensitive", str(raised.exception))
+            self.assertEqual(raised.exception.outcome, "unknown")
+            self.assertEqual(raised.exception.error_type, "outcome_unknown")
             self.assertNotEqual(self.tip(), self.base)
             self.assertEqual(wiki.snapshot()["sha"], self.base)
             self.assertEqual(self.remote_repo.object_store[self.tip().encode("ascii")].parents,

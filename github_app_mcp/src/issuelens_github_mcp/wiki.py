@@ -39,14 +39,20 @@ from dulwich.repo import MemoryRepo
 from dulwich.walk import ORDER_TOPO, Walker
 
 from .auth import GitHubAppError, validate_repository
+from .outcomes import ToolFailure, http_error_type
 
 
-class WikiError(RuntimeError):
+class WikiError(ToolFailure):
     """A bounded, credential-free wiki failure."""
+
+    default_type = "wiki_error"
 
 
 class _WikiRefConflict(WikiError):
     """A failed ref lease with no published update."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, error_type="conflict")
 
 
 _SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\Z")
@@ -92,7 +98,11 @@ def _safe(function: Callable[Parameters, Result]) -> Callable[Parameters, Result
         except WikiError:
             raise
         except Exception:
-            raise WikiError("wiki operation failed or exceeded its budget") from None
+            raise WikiError(
+                "wiki operation failed or exceeded its budget",
+                error_type="internal_error",
+                outcome="unknown" if function.__name__ == "write" else "not_applied",
+            ) from None
     return guarded
 
 
@@ -251,11 +261,15 @@ class _WikiHttpClient(HttpGitClient):
             if (response.status != 200 or not content_type.startswith("application/x-git-")
                     or response.headers.get("Content-Encoding", "identity") != "identity"):
                 response.close()
-                raise WikiError("wiki HTTP request rejected (redirects and dumb HTTP are disabled)")
+                raise WikiError(
+                    "wiki HTTP request rejected (redirects and dumb HTTP are disabled)",
+                    error_type=http_error_type(response.status) if response.status != 200 else "invalid_response",
+                    http_status=response.status,
+                )
         except WikiError:
             raise
         except Exception:
-            raise WikiError("wiki HTTP request failed or timed out") from None
+            raise WikiError("wiki HTTP request failed or timed out", error_type="transport_error") from None
 
         def read(size: int) -> bytes:
             nonlocal response_bytes
@@ -361,6 +375,7 @@ class WikiRepository:
         self._deadline = 0.0
         self._wire_bytes = self._requests = self._output_bytes = 0
         self._reachable: set[APIObjectID] = set()
+        self._publication_started = False
 
     @property
     def remote(self) -> str:
@@ -445,7 +460,7 @@ class WikiRepository:
         if self._parent is None:
             raise WikiError("wiki repository is not open")
         if time.monotonic() >= self._deadline:
-            raise WikiError("wiki operation exceeded time budget")
+            raise WikiError("wiki operation exceeded time budget", error_type="timeout")
 
     def _remaining(self) -> float:
         self._check_budget()
@@ -455,7 +470,7 @@ class WikiRepository:
         self._check_budget()
         self._requests += 1
         if self._requests > self.MAX_REQUESTS:
-            raise WikiError("wiki transport request budget exceeded")
+            raise WikiError("wiki transport request budget exceeded", error_type="limit_exceeded")
 
     def _progress(self, message: bytes) -> None:
         self._check_budget()
@@ -1003,15 +1018,11 @@ class WikiRepository:
 
     @_safe
     def write(self, pages: dict[str, str], expected_base: str, message: str, *, author_name: str, author_email: str) -> _WikiWriteResult:
-        """Publish with a page-safe rebase and at most one confirmed-race retry.
-
-        expected_base stays the content baseline across attempts. Each commit
-        has the latest verified descendant as its only parent and exact-old-ref
-        CAS lease. Unknown publication outcomes are never retried.
-        """
+        """Attempt one atomic exact-base publication; recovery belongs to the agent."""
+        self._publication_started = False
         batch = self._batch(pages)
         if _ref(expected_base) == "HEAD":
-            raise WikiError("expected_base must be a full commit SHA")
+            raise WikiError("expected_base must be a full commit SHA", error_type="invalid_input")
         expected_base = expected_base.lower()
         message = _summary(message, "message", 512)
         author_name = _summary(author_name, "author name", 200)
@@ -1021,15 +1032,6 @@ class WikiRepository:
         if ".." in author_email or author_email.startswith(".") or ".@" in author_email:
             raise WikiError("invalid wiki author identity")
         author = f"{author_name} <{author_email}>".encode("utf-8")
-        for _ in range(2):
-            try:
-                return self._write_once(batch, expected_base, message, author)
-            except _WikiRefConflict:
-                continue
-        raise WikiError("wiki base conflict; retry limit reached; re-read a snapshot")
-
-    def _write_once(self, batch: dict[str, bytes], expected_base: str, message: str, author: bytes) -> _WikiWriteResult:
-        previous_tip = self._sha
         current = self._refresh()
         inventory = self._inventory(current, include_trees=True)
         entries = {path: entry for path, entry in inventory.items() if entry[0] != "040000"}
@@ -1048,33 +1050,27 @@ class WikiRepository:
         for path in batch:
             if path in entries and entries[path][0] not in _REGULAR_MODES:
                 raise WikiError("wiki write cannot replace a symlink or submodule")
-        required_bases = {expected_base}
-        if previous_tip is not None:
-            required_bases.add(previous_tip)
-        required_bases.discard(current)
-        if required_bases:
-            if len(expected_base) != 40:
-                raise WikiError("wiki base conflict; remote history changed")
-            for sha, commit in self._ancestors(_object_id(current.encode("ascii"))):
-                required_bases.discard(sha.decode("ascii"))
-                if not required_bases:
-                    break
-            if required_bases:
-                raise WikiError("wiki base conflict; remote history changed")
-        previous_entries = entries
         if expected_base != current:
+            if len(expected_base) != 40 or not any(
+                sha.decode("ascii") == expected_base
+                for sha, commit in self._ancestors(_object_id(current.encode("ascii")))
+            ):
+                raise WikiError("wiki base conflict; remote history changed", error_type="conflict")
             previous_entries = self._inventory(expected_base, include_trees=True)
             for path in batch:
                 expected_mode = previous_entries[path][0] if path in previous_entries else "100644"
                 if path in entries and entries[path][0] != expected_mode:
-                    raise WikiError("wiki base conflict; requested page mode changed")
+                    raise WikiError("wiki base conflict; requested page mode changed", error_type="conflict")
         blobs = {path: Blob.from_string(content) for path, content in batch.items()}
         changed = [path for path, blob in blobs.items() if path not in entries or blob.id.decode("ascii") != entries[path][1]]
         result: _WikiWriteResult = {"status": "no-change", "sha": current, "branch": self._branch, "pages": [], "repository": self.repository}
         if not changed:
             return result
-        if any(entries.get(path) != previous_entries.get(path) for path in changed):
-            raise WikiError("wiki base conflict; requested page changed since expected_base")
+        if expected_base != current:
+            raise WikiError(
+                "wiki base conflict; re-read the snapshot and reconcile changes before writing",
+                error_type="conflict",
+            )
         updates: dict[bytes, tuple[int, APIObjectID]] = {}
         for path in changed:
             self._store.add_object(blobs[path])
@@ -1094,27 +1090,48 @@ class WikiRepository:
             self._check_budget()
             if remote_refs.get(branch_ref) != current.encode("ascii"):
                 raise _WikiRefConflict("wiki base conflict; remote advertisement changed")
+            self._publication_started = True
             return {branch_ref: commit.id}
 
         try:
             self._request()
             sent = self._transport.send_pack(self._transport_path, update_refs,
                                              self._store.generate_pack_data, progress=self._progress)
-            # Recognize Git's and the pinned local transport's CAS rejections,
-            # not arbitrary hook/policy failures or a missing acknowledgement.
-            if sent.ref_status is not None and set(sent.ref_status) == {branch_ref} and sent.ref_status[branch_ref] in {
-                "failed to update ref", f"unable to set {branch_ref!r} to {commit.id!r}",
-            }:
-                if self._remote_tip() != current:
-                    raise _WikiRefConflict("wiki base conflict; remote rejected the stale ref")
-            if sent.ref_status is None or any(status is not None for status in sent.ref_status.values()):
-                raise WikiError("wiki receive-pack rejected the update")
-            if self._remote_tip() != commit.id.decode("ascii"):
-                raise WikiError("wiki remote verification failed")
         except _WikiRefConflict:
             raise
+        except WikiError as error:
+            if not self._publication_started:
+                raise
+            raise WikiError(
+                "wiki publish outcome unknown; re-read a snapshot before deciding what to do",
+                error_type=error.error_type, outcome="unknown", http_status=error.http_status,
+            ) from None
         except Exception:
-            raise WikiError("wiki publish conflict or outcome unknown; re-read a snapshot") from None
+            raise WikiError(
+                "wiki publish outcome unknown; re-read a snapshot" if self._publication_started else
+                "wiki publication could not start; no update was submitted",
+                error_type="outcome_unknown" if self._publication_started else "transport_error",
+                outcome="unknown" if self._publication_started else "not_applied",
+            ) from None
+        if sent.ref_status and set(sent.ref_status) == {branch_ref} and sent.ref_status[branch_ref] is not None:
+            self._publication_started = False
+            conflict = sent.ref_status[branch_ref] in {
+                "failed to update ref", f"unable to set {branch_ref!r} to {commit.id!r}",
+            }
+            raise WikiError(
+                "wiki receive-pack rejected the update; inspect the current snapshot before retrying",
+                error_type="conflict" if conflict else "publish_rejected",
+            )
+        try:
+            if sent.ref_status is None or any(status is not None for status in sent.ref_status.values()):
+                raise WikiError("wiki publication acknowledgement is unavailable")
+            if self._remote_tip() != commit.id.decode("ascii"):
+                raise WikiError("wiki remote verification failed")
+        except Exception:
+            raise WikiError(
+                "wiki publish outcome unknown; re-read a snapshot",
+                error_type="outcome_unknown", outcome="unknown",
+            ) from None
         self._sha = commit.id.decode("ascii")
         self._reachable.add(commit.id)
         self._repository.refs[branch_ref] = commit.id

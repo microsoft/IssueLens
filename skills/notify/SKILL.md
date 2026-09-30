@@ -64,7 +64,8 @@ those must come from the user's explicit request.
    ```
 3. Call `send-email` with `title`, `body`, `recipients` (and optional
    `timeFrame`, `workflowRunUrl`).
-4. Confirm success from the tool result (it reports the HTTP status).
+4. Check the execution envelope's `success`, `outcome`, and `error`; the payload
+   in `result` reports acceptance and the HTTP status.
 
 ## Default Teams behavior (`send-teams-notification`)
 
@@ -76,10 +77,13 @@ those must come from the user's explicit request.
 
 ## Rules
 
-- **Report honestly.** Only claim the notification was sent if the tool result
-  reports success (a 2xx HTTP status). If the tool is unavailable or the call
-  fails, say so explicitly — do not fabricate success.
+- **Report honestly.** A successful result with a 2xx status confirms that the
+  notification endpoint accepted the submission, not that the recipient received
+  it. If the tool is unavailable or the call fails, say so explicitly.
+- Follow the preloaded `tool-results` skill. Each tool submits once and never
+  retries internally. A timeout or unknown outcome may mean a notification was
+  already sent; inspect delivery evidence or ask for direction before resending.
+  Error messages do not expose endpoint credentials or remote response bodies.
 - By default, keep the content concise: an overall summary line plus the list of critical
   issues with their URLs.
-
 

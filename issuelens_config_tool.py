@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from copilot.tools import Tool, ToolInvocation, ToolResult
+from copilot.tools import Tool, ToolInvocation
 
 from issuelens_config import (
     INSTRUCTION_DOMAINS,
-    IssueLensConfigError,
     load_instruction,
 )
+from tool_results import tool_handler
 
 
 TOOL_NAME = "issuelens-config"
@@ -20,23 +19,13 @@ TOOL_NAME = "issuelens-config"
 def create_tool(client: Any) -> Tool:
     """Create a repository-config tool backed by one protocol's GitHub client."""
 
-    async def _get_instruction(invocation: ToolInvocation) -> ToolResult:
+    async def _get_instruction(invocation: ToolInvocation) -> Any:
         arguments = invocation.arguments or {}
-        try:
-            result = await load_instruction(
-                client,
-                arguments.get("repository", ""),
-                arguments.get("domain", ""),
-            )
-            return ToolResult(
-                text_result_for_llm=json.dumps(result, ensure_ascii=True)
-            )
-        except IssueLensConfigError as error:
-            return ToolResult(
-                text_result_for_llm=f"IssueLens configuration failed: {error}",
-                result_type="failure",
-                error=str(error),
-            )
+        return await load_instruction(
+            client,
+            arguments.get("repository", ""),
+            arguments.get("domain", ""),
+        )
 
     return Tool(
         name=TOOL_NAME,
@@ -60,5 +49,5 @@ def create_tool(client: Any) -> Tool:
             "required": ["repository", "domain"],
             "additionalProperties": False,
         },
-        handler=_get_instruction,
+        handler=tool_handler(_get_instruction),
     )

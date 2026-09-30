@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import yaml
 
 from .auth import GitHubAppError, validate_repository
+from .outcomes import ToolFailure
 
 
 CONFIG_DIRECTORY = ".github"
@@ -38,8 +39,10 @@ LEGACY_INSTRUCTION_PATHS: dict[str, tuple[str, ...]] = {
 }
 
 
-class IssueLensConfigError(RuntimeError):
+class IssueLensConfigError(ToolFailure):
     """Raised when repository configuration is present but unusable."""
+
+    default_type = "configuration_error"
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -79,8 +82,17 @@ def validate_wiki_repository(value: Any) -> str:
 
 def _is_not_found(error: Exception) -> bool:
     return (
-        getattr(error, "status_code", None) == 404
+        getattr(error, "http_status", None) == 404
+        or getattr(error, "status_code", None) == 404
         or "HTTP 404" in str(error)
+    )
+
+
+def _read_failure(message: str, error: Exception) -> IssueLensConfigError:
+    return IssueLensConfigError(
+        message,
+        error_type=error.error_type if isinstance(error, ToolFailure) else "internal_error",
+        http_status=error.http_status if isinstance(error, ToolFailure) else None,
     )
 
 
@@ -141,7 +153,11 @@ def _parse_config(content: str) -> dict[str, dict[str, str]]:
             raise IssueLensConfigError("YAML anchors and aliases are not supported")
         documents = list(yaml.load_all(content, Loader=_UniqueKeyLoader))
     except yaml.YAMLError as error:
-        raise IssueLensConfigError(f"Invalid {CONFIG_FILENAME}: {error}") from error
+        mark = getattr(error, "problem_mark", None)
+        location = f" at line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+        raise IssueLensConfigError(
+            f"Invalid {CONFIG_FILENAME}: YAML could not be parsed{location}"
+        ) from None
 
     if len(documents) != 1 or not isinstance(documents[0], Mapping):
         raise IssueLensConfigError(
@@ -212,9 +228,7 @@ async def _discover_config(
     except Exception as error:
         if _is_not_found(error):
             return None
-        raise IssueLensConfigError(
-            f"Could not inspect {CONFIG_DIRECTORY}: {error}"
-        ) from error
+        raise _read_failure(f"Could not inspect {CONFIG_DIRECTORY}", error) from None
     if not isinstance(entries, list):
         raise IssueLensConfigError(f"{CONFIG_DIRECTORY} is not a directory")
 
@@ -253,15 +267,15 @@ async def load_instruction(
 ) -> dict[str, Any]:
     """Load one domain's configured instruction or its legacy fallback."""
     if not isinstance(repository, str):
-        raise IssueLensConfigError("Source repository must use the owner/repository format")
+        raise IssueLensConfigError("Source repository must use the owner/repository format", error_type="invalid_input")
     try:
         repository = validate_repository(repository)
     except GitHubAppError as error:
-        raise IssueLensConfigError("Source repository must use the owner/repository format") from error
+        raise IssueLensConfigError("Source repository must use the owner/repository format", error_type="invalid_input") from error
     if repository.rsplit("/", 1)[-1] in {".", ".."}:
-        raise IssueLensConfigError("Source repository must not be a path traversal segment")
+        raise IssueLensConfigError("Source repository must not be a path traversal segment", error_type="invalid_input")
     if not isinstance(domain, str) or domain not in INSTRUCTION_DOMAINS:
-        raise IssueLensConfigError(f"Unsupported instruction domain: {domain}")
+        raise IssueLensConfigError("Unsupported instruction domain", error_type="invalid_input")
 
     discovered = await _discover_config(client, repository)
     config_path = discovered[0] if discovered else None
@@ -283,9 +297,7 @@ async def load_instruction(
                 ) from error
             if isinstance(error, IssueLensConfigError):
                 raise
-            raise IssueLensConfigError(
-                f"Could not load configured instruction {instruction_path}: {error}"
-            ) from error
+            raise _read_failure(f"Could not load configured instruction {instruction_path}", error) from None
         result: dict[str, Any] = {
             "repository": repository,
             "domain": domain,
@@ -312,9 +324,7 @@ async def load_instruction(
                 continue
             if isinstance(error, IssueLensConfigError):
                 raise
-            raise IssueLensConfigError(
-                f"Could not load legacy instruction {legacy_path}: {error}"
-            ) from error
+            raise _read_failure(f"Could not load legacy instruction {legacy_path}", error) from None
         return {
             "repository": repository,
             "domain": domain,
