@@ -106,7 +106,8 @@ class TeamMemoryInstructionTests(unittest.TestCase):
             with self.subTest(agent=name):
                 self.assertIn("issuelens-config", skills)
                 self.assertIn("team-memory", skills)
-                self.assertIn("tool-results", skills)
+                for skill in skills:
+                    self.assertTrue((ROOT / "skills" / skill / "SKILL.md").is_file(), skill)
 
     def test_writer_requires_validated_policy_and_confirmed_publication(self):
         prompt = (ROOT / "agents" / "team-memory.md").read_text(encoding="utf-8")

@@ -125,9 +125,7 @@ unless its complete intended edit is part of a tool-confirmed publication.
 	pages and their history. Use no generic URL, force, token, or credential
 	arguments and no separate host publisher or persistence workflow.
 	The backend makes at most one atomic publication attempt against the supplied
-	SHA, with no internal rebase or retry. Interpret the common execution envelope
-	using the preloaded `tool-results` skill; snapshot and publication fields
-	are in `result`, and failures retain their error type and known outcome.
+	SHA, with no internal rebase or retry.
 5. You own recovery decisions. On a stale-base conflict or rejected publication,
 	re-read the current snapshot and affected pages, then decide whether to
 	regenerate the minimal change against that SHA; never blindly retry or
@@ -138,8 +136,7 @@ unless its complete intended edit is part of a tool-confirmed publication.
 	If a previous response was lost, compare
 	desired content with current pages before attempting another write. Matching
 	content needs no repeat write and does not prove who performed the update.
-	Default to at most one corrective write attempt after reconciliation. Stop
-	for human direction when intent conflicts or the corrective attempt fails.
+	Stop for human direction when intent conflicts.
 6. Report updated only after the `write_wiki_pages` tool's
 	publication result confirms the wiki commit. Return the actual status and
 	new wiki SHA only as confirmed by that result. Otherwise report no-change,

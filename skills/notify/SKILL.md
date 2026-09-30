@@ -80,10 +80,9 @@ those must come from the user's explicit request.
 - **Report honestly.** A successful result with a 2xx status confirms that the
   notification endpoint accepted the submission, not that the recipient received
   it. If the tool is unavailable or the call fails, say so explicitly.
-- Follow the preloaded `tool-results` skill. Each tool submits once and never
-  retries internally. A timeout or unknown outcome may mean a notification was
-  already sent; inspect delivery evidence or ask for direction before resending.
+- Each tool submits once and never retries internally. A timeout or unknown
+  outcome may mean a notification was already sent; inspect delivery evidence or
+  ask for direction before resending.
   Error messages do not expose endpoint credentials or remote response bodies.
 - By default, keep the content concise: an overall summary line plus the list of critical
   issues with their URLs.
-

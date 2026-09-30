@@ -140,7 +140,6 @@ protocol for chat.
 - **Skills** (`skills/`): `issuelens-config` (validated repository policy),
   `find-duplicates`, `label-issue`, `assign-issue`, `notify`, `change-analysis`, and `team-memory`
   (read-only retrieval preloaded on all agents, including the orchestrator).
-  All agents also preload `tool-results` for execution outcomes and safe recovery.
 - **Media inputs** — `media_inputs.py` normalizes Responses `input_image` and
   `input_file` content and invocation `blob` attachments into Copilot session
   attachments. Only inline base64 content is accepted; remote URLs, file IDs,
@@ -186,8 +185,7 @@ agent's role or tool restrictions to repository contributors.
   return `success`, `outcome`, `result`, and `error` (type, safe message, known
   HTTP status), with native failure flags preserved. Distinguish confirmed
   completion, a rejected/not-applied operation, and an unknown write outcome.
-  Every agent preloads `tool-results` and owns the decision to correct, reconcile,
-  retry within bounds, or escalate. Recovery never grants new write authority
+  The owning agent decides recovery. Recovery never grants new write authority
   or bypasses scope/privacy/precondition checks. Export only allowlisted error
   classifications and statuses to telemetry, not arbitrary exception messages.
 - **GitHub access has one model-facing boundary** — both deployed protocols

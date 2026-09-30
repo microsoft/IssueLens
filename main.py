@@ -156,7 +156,7 @@ _ISSUELENS_AGENT: CustomAgentConfig = {
         "project wiki maintenance to the team-memory agent."
     ),
     "prompt": _load_prompt(_agents_dir / "issuelens.md"),
-    "skills": ["issuelens-config", "team-memory", "tool-results"],
+    "skills": ["issuelens-config", "team-memory"],
 }
 
 
@@ -171,7 +171,6 @@ _TRIAGE_AGENT: CustomAgentConfig = {
     "skills": [
         "issuelens-config",
         "team-memory",
-        "tool-results",
         "find-duplicates",
         "label-issue",
         "assign-issue",
@@ -190,7 +189,7 @@ _FIND_CRITICALS_AGENT: CustomAgentConfig = {
         "and regression issues."
     ),
     "prompt": _load_prompt(_agents_dir / "find-criticals.md"),
-    "skills": ["issuelens-config", "team-memory", "tool-results"],
+    "skills": ["issuelens-config", "team-memory"],
     "infer": True,
 }
 
@@ -206,7 +205,6 @@ _PLAN_AGENT: CustomAgentConfig = {
     "skills": [
         "issuelens-config",
         "team-memory",
-        "tool-results",
         "label-issue",
         "assign-issue",
         "notify",
@@ -223,7 +221,7 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
         "customization and bounded MCP wiki read/write tools."
     ),
     "prompt": _load_prompt(_agents_dir / "team-memory.md"),
-    "skills": ["issuelens-config", "team-memory", "change-analysis", "tool-results"],
+    "skills": ["issuelens-config", "team-memory", "change-analysis"],
     "tools": [
         "issuelens-config",
         "github-get_repository",

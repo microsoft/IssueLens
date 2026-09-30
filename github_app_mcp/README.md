@@ -319,9 +319,9 @@ partially matching batches, mode changes, and rewritten history remain conflicts
 
 No separate host publisher, database, or proposal/approval persistence is
 involved. If no knowledge changes, do not write. On a stale-base conflict, the
-agent may re-read and regenerate against a fresh snapshot in separate calls,
-then submit at most one corrective write by default. It must preserve concurrent
-edits, re-establish authorization if the destination changed, and stop on
+agent may re-read and regenerate against a fresh snapshot in separate calls.
+It must preserve concurrent edits, re-establish authorization if the destination
+changed, and stop on
 ambiguous human intent or repeated failure; never blindly retry.
 If a response was lost, compare desired contents
 with current pages first. On a destination mismatch, read a fresh snapshot and

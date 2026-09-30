@@ -134,9 +134,8 @@ failures include a safe `error.type`, `error.message`, and `error.http_status`
 `unknown`; native MCP/Copilot error flags agree with the envelope. Tools perform
 one logical operation, not recovery workflows. Authorization, validation, and
 bounded prerequisite reads remain internal; recovery decisions belong to the
-owning agent through the universally preloaded
-[`tool-results` skill](skills/tool-results/SKILL.md). Unknown write outcomes
-require state inspection rather than blind retry. This applies to GitHub,
+owning agent. Unknown write outcomes require state inspection rather than blind
+retry. This applies to GitHub,
 repository configuration, email, and Teams tools. External tools retain their
 own documented contracts. Telemetry records allowlisted classifications and
 known HTTP statuses, never raw error messages or tool payloads.
@@ -1211,7 +1210,6 @@ agents/
 └── team-memory.md          ← explicitly authorized wiki maintenance
 
 skills/
-├── tool-results/    ← interpret outcomes and choose safe agent-owned recovery
 ├── issuelens-config/ ← load validated repository policy
 ├── find-duplicates/ ← identify duplicate and related issues
 ├── label-issue/     ← classify and apply labels

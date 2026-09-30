@@ -68,7 +68,7 @@ class AgentPromptTests(unittest.TestCase):
         prompt = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8").strip()
         self.assertEqual(agent["name"], "issuelens")
         self.assertEqual(agent["prompt"], prompt)
-        self.assertEqual(agent["skills"], ["issuelens-config", "team-memory", "tool-results"])
+        self.assertEqual(agent["skills"], ["issuelens-config", "team-memory"])
         normalized = " ".join(agent["prompt"].split())
         self.assertIn("You are the IssueLens orchestrator.", normalized)
         self.assertIn(
