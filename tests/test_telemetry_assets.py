@@ -83,6 +83,7 @@ class TelemetryAssetTests(unittest.TestCase):
         cls.catalog = (ROOT / "observability" / "queries.kql").read_text(encoding="utf-8")
         cls.documentation = (ROOT / "docs" / "observability.md").read_text(encoding="utf-8")
         cls.readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        cls.guide = (ROOT / "docs" / "guide.md").read_text(encoding="utf-8")
         common = re.findall(
             r"^// BEGIN COMMON\n(.*?)^// END COMMON$",
             cls.catalog, re.MULTILINE | re.DOTALL,
@@ -420,11 +421,14 @@ class TelemetryAssetTests(unittest.TestCase):
         self.assertTrue(formatter["formatOptions"]["linkIsContextBlade"])
         self.assertNotIn("https://portal.azure.com", traces, "Use native links, not invented portal URLs")
 
-    def test_documentation_and_readme_links_resolve_inside_repository(self):
-        for relative in ("docs/observability.md", "observability/workbook.json", "observability/queries.kql"):
+    def test_documentation_and_overview_links_resolve_inside_repository(self):
+        for relative in ("docs/guide.md", "docs/observability.md", "CONTRIBUTING.md"):
             self.assertIn(f"]({relative})", self.readme)
             self.assertTrue((ROOT / Path(relative)).is_file())
-        self.assertEqual(self.readme.count("## Observability\n"), 1)
+        for relative in ("observability.md", "../observability/workbook.json", "../observability/queries.kql"):
+            self.assertIn(f"]({relative})", self.guide)
+            self.assertTrue((ROOT / "docs" / Path(relative)).is_file())
+        self.assertEqual(self.guide.count("## Observability\n"), 1)
         for link in re.findall(r"\]\(([^)]+)\)", self.documentation):
             if "://" in link or link.startswith("#"):
                 continue

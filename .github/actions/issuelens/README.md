@@ -426,4 +426,4 @@ queue, guaranteed delivery, or exactly-once execution.
 
 Local tests exercise the imported helper and action/caller wiring with mocked
 services. They do not establish live OIDC federation, hosted writer dispatch,
-or wiki publication. See the [project setup guide](../../../README.md#post-merge-team-memory-automation).
+or wiki publication. See the [project setup guide](../../../docs/guide.md#post-merge-team-memory-automation).

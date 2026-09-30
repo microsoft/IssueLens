@@ -123,7 +123,7 @@ class TeamMemoryInstructionTests(unittest.TestCase):
 
     def test_writer_docs_bind_both_preconditions_to_the_read_snapshot(self):
         for path in (
-            "agents/team-memory.md", "README.md", "github_app_mcp/README.md",
+            "agents/team-memory.md", "docs/guide.md", "github_app_mcp/README.md",
             ".github/issuelens/team-memory.md", "examples/team-memory.md",
         ):
             with self.subTest(path=path):
