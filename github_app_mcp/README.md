@@ -344,7 +344,7 @@ result schema on their answers. It never accesses the wiki
 directly or holds App credentials. Its task constraints and result format are
 supplied in the request, not assumed by the agent or the tools. The agent revalidates source evidence and
 uses these same tools, privacy guards, and paired write preconditions. See the
-[setup and retry guidance](../README.md#post-merge-team-memory-automation).
+[setup and retry guidance](../docs/guide.md#post-merge-team-memory-automation).
 
 ## Configuration
 

@@ -573,10 +573,10 @@ azd() {
         self.assertNotIn("python", self.commands)
         self.assertIn(".git", (ROOT / ".agentignore").read_text(encoding="utf-8").splitlines())
 
-    def test_readme_documents_the_official_guide_and_all_configuration(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    def test_setup_guide_documents_the_official_guide_and_all_configuration(self):
+        guide = (ROOT / "docs" / "guide.md").read_text(encoding="utf-8")
         for reference in re.findall(r"(?:vars|secrets)\.([A-Z_]+)", self.source):
-            self.assertIn(f"`{reference}`", readme)
+            self.assertIn(f"`{reference}`", guide)
         for text in (
             "https://learn.microsoft.com/en-us/azure/foundry/agents/quickstarts/set-up-cicd-hosted-agent",
             "foundry-production", "repo:microsoft/IssueLens:environment:foundry-production",
@@ -584,9 +584,9 @@ azd() {
             "No automatic retry or rollback", "No live deployment",
             "installedVersion", "--no-dependencies", "Bash and jq",
         ):
-            self.assertIn(text, readme)
+            self.assertIn(text, guide)
         for name, version in FOUNDRY_EXTENSIONS.items():
-            self.assertIn(f"| `{name}` | `{version}` |", readme)
+            self.assertIn(f"| `{name}` | `{version}` |", guide)
 
 
 if __name__ == "__main__":

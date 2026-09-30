@@ -95,18 +95,18 @@ class IssueTriageWorkflowTests(unittest.TestCase):
             self.assertNotIn(text, helper)
 
     def test_documentation_describes_event_loop_boundaries(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("issue-comment\n  created/edited", readme)
-        self.assertIn("triage, re-triage, planning, re-planning, or\n  no action", readme)
-        self.assertIn("does not currently trigger on issue title/body edits", readme)
-        self.assertIn("rejects PR-backed comments", readme)
-        self.assertIn("bursts may coalesce", readme)
-        self.assertIn("### Built-in commands", readme)
-        self.assertIn("`@issuelens go` is not planning approval", readme)
-        self.assertIn("workflow carries that provenance but does not\nparse", readme)
-        self.assertIn("commands inside Markdown block quotes", readme)
-        self.assertIn("inline code, fenced code blocks, or\npasted logs", readme)
-        self.assertIn("no-action decision performs no GitHub write", readme)
+        guide = (ROOT / "docs" / "guide.md").read_text(encoding="utf-8")
+        self.assertIn("issue-comment\n  created/edited", guide)
+        self.assertIn("triage, re-triage, planning, re-planning, or\n  no action", guide)
+        self.assertIn("does not currently trigger on issue title/body edits", guide)
+        self.assertIn("rejects PR-backed comments", guide)
+        self.assertIn("bursts may coalesce", guide)
+        self.assertIn("### Built-in commands", guide)
+        self.assertIn("`@issuelens go` is not planning approval", guide)
+        self.assertIn("workflow carries that provenance but does not\nparse", guide)
+        self.assertIn("commands inside Markdown block quotes", guide)
+        self.assertIn("inline code, fenced code blocks, or\npasted logs", guide)
+        self.assertIn("no-action decision performs no GitHub write", guide)
 
 
 if __name__ == "__main__":
