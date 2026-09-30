@@ -41,7 +41,7 @@ jobs:
       AZURE_CORE_OUTPUT: none
     steps:
       - name: Checkout the approved commit
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -89,7 +89,7 @@ jobs:
             { echo "::error::Foundry component versions do not match the reviewed pins."; exit 1; }
           azd ai agent --help >/dev/null
       - name: Azure login with OIDC
-        uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
