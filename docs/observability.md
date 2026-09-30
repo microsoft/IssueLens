@@ -181,7 +181,7 @@ span attributes such as `issuelens.run_id` are not the fact field `run_id`.
 | `issuelens.run.agent` | One `(run_id, agent_run_id)` summary; parent ID, role, status, exclusive usage/tool counts and captured `duration_s`. |
 | `issuelens.run.model` | One `(run_id, model)` usage aggregate, not one model-call trace. |
 | `issuelens.run.target` | One `(run_id, repository, target_kind, number, relationship)` association with observed operation count and optional `repository_id`. |
-| `issuelens.run.error` | Bounded `stage`/`error_type` observations, not raw exceptions. The error report counts affected runs per category, not distinct attempts. |
+| `issuelens.run.error` | Bounded `stage`/`error_type` observations, not raw exceptions. Structured tool failures retain allowlisted classifications, `tool_outcome`, and known `http_status` values. The error report counts affected runs per category, not distinct attempts. |
 
 Common dimensions are `schema_version`, `run_id`, `protocol` (`invocations` or
 `responses`), `release`, `run_trace_id`, and optional

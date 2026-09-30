@@ -76,12 +76,14 @@ existing Markdown pages. No knowledge change means no write.
 
 Only the authorized maintenance job calls `write_wiki_pages` with the explicit
 source project as `repository`, changed pages mapped to full UTF-8 content, the
-snapshot destination as `expected_wiki_repository=read_snapshot.wiki_repository`,
-the full wiki SHA as `expected_base=read_snapshot.sha`, and a short summary
+snapshot destination as `expected_wiki_repository=read_snapshot["wiki_repository"]`,
+the full wiki SHA as `expected_base=read_snapshot["sha"]`, and a short summary
 including the full source commit SHA where relevant. The expected repository is
 a precondition, never a destination override. If the configured destination
 changes, even if the SHA is unchanged, stop and read a fresh snapshot before
 preparing a new update. No force option is exposed.
+Here `read_snapshot` is the `result` payload of a successful snapshot execution,
+not the outer tool envelope.
 The bundled MCP `.wiki` backend persists knowledge and history in an atomic Git
 commit. Create/update `.md` only, at most 20 pages, 64 KiB each, 256 KiB total;
 deletions and renames are unsupported. Unchanged assets are preserved

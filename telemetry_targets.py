@@ -6,11 +6,16 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+from github_app_mcp.src.issuelens_github_mcp.outcomes import ERROR_TYPES
+
 
 def _failed(value: Any) -> bool:
     if isinstance(value, Mapping):
-        return value.get("isError") is True or value.get("is_error") is True
-    return getattr(value, "is_error", False) is True
+        return (
+            value.get("isError") is True or value.get("is_error") is True
+            or value.get("success") is False or value.get("result_type") == "failure"
+        )
+    return getattr(value, "is_error", False) is True or getattr(value, "result_type", None) == "failure"
 
 
 def result_metadata(result: Any) -> dict[str, Any]:
@@ -33,9 +38,28 @@ def result_metadata(result: Any) -> dict[str, Any]:
     nested = structured.get("structuredContent", structured.get("structured_content"))
     if isinstance(nested, Mapping):
         structured = nested
+    execution: dict[str, Any] = {}
+    outcome = structured.get("outcome")
+    if type(structured.get("success")) is bool and isinstance(outcome, str) and outcome in {
+        "completed", "not_applied", "unknown",
+    }:
+        failed = failed or structured["success"] is False or structured.get("error") is not None
+        execution["tool_outcome"] = outcome
+        error = structured.get("error")
+        if isinstance(error, Mapping):
+            error_type = error.get("type")
+            if isinstance(error_type, str) and error_type in ERROR_TYPES:
+                execution["error_type"] = error_type
+            status = error.get("http_status")
+            if type(status) is int and 100 <= status <= 599:
+                execution["http_status"] = status
+        structured = structured.get("result")
+        if not isinstance(structured, Mapping):
+            return {**execution, "is_error": failed}
     metadata = {name: structured[name] for name in (
         "number", "id", "full_name", "source_repository", "wiki_repository", "status",
     ) if name in structured and type(structured[name]) in {str, int}}
     metadata["is_pull_request"] = "pull_request" in structured
+    metadata.update(execution)
     metadata["is_error"] = failed or _failed(structured)
     return metadata

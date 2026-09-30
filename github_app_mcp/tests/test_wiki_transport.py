@@ -23,7 +23,7 @@ from dulwich.objects import Blob, Commit, Tree
 from dulwich.object_store import iter_tree_contents
 from dulwich.protocol import pkt_line
 from dulwich.repo import Repo
-from dulwich.server import DictBackend
+from dulwich.server import DictBackend, ReceivePackHandler
 from dulwich.web import HTTPGitApplication
 from urllib3.response import HTTPResponse
 
@@ -116,7 +116,7 @@ class InProcessTests(WikiFixture, unittest.TestCase):
                                                "sha": self.base, "initialized": True})
             self.assertEqual(wiki.page("Home.md")["content"], "# Home\nWelcome\n")
 
-    def test_cas_rejection_after_advertisement_preserves_concurrent_commit(self):
+    def test_cas_rejection_stops_without_retry(self):
         with self.local_wiki("example/repository") as wiki:
             generate = wiki._repo.object_store.generate_pack_data
             concurrent = []
@@ -125,10 +125,13 @@ class InProcessTests(WikiFixture, unittest.TestCase):
                 concurrent.append(self.seed_entries({"Other.md": ("100644", b"Concurrent")}))
                 return generate(*args, **kwargs)
 
-            with patch.object(wiki._repo.object_store, "generate_pack_data", side_effect=race):
-                with self.assertRaisesRegex(WikiError, "conflict or outcome unknown"):
+            with patch.object(wiki._repo.object_store, "generate_pack_data", side_effect=race) as pack:
+                with self.assertRaisesRegex(WikiError, "rejected") as failure:
                     self.write(wiki, {"New.md": "Loser"})
-            self.assertEqual(self.tip(), concurrent[0])
+            self.assertEqual(pack.call_count, 1)
+            self.assertEqual(failure.exception.error_type, "conflict")
+            self.assertEqual(failure.exception.outcome, "not_applied")
+            self.assertEqual(self.tip(), concurrent[-1])
             self.assertEqual(wiki.snapshot()["sha"], self.base)
             with self.assertRaises(KeyError):
                 self.object_id(self.tip(), "New.md")
@@ -391,14 +394,49 @@ class HttpTests(WikiFixture, unittest.TestCase):
         self.assertNotIn(self.token, str(raised.exception))
         self.assertLess(len(str(raised.exception)), 200)
 
-    def test_wire_ref_status_rejects_cas_race(self):
+    def test_wire_success_ack_with_advanced_tip_is_unknown(self):
         concurrent = []
         self.before_receive = lambda: concurrent.append(self.seed_entries({"Other.md": ("100644", b"Other")}))
         with self.http_wiki("example/repository") as wiki:
-            with self.assertRaisesRegex(WikiError, "conflict or outcome unknown"):
+            with self.assertRaisesRegex(WikiError, "outcome unknown"):
                 self.write(wiki, {"Home.md": "Losing wire update"})
             self.assertEqual(wiki.snapshot()["sha"], self.base)
         self.assertEqual(self.tip(), concurrent[0])
+        self.assertEqual(sum(method == "POST" and path.endswith("/git-receive-pack")
+                             for method, path, auth in self.requests), 1)
+
+    def test_wire_explicit_stale_ref_rejection_returns_conflict_without_rebase(self):
+        on_update = ReceivePackHandler._on_update
+
+        def reject_stale(handler, ref, oldsha, sha):
+            # Dulwich's server ignores a False CAS return; model Git's explicit
+            # stale-ref rejection rather than treating its positive ack as one.
+            if handler.repo.refs[ref] != oldsha:
+                return b"failed to update ref"
+            return on_update(handler, ref, oldsha, sha)
+
+        for path in ("Other.md", "Home.md"):
+            with self.subTest(concurrent_page=path):
+                base = self.tip()
+                start = len(self.requests)
+                concurrent = []
+
+                def race():
+                    concurrent.append(self.seed_entries({path: ("100644", b"Concurrent content")}))
+                    self.before_receive = None
+
+                self.before_receive = race
+                with self.http_wiki("example/repository") as wiki:
+                    with patch.object(ReceivePackHandler, "_on_update", new=reject_stale):
+                        with self.assertRaisesRegex(WikiError, "rejected") as failure:
+                            self.write(wiki, {"Home.md": "Stale content"}, base)
+                        self.assertEqual(failure.exception.error_type, "conflict")
+                        self.assertEqual(failure.exception.outcome, "not_applied")
+                        self.assertEqual(self.tip(), concurrent[0])
+                        self.assertEqual(wiki.snapshot()["sha"], base)
+                self.assertEqual(sum(method == "POST" and request_path.endswith("/git-receive-pack")
+                                     for method, request_path, auth in self.requests[start:]),
+                                 1)
 
     def test_wire_postpush_head_mismatch_is_unknown(self):
         with self.http_wiki("example/repository") as wiki:
@@ -442,20 +480,26 @@ class HttpTests(WikiFixture, unittest.TestCase):
             self.assertLess(time.monotonic() - started, 2)
             self.assertTrue(response.closed)
 
-    def test_wire_pre_advertisement_race_and_post_advertisement_rejection(self):
+    def test_wire_pre_advertisement_race_returns_conflict_without_sending_pack(self):
         with self.http_wiki("example/repository") as wiki:
             send_pack = wiki._client.send_pack
             current = []
 
             def before_advertisement(*args, **kwargs):
-                current.append(self.seed_entries({"Other.md": ("100644", b"Concurrent")}))
+                if not current:
+                    current.append(self.seed_entries({"Other.md": ("100644", b"Concurrent")}))
                 return send_pack(*args, **kwargs)
 
-            with patch.object(wiki._client, "send_pack", side_effect=before_advertisement):
-                with self.assertRaisesRegex(WikiError, "conflict"):
-                    self.write(wiki, {"New.md": "Never sent"})
-            self.assertFalse(any(path.endswith("/git-receive-pack") for method, path, auth in self.requests))
+            with patch.object(wiki._client, "send_pack", side_effect=before_advertisement) as send:
+                with self.assertRaisesRegex(WikiError, "conflict") as failure:
+                    self.write(wiki, {"New.md": "Not sent"})
+            self.assertEqual(send.call_count, 1)
+            self.assertEqual(failure.exception.outcome, "not_applied")
+            self.assertEqual(sum(method == "POST" and path.endswith("/git-receive-pack")
+                                 for method, path, auth in self.requests), 0)
             self.assertEqual(self.tip(), current[0])
+            with self.assertRaises(KeyError):
+                self.object_id(self.tip(), "New.md")
 
 
 class BudgetTests(WikiFixture, unittest.TestCase):

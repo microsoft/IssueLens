@@ -1,10 +1,11 @@
+import asyncio
 import json
 import os
 import pathlib
 import sys
 import unittest
 from typing import cast
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from mcp import Client
 
@@ -13,6 +14,7 @@ PACKAGE_ROOT = pathlib.Path(__file__).parents[1] / "src"
 sys.path.insert(0, os.fspath(PACKAGE_ROOT))
 
 from issuelens_github_mcp.config import ConfigurationError  # noqa: E402
+from issuelens_github_mcp.auth import GitHubAppError  # noqa: E402
 from issuelens_github_mcp.github import GitHubClient  # noqa: E402
 from issuelens_github_mcp.server import (  # noqa: E402
     build_server_from_environment,
@@ -71,6 +73,111 @@ class FakeGitHubClient:
 
 
 class MCPServerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_every_tool_returns_one_structured_execution_outcome(self):
+        github = FakeGitHubClient(writes_enabled=True, wiki_writes_enabled=True)
+        values = {
+            "repository": "microsoft/IssueLens", "issue_number": 7, "pull_number": 7,
+            "comment_id": 8, "query": "memory", "path": "Home.md", "sha": "a" * 40,
+            "ref": "a" * 40, "base": "a" * 40, "head": "b" * 40,
+            "expected_base": "a" * 40, "expected_wiki_repository": "microsoft/IssueLens",
+            "pages": {"Home.md": "Memory"}, "message": "Update memory",
+            "labels": ["bug"], "assignees": ["octocat"], "body": "Comment",
+            "target_kind": "issue", "target_id": 7,
+        }
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            tools = await client.list_tools()
+            for tool in tools.tools:
+                with self.subTest(tool=tool.name):
+                    arguments = {key: values[key] for key in tool.input_schema["required"]}
+                    before = len(github.calls)
+                    response = await client.call_tool(tool.name, arguments)
+                    envelope = json.loads(response.content[0].text)
+                    self.assertFalse(response.is_error, response.content)
+                    self.assertEqual(response.structured_content, envelope)
+                    self.assertEqual(set(envelope), {"success", "outcome", "result", "error"})
+                    self.assertTrue(envelope["success"])
+                    self.assertEqual(envelope["outcome"], "completed")
+                    self.assertIsNone(envelope["error"])
+                    self.assertEqual(envelope["result"]["operation"], tool.name)
+                    self.assertEqual(len(github.calls), before + 1)
+
+    async def test_failed_execution_keeps_safe_type_message_status_and_native_failure(self):
+        for outcome in ("not_applied", "unknown"):
+            github = FakeGitHubClient(writes_enabled=True)
+            github.add_issue_comment = AsyncMock(side_effect=GitHubAppError(
+                "GitHub API returned HTTP 503", error_type="upstream_error",
+                http_status=503, outcome=outcome,
+            ))
+            async with Client(create_server(cast(GitHubClient, github))) as client:
+                response = await client.call_tool("add_issue_comment", {
+                    "repository": "microsoft/IssueLens", "issue_number": 7, "body": "Comment",
+                })
+            self.assertTrue(response.is_error)
+            envelope = json.loads(response.content[0].text)
+            self.assertEqual(envelope, {
+                "success": False, "outcome": outcome, "result": None,
+                "error": {"type": "upstream_error", "message": "GitHub API returned HTTP 503", "http_status": 503},
+            })
+            self.assertEqual(response.structured_content, envelope)
+            github.add_issue_comment.assert_awaited_once()
+
+    async def test_schema_failure_is_not_applied_and_does_not_echo_input(self):
+        github = FakeGitHubClient()
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            response = await client.call_tool("get_commit", {
+                "repository": "microsoft/IssueLens", "sha": "a" * 40,
+                "per_page": "PRIVATE-CANARY",
+            })
+        envelope = json.loads(response.content[0].text)
+        self.assertTrue(response.is_error)
+        self.assertEqual(envelope["error"]["type"], "invalid_input")
+        self.assertEqual(envelope["outcome"], "not_applied")
+        self.assertNotIn("PRIVATE-CANARY", str(response))
+        self.assertEqual(github.calls, [])
+
+    async def test_disabled_write_is_not_applied_without_calling_the_backend(self):
+        github = FakeGitHubClient()
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            response = await client.call_tool("write_wiki_pages", {})
+        self.assertTrue(response.is_error)
+        self.assertEqual(response.structured_content["outcome"], "not_applied")
+        self.assertEqual(response.structured_content["error"]["type"], "permission_denied")
+        self.assertEqual(github.calls, [])
+
+    async def test_unhandled_write_errors_are_unknown_safe_and_not_retried(self):
+        github = FakeGitHubClient(writes_enabled=True)
+        github.add_issue_comment = AsyncMock(side_effect=OSError("SECRET-URL?sig=PRIVATE-CANARY"))
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            response = await client.call_tool("add_issue_comment", {
+                "repository": "microsoft/IssueLens", "issue_number": 7, "body": "Comment",
+            })
+        envelope = json.loads(response.content[0].text)
+        self.assertTrue(response.is_error)
+        self.assertEqual(envelope["error"]["type"], "internal_error")
+        self.assertEqual(envelope["outcome"], "unknown")
+        self.assertNotIn("PRIVATE-CANARY", str(response))
+        github.add_issue_comment.assert_awaited_once()
+
+    async def test_empty_results_remain_successful_and_envelope_is_bounded(self):
+        github = FakeGitHubClient()
+        github.list_issues = AsyncMock(return_value=[])
+        server = create_server(cast(GitHubClient, github))
+        response = await server.call_tool("list_issues", {"repository": "microsoft/IssueLens"})
+        self.assertEqual(response.structured_content["result"], [])
+        self.assertTrue(response.structured_content["success"])
+        with patch("issuelens_github_mcp.server._MAX_RESULT_BYTES", 1):
+            response = await server.call_tool("list_issues", {"repository": "microsoft/IssueLens"})
+        self.assertTrue(response.is_error)
+        self.assertEqual(response.structured_content["error"]["type"], "limit_exceeded")
+
+    async def test_cancellation_is_not_converted_to_success_or_retried(self):
+        github = FakeGitHubClient()
+        github.get_issue = AsyncMock(side_effect=asyncio.CancelledError)
+        server = create_server(cast(GitHubClient, github))
+        with self.assertRaises(asyncio.CancelledError):
+            await server.call_tool("get_issue", {"repository": "microsoft/IssueLens", "issue_number": 7})
+        github.get_issue.assert_awaited_once()
+
     async def test_read_only_server_discovers_only_bounded_read_tools(self):
         server = create_server(cast(GitHubClient, FakeGitHubClient()))
 
@@ -102,7 +209,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         text_content = getattr(result.content[0], "text", None)
         self.assertIsInstance(text_content, str)
         self.assertEqual(
-            json.loads(cast(str, text_content))["operation"],
+            json.loads(cast(str, text_content))["result"]["operation"],
             "get_issue",
         )
 

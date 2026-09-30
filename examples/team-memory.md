@@ -78,9 +78,11 @@ cooperative timeouts, and redirect denial still apply.
 
 Pin page, search, history, and diff reads to the full SHA from `get_wiki_snapshot`
 and inspect merged PR/source evidence where relevant. The writer calls
-`write_wiki_pages(repository="owner/project", pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot.wiki_repository, expected_base=read_snapshot.sha, message=short_summary)`
+`write_wiki_pages(repository="owner/project", pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot["wiki_repository"], expected_base=read_snapshot["sha"], message=short_summary)`
 for minimal changes, including the full source commit SHA in the summary where
 relevant. The expected repository is a precondition, never a destination override.
+Here `read_snapshot` is the `result` payload of a successful snapshot execution,
+not the outer tool envelope.
 If the mapping changes, even if the SHA is unchanged, stop and read a fresh
 snapshot before preparing a new update. No force option is exposed.
 Create/update `.md` pages only: at most 20 pages, 64 KiB each, 256 KiB total.

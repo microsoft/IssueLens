@@ -14,6 +14,7 @@ import httpx
 import jwt
 
 from .config import GitHubAppConfig, parse_key_vault_secret_uri
+from .outcomes import ToolFailure, http_error_type
 
 
 _API_ROOT = "https://api.github.com"
@@ -34,8 +35,10 @@ _ALLOWED_PERMISSIONS: dict[str, frozenset[PermissionLevel]] = {
 }
 
 
-class GitHubAppError(RuntimeError):
+class GitHubAppError(ToolFailure):
     """Raised when App authentication or token minting fails safely."""
+
+    default_type = "github_error"
 
 
 @dataclass(frozen=True)
@@ -50,7 +53,7 @@ class InstallationCredential:
 def validate_repository(repository: str) -> str:
     repository = repository.strip()
     if not _REPOSITORY_PATTERN.fullmatch(repository):
-        raise GitHubAppError("Repository must use the owner/repository format")
+        raise GitHubAppError("Repository must use the owner/repository format", error_type="invalid_input")
     return repository
 
 
@@ -61,11 +64,11 @@ def normalize_permissions(
     for name, level in permissions.items():
         if level not in _ALLOWED_PERMISSIONS.get(name, frozenset()):
             raise GitHubAppError(
-                f"Unsupported GitHub App token permission: {name}={level}"
+                f"Unsupported GitHub App token permission: {name}={level}", error_type="invalid_input",
             )
         normalized.append((name, level))
     if not normalized:
-        raise GitHubAppError("At least one token permission is required")
+        raise GitHubAppError("At least one token permission is required", error_type="invalid_input")
     return tuple(sorted(normalized))
 
 
@@ -97,13 +100,13 @@ class KeyVaultPrivateKeyLoader:
                     )
             except Exception as error:
                 raise GitHubAppError(
-                    "Could not load the GitHub App private key from Key Vault"
+                    "Could not load the GitHub App private key from Key Vault", error_type="authentication_error",
                 ) from error
             finally:
                 await credential.close()
 
             if not secret.value:
-                raise GitHubAppError("The GitHub App private-key secret is empty")
+                raise GitHubAppError("The GitHub App private-key secret is empty", error_type="authentication_error")
             self._private_key = secret.value
             return self._private_key
 
@@ -187,9 +190,14 @@ class GitHubAppTokenProvider:
                         login,
                         f"{user['id']}+{login}@users.noreply.github.com",
                     )
+            except httpx.HTTPStatusError as error:
+                raise GitHubAppError(
+                    "Could not verify the GitHub App bot identity",
+                    error_type=http_error_type(error.response.status_code), http_status=error.response.status_code,
+                ) from None
             except Exception:
                 raise GitHubAppError(
-                    "Could not verify the GitHub App bot identity"
+                    "Could not verify the GitHub App bot identity", error_type="authentication_error",
                 ) from None
             self._bot_identity = identity
             return identity
@@ -244,81 +252,71 @@ class GitHubAppTokenProvider:
             "Authorization": f"Bearer {app_jwt}",
             "X-GitHub-Api-Version": _API_VERSION,
         }
-        for attempt in range(2):
-            async with self._state_lock:
-                installation_id = self._repository_installations.get(
-                    normalized_repository
-                )
-            try:
-                async with self._client() as client:
-                    if installation_id is None:
-                        response = await client.get(
-                            f"{_API_ROOT}/repos/{repository}/installation",
-                            headers=app_headers,
-                        )
-                        response.raise_for_status()
-                        installation_id = int(response.json()["id"])
-                        async with self._state_lock:
-                            self._repository_installations[
-                                normalized_repository
-                            ] = installation_id
-
-                    response = await client.post(
-                        f"{_API_ROOT}/app/installations/{installation_id}/access_tokens",
+        async with self._state_lock:
+            installation_id = self._repository_installations.get(normalized_repository)
+        try:
+            async with self._client() as client:
+                if installation_id is None:
+                    response = await client.get(
+                        f"{_API_ROOT}/repos/{repository}/installation",
                         headers=app_headers,
-                        json={
-                            "repositories": [repository.split("/", 1)[1]],
-                            "permissions": dict(normalized_permissions),
-                        },
                     )
                     response.raise_for_status()
-                    payload = response.json()
-            except httpx.HTTPStatusError as error:
-                if error.response.status_code in {401, 403, 404} and attempt == 0:
+                    installation_id = int(response.json()["id"])
                     async with self._state_lock:
-                        self._repository_installations.pop(
-                            normalized_repository, None
-                        )
-                    continue
-                raise GitHubAppError(
-                    f"The GitHub App cannot access {repository} with the "
-                    "required permissions"
-                ) from error
-            except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
-                raise GitHubAppError(
-                    f"The GitHub App cannot access {repository} with the "
-                    "required permissions"
-                ) from error
+                        self._repository_installations[normalized_repository] = installation_id
 
-            try:
-                if not isinstance(payload, Mapping):
-                    raise TypeError
-                token = payload.get("token")
-                expires_value = payload.get("expires_at")
-                if not isinstance(token, str) or not token:
-                    raise ValueError
-                if not isinstance(expires_value, str):
-                    raise TypeError
-                expires_at = datetime.fromisoformat(
-                    expires_value.replace("Z", "+00:00")
-                ).timestamp()
-                if expires_at <= now:
-                    raise ValueError
-            except (TypeError, ValueError, AttributeError) as error:
-                raise GitHubAppError(
-                    "GitHub returned an invalid installation token response"
-                ) from error
+                response = await client.post(
+                    f"{_API_ROOT}/app/installations/{installation_id}/access_tokens",
+                    headers=app_headers,
+                    json={
+                        "repositories": [repository.split("/", 1)[1]],
+                        "permissions": dict(normalized_permissions),
+                    },
+                )
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in {401, 403, 404}:
+                async with self._state_lock:
+                    self._repository_installations.pop(normalized_repository, None)
+            raise GitHubAppError(
+                f"The GitHub App cannot access {repository} with the required permissions",
+                error_type=http_error_type(error.response.status_code),
+                http_status=error.response.status_code,
+            ) from error
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+            raise GitHubAppError(
+                f"The GitHub App cannot access {repository} with the required permissions",
+                error_type="authentication_error",
+            ) from error
 
-            return InstallationCredential(
-                installation_id=installation_id,
-                repository=repository,
-                permissions=normalized_permissions,
-                token=token,
-                expires_at=expires_at,
-            )
+        try:
+            if not isinstance(payload, Mapping):
+                raise TypeError
+            token = payload.get("token")
+            expires_value = payload.get("expires_at")
+            if not isinstance(token, str) or not token:
+                raise ValueError
+            if not isinstance(expires_value, str):
+                raise TypeError
+            expires_at = datetime.fromisoformat(
+                expires_value.replace("Z", "+00:00")
+            ).timestamp()
+            if expires_at <= now:
+                raise ValueError
+        except (TypeError, ValueError, AttributeError) as error:
+            raise GitHubAppError(
+                "GitHub returned an invalid installation token response",
+                error_type="invalid_response",
+            ) from error
 
-        raise GitHubAppError(
-            f"The GitHub App cannot resolve a current installation for {repository}"
+        return InstallationCredential(
+            installation_id=installation_id,
+            repository=repository,
+            permissions=normalized_permissions,
+            token=token,
+            expires_at=expires_at,
         )
 
     async def _app_jwt(self, now: float) -> str:
@@ -334,4 +332,4 @@ class GitHubAppTokenProvider:
                 algorithm="RS256",
             )
         except (jwt.PyJWTError, TypeError, ValueError) as error:
-            raise GitHubAppError("The configured GitHub App key is invalid") from error
+            raise GitHubAppError("The configured GitHub App key is invalid", error_type="authentication_error") from error

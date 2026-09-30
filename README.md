@@ -88,12 +88,15 @@ Maintenance pins reads to one full wiki SHA and sends full UTF-8 page contents
 with both required preconditions from the same snapshot:
 
 ```python
-read_snapshot = get_wiki_snapshot(repository="microsoft/project")
-write_wiki_pages(
+snapshot_response = get_wiki_snapshot(repository="microsoft/project")
+if not snapshot_response["success"]:
+  raise RuntimeError(snapshot_response["error"]["message"])
+read_snapshot = snapshot_response["result"]
+write_response = write_wiki_pages(
   repository="microsoft/project",
   pages={"Architecture.md": full_utf8_content},
-  expected_wiki_repository=read_snapshot.wiki_repository,
-  expected_base=read_snapshot.sha,
+  expected_wiki_repository=read_snapshot["wiki_repository"],
+  expected_base=read_snapshot["sha"],
   message=short_summary,
 )
 ```
@@ -111,12 +114,31 @@ write. Limits are 20 `.md` pages, 64 KiB each, 256 KiB total; deletion/rename ar
 unsupported. Unchanged assets are preserved byte-for-byte; diffs report binary
 changes as notices, not binary patches. Only SHA-1 Git repositories (GitHub's
 current format) are supported; SHA-256 repositories are rejected.
-Stale conflicts require re-reading and regeneration; a lost response
+The writer makes at most one atomic publication attempt against `expected_base`;
+it never rebases or retries internally. A stale base or competing update returns
+a classified failure to the agent. The team-memory agent decides whether to
+read fresh state, reconcile minimal edits while preserving concurrent changes,
+and make a separate write, or stop for human direction. Matching desired content
+may return no-change without publishing, but partial matches do not bypass the
+base check. Conflicts require re-reading and regeneration; a lost response
 requires comparing current content before retrying. Only tool-confirmed status
 and wiki SHAs are reported. On a destination mismatch, read a fresh snapshot and
 re-establish destination, authorization, and evidence; never overwrite
 automatically, reuse edits for another wiki, or merely replace the expected
 repository to retry. See [MCP details](github_app_mcp/README.md).
+
+**Tool design:** every repository-owned MCP and host tool returns
+`{success, outcome, result, error}`. Read the domain payload from `result`;
+failures include a safe `error.type`, `error.message`, and `error.http_status`
+(null when unknown). Outcomes distinguish `completed`, `not_applied`, and
+`unknown`; native MCP/Copilot error flags agree with the envelope. Tools perform
+one logical operation, not recovery workflows. Authorization, validation, and
+bounded prerequisite reads remain internal; recovery decisions belong to the
+owning agent. Unknown write outcomes require state inspection rather than blind
+retry. This applies to GitHub,
+repository configuration, email, and Teams tools. External tools retain their
+own documented contracts. Telemetry records allowlisted classifications and
+known HTTP statuses, never raw error messages or tool payloads.
 
 **Integration scope:** this simplifies direct maintenance, without a standalone
 host publisher or database/proposal/approval persistence. The opt-in

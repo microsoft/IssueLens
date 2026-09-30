@@ -21,6 +21,7 @@ import httpx
 
 from .auth import GitHubAppError, GitHubAppTokenProvider, InstallationCredential, Permissions, validate_repository
 from .policy import IssueLensConfigError, resolve_wiki_repository, validate_wiki_repository
+from .outcomes import ToolFailure, http_error_type
 from .wiki import WikiError, WikiRepository
 
 
@@ -678,7 +679,7 @@ class GitHubClient:
         """Publish source-project memory to its configured wiki as the App Bot."""
         repository = validate_repository(repository)
         if not self.wiki_writes_enabled:
-            raise GitHubAppError("Wiki writes are not enabled")
+            raise GitHubAppError("Wiki writes are not enabled", error_type="permission_denied")
         try:
             if not (
                 isinstance(expected_wiki_repository, str)
@@ -688,7 +689,7 @@ class GitHubClient:
         except IssueLensConfigError:
             raise GitHubAppError(
                 "expected_wiki_repository must be a GitHub owner/repository identifier; "
-                "read a fresh snapshot before writing"
+                "read a fresh snapshot before writing", error_type="invalid_input",
             ) from None
         wiki_repository = await self._resolve_wiki_repository(
             repository, write=True, expected_wiki_repository=expected_wiki_repository,
@@ -698,14 +699,20 @@ class GitHubClient:
                 wiki_repository, {"contents": "write"}
             )
             author_name, author_email = await self._token_provider.get_bot_identity()
+        except GitHubAppError as error:
+            raise GitHubAppError(
+                "Wiki write authentication failed", error_type=error.error_type,
+                http_status=error.http_status,
+            ) from None
         except Exception:
-            raise GitHubAppError("Wiki write authentication failed") from None
+            raise GitHubAppError("Wiki write authentication failed", error_type="authentication_error") from None
         return await asyncio.to_thread(
             self._wiki_operation, repository, wiki_repository, credential.token,
             lambda wiki: wiki.write(
                 pages, expected_base, message,
                 author_name=author_name, author_email=author_email,
             ),
+            write=True,
         )
 
     async def _resolve_wiki_repository(
@@ -713,13 +720,23 @@ class GitHubClient:
     ) -> str:
         try:
             wiki_repository = await resolve_wiki_repository(self, repository)
+        except ToolFailure as error:
+            raise GitHubAppError(
+                "Team memory customization could not be loaded",
+                error_type=error.error_type, http_status=error.http_status,
+            ) from None
         except Exception:
-            raise GitHubAppError("Team memory customization could not be loaded") from None
+            raise GitHubAppError(
+                "Team memory customization could not be loaded", error_type="configuration_error",
+            ) from None
         if (
             expected_wiki_repository is not None
             and expected_wiki_repository.casefold() != wiki_repository.casefold()
         ):
-            raise GitHubAppError("Wiki destination changed; read a fresh snapshot before writing")
+            raise GitHubAppError(
+                "Wiki destination changed; read a fresh snapshot before writing",
+                error_type="destination_changed",
+            )
         if repository.casefold() == wiki_repository.casefold():
             return wiki_repository
         try:
@@ -731,17 +748,25 @@ class GitHubClient:
                 if not isinstance(visibility, str) or visibility not in {"public", "private", "internal"}:
                     raise ValueError("Invalid repository visibility")
                 visibilities.append(visibility)
+        except GitHubAppError as error:
+            raise GitHubAppError(
+                "Team memory repository visibility could not be verified",
+                error_type=error.error_type, http_status=error.http_status,
+            ) from None
         except Exception:
-            raise GitHubAppError("Team memory repository visibility could not be verified") from None
+            raise GitHubAppError(
+                "Team memory repository visibility could not be verified", error_type="invalid_response",
+            ) from None
         source_visibility, wiki_visibility = visibilities
         if write and source_visibility != "public" and wiki_visibility == "public":
-            raise GitHubAppError("Team memory cannot write non-public project context to a public wiki")
+            raise GitHubAppError("Team memory cannot write non-public project context to a public wiki", error_type="permission_denied")
         if not write and source_visibility == "public" and wiki_visibility != "public":
-            raise GitHubAppError("Team memory cannot read a non-public wiki in a public project context")
+            raise GitHubAppError("Team memory cannot read a non-public wiki in a public project context", error_type="permission_denied")
         if source_visibility != "public" and wiki_visibility != "public":
             raise GitHubAppError(
                 "Team memory cannot access a different non-public repository's wiki "
-                "without a verified audience relationship; use the source project's own wiki"
+                "without a verified audience relationship; use the source project's own wiki",
+                error_type="permission_denied",
             )
         return wiki_repository
 
@@ -754,8 +779,13 @@ class GitHubClient:
             credential = await self._token_provider.get_token(
                 wiki_repository, {"contents": "read"}
             )
+        except GitHubAppError as error:
+            raise GitHubAppError(
+                "Wiki read authentication failed", error_type=error.error_type,
+                http_status=error.http_status,
+            ) from None
         except Exception:
-            raise GitHubAppError("Wiki read authentication failed") from None
+            raise GitHubAppError("Wiki read authentication failed", error_type="authentication_error") from None
         return await asyncio.to_thread(
             self._wiki_operation, repository, wiki_repository, credential.token, operation
         )
@@ -764,10 +794,14 @@ class GitHubClient:
     def _wiki_operation(
         source_repository: str, repository: str, token: str,
         operation: Callable[[WikiRepository], Any],
+        *, write: bool = False,
     ) -> Any:
+        completed = False
+        wiki: WikiRepository | None = None
         try:
             with WikiRepository(repository, token=token) as wiki:
                 payload = operation(wiki)
+                completed = True
             if not isinstance(payload, dict):
                 payload = {"result": payload}
             payload = {
@@ -776,16 +810,32 @@ class GitHubClient:
                 "wiki_repository": repository,
             }
             encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False).encode("utf-8")
-        except WikiError:
+        except WikiError as error:
+            message = str(error)
+            unsafe = token in message or json.dumps(token, ensure_ascii=True)[1:-1] in message
             raise GitHubAppError(
-                "Wiki operation failed; re-read a snapshot and check paths, refs, and limits"
+                "Wiki operation failed; inspect current state" if unsafe else message,
+                error_type="unsafe_result" if unsafe else error.error_type,
+                outcome="unknown" if write and (
+                    completed or getattr(wiki, "_publication_started", False) is True
+                ) else error.outcome,
+                http_status=error.http_status,
             ) from None
         except Exception:
-            raise GitHubAppError("Wiki operation failed") from None
+            raise GitHubAppError(
+                "Wiki operation failed", error_type="internal_error",
+                outcome="unknown" if write else "not_applied",
+            ) from None
         if len(encoded) > _MAX_WIKI_RESULT_BYTES:
-            raise GitHubAppError("GitHub response is too large; narrow the request")
+            raise GitHubAppError(
+                "GitHub response is too large; narrow the request", error_type="limit_exceeded",
+                outcome="unknown" if write else "not_applied",
+            )
         if json.dumps(token, ensure_ascii=True)[1:-1].encode("utf-8") in encoded:
-            raise GitHubAppError("Wiki operation returned an unsafe result")
+            raise GitHubAppError(
+                "Wiki operation returned an unsafe result", error_type="unsafe_result",
+                outcome="unknown" if write else "not_applied",
+            )
         return payload
 
     async def get_issue_images(
@@ -974,7 +1024,7 @@ class GitHubClient:
         body = body.strip()
         if not body or len(body) > 65_536:
             raise GitHubAppError(
-                "comment body must contain between 1 and 65536 characters"
+                "comment body must contain between 1 and 65536 characters", error_type="invalid_input",
             )
         return await self._request(
             "POST",
@@ -997,7 +1047,7 @@ class GitHubClient:
         except KeyError as error:
             raise GitHubAppError(
                 "target_kind must be issue, pull_request, issue_comment, "
-                "or pull_request_review_comment"
+                "or pull_request_review_comment", error_type="invalid_input",
             ) from error
         target_id = _positive(target_id, "target_id")
         return await self._request(
@@ -1012,7 +1062,7 @@ class GitHubClient:
     def _authorize(self, repository: str, *, write: bool = False) -> str:
         repository = validate_repository(repository)
         if write and not self._writes_enabled:
-            raise GitHubAppError("GitHub write tools are disabled for this server")
+            raise GitHubAppError("GitHub write tools are disabled for this server", error_type="permission_denied")
         return repository
 
     async def _request(
@@ -1098,7 +1148,9 @@ class GitHubClient:
                         content.extend(chunk)
                         if len(content) > limit:
                             raise GitHubAppError(
-                                "GitHub response is too large; narrow the request"
+                                "GitHub response is too large; narrow the request",
+                                error_type="limit_exceeded",
+                                outcome="unknown" if write else "not_applied",
                             )
                 payload = json.loads(content)
         except httpx.HTTPStatusError as error:
@@ -1108,17 +1160,28 @@ class GitHubClient:
                     and error.response.headers.get("x-ratelimit-remaining") == "0"
                 ):
                     raise GitHubAppError(
-                        "GitHub anonymous public-read rate limit exceeded"
+                        "GitHub anonymous public-read rate limit exceeded",
+                        error_type="rate_limited", http_status=error.response.status_code,
                     ) from error
                 raise GitHubAppError(
                     f"{repository} is not publicly readable and the "
-                    "IssueLens App cannot access it"
+                    "IssueLens App cannot access it",
+                    error_type=http_error_type(error.response.status_code),
+                    http_status=error.response.status_code,
                 ) from error
             raise GitHubAppError(
-                f"GitHub API returned HTTP {error.response.status_code}"
+                f"GitHub API returned HTTP {error.response.status_code}",
+                error_type=http_error_type(error.response.status_code),
+                http_status=error.response.status_code,
+                outcome="unknown" if write and (error.response.status_code >= 500 or error.response.status_code == 408) else "not_applied",
             ) from error
         except (httpx.HTTPError, ValueError) as error:
-            raise GitHubAppError("GitHub API request failed") from error
+            raise GitHubAppError(
+                "GitHub API request failed",
+                error_type="timeout" if isinstance(error, httpx.TimeoutException) else
+                "transport_error" if isinstance(error, httpx.HTTPError) else "invalid_response",
+                outcome="unknown" if write else "not_applied",
+            ) from error
 
         if _commit_detail is not None:
             if not isinstance(payload, dict):
@@ -1135,7 +1198,10 @@ class GitHubClient:
                     for item in files
                 ]
         if len(json.dumps(payload, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
-            raise GitHubAppError("GitHub response is too large; narrow the request")
+            raise GitHubAppError(
+                "GitHub response is too large; narrow the request", error_type="limit_exceeded",
+                outcome="unknown" if write else "not_applied",
+            )
         return payload
 
 
@@ -1192,15 +1258,15 @@ def _search_line_matches(text: str, query: str) -> list[dict[str, Any]]:
 
 def _pagination(per_page: int, page: int, *, max_page: int = 100) -> dict[str, int]:
     if type(per_page) is not int or not 1 <= per_page <= 100:
-        raise GitHubAppError("per_page must be an integer from 1 to 100")
+        raise GitHubAppError("per_page must be an integer from 1 to 100", error_type="invalid_input")
     if type(page) is not int or not 1 <= page <= max_page:
-        raise GitHubAppError(f"page must be an integer from 1 to {max_page}")
+        raise GitHubAppError(f"page must be an integer from 1 to {max_page}", error_type="invalid_input")
     return {"per_page": per_page, "page": page}
 
 
 def _positive(value: int, field: str) -> int:
     if type(value) is not int or value < 1:
-        raise GitHubAppError(f"{field} must be a positive integer")
+        raise GitHubAppError(f"{field} must be a positive integer", error_type="invalid_input")
     return value
 
 
@@ -1208,15 +1274,15 @@ def _timestamp(value: str) -> str:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (TypeError, ValueError) as error:
-        raise GitHubAppError("since must be an ISO 8601 timestamp") from error
+        raise GitHubAppError("since must be an ISO 8601 timestamp", error_type="invalid_input") from error
     if parsed.tzinfo is None:
-        raise GitHubAppError("since must include a timezone")
+        raise GitHubAppError("since must include a timezone", error_type="invalid_input")
     return value
 
 
 def _ref(value: str) -> str:
     if not isinstance(value, str) or not value or len(value) > 200:
-        raise GitHubAppError("ref must be a bounded non-empty string")
+        raise GitHubAppError("ref must be a bounded non-empty string", error_type="invalid_input")
     if (
         any(char.isspace() or unicodedata.category(char).startswith("C") for char in value)
         or any(char in value for char in '\\~^:?*[#%"\'')
@@ -1224,24 +1290,24 @@ def _ref(value: str) -> str:
         or value.startswith(("-", "/")) or value.endswith(("/", "."))
         or any(not part or part.startswith(".") or part.endswith(".lock") for part in value.split("/"))
     ):
-        raise GitHubAppError("ref contains unsupported characters")
+        raise GitHubAppError("ref contains unsupported characters", error_type="invalid_input")
     return value
 
 
 def _sha(value: str) -> str:
     if not isinstance(value, str) or not re.fullmatch(r"[0-9a-fA-F]{7,64}", value):
-        raise GitHubAppError("commit SHA must be 7 to 64 hexadecimal characters")
+        raise GitHubAppError("commit SHA must be 7 to 64 hexadecimal characters", error_type="invalid_input")
     return value
 
 
 def _repository_path(path: str) -> str:
     if not isinstance(path, str) or path != path.strip() or len(path) > 240:
-        raise GitHubAppError("path must be a repository-relative POSIX path")
+        raise GitHubAppError("path must be a repository-relative POSIX path", error_type="invalid_input")
     parts = pathlib.PurePosixPath(path).parts
     if not path or path.startswith("/") or "//" in path or "\\" in path or any(
         part in {"", ".", ".."} for part in parts
     ):
-        raise GitHubAppError("path must be a repository-relative POSIX path")
+        raise GitHubAppError("path must be a repository-relative POSIX path", error_type="invalid_input")
     return path
 
 
@@ -1253,7 +1319,7 @@ def _names(values: Sequence[str], field: str) -> list[str]:
     ]
     if not names or len(names) > 100 or any(len(name) > 100 for name in names):
         raise GitHubAppError(
-            f"{field} must contain between 1 and 100 valid names"
+            f"{field} must contain between 1 and 100 valid names", error_type="invalid_input",
         )
     return names
 

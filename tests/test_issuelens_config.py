@@ -10,6 +10,7 @@ from copilot.tools import ToolInvocation
 
 import issuelens_config
 from github_app_mcp.src.issuelens_github_mcp import policy
+from github_app_mcp.src.issuelens_github_mcp.auth import GitHubAppError
 from issuelens_config import (
     INSTRUCTION_DOMAINS,
     MAX_CONFIG_BYTES,
@@ -72,7 +73,7 @@ class IssueLensConfigTests(unittest.IsolatedAsyncioTestCase):
             "repository": "microsoft/IssueLens", "domain": "team_memory",
         }))
         self.assertEqual(result.result_type, "success")
-        payload = json.loads(result.text_result_for_llm)
+        payload = json.loads(result.text_result_for_llm)["result"]
         self.assertEqual(payload["repository"], "microsoft/IssueLens")
         self.assertEqual(payload["wiki_repository"], "microsoft/team-knowledge")
         self.assertEqual(payload["source"], "configured")
@@ -336,6 +337,40 @@ class IssueLensConfigTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.result_type, "failure")
         self.assertIn("version must be", result.error)
+
+    async def test_tool_preserves_upstream_read_failures_without_echoing_exceptions(self):
+        for target in (".github", ".github/policy.md", ".github/label-instructions.md"):
+            for error in (
+                GitHubAppError("Safe upstream error", error_type="permission_denied", http_status=403),
+                RuntimeError("PRIVATE-CANARY"),
+            ):
+                with self.subTest(target=target, error=type(error).__name__):
+                    class UnavailableClient(RepositoryClient):
+                        async def get_file(self, repository, path):
+                            if path == target:
+                                raise error
+                            return await super().get_file(repository, path)
+
+                    files = {} if target.endswith("label-instructions.md") else {
+                        ".github/issuelens.yml": "version: 1\ninstructions:\n  labeling:\n    path: .github/policy.md\n",
+                    }
+                    result = await create_tool(UnavailableClient(files)).handler(ToolInvocation(arguments={
+                        "repository": "microsoft/IssueLens", "domain": "labeling",
+                    }))
+                    payload = json.loads(result.text_result_for_llm)
+                    self.assertEqual(result.result_type, "failure")
+                    self.assertEqual(payload["outcome"], "not_applied")
+                    self.assertEqual(payload["error"]["type"], "permission_denied" if isinstance(error, GitHubAppError) else "internal_error")
+                    self.assertEqual(payload["error"]["http_status"], 403 if isinstance(error, GitHubAppError) else None)
+                    self.assertNotIn("PRIVATE-CANARY", result.text_result_for_llm)
+
+    async def test_tool_reports_yaml_location_without_raw_source(self):
+        tool = create_tool(RepositoryClient({".github/issuelens.yml": "version: 1\ninstructions: [PRIVATE-CANARY\n"}))
+        result = await tool.handler(ToolInvocation(arguments={"repository": "microsoft/IssueLens", "domain": "labeling"}))
+        payload = json.loads(result.text_result_for_llm)
+        self.assertEqual(payload["error"]["type"], "configuration_error")
+        self.assertIn("line", payload["error"]["message"])
+        self.assertNotIn("PRIVATE-CANARY", result.text_result_for_llm)
 
     def test_parser_rejects_unknown_keys_and_unsafe_paths(self):
         invalid_configs = (

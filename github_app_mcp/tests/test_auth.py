@@ -173,7 +173,7 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(credential.permissions, (("contents", "write"),))
 
     @patch("issuelens_github_mcp.auth.jwt.encode", return_value="app-jwt")
-    async def test_stale_installation_is_rediscovered_once(self, _):
+    async def test_stale_installation_is_invalidated_without_retrying_the_call(self, _):
         discoveries = 0
 
         def handler(request):
@@ -199,9 +199,12 @@ class GitHubAppTokenProviderTests(unittest.IsolatedAsyncioTestCase):
             clock=lambda: 1_700_000_000,
         )
 
-        credential = await provider.get_token(
-            "microsoft/IssueLens", {"issues": "read"}
-        )
+        with self.assertRaises(GitHubAppError) as failure:
+            await provider.get_token("microsoft/IssueLens", {"issues": "read"})
+        self.assertEqual(discoveries, 1)
+        self.assertEqual(failure.exception.http_status, 404)
+        self.assertEqual(failure.exception.outcome, "not_applied")
+        credential = await provider.get_token("microsoft/IssueLens", {"issues": "read"})
 
         self.assertEqual(discoveries, 2)
         self.assertEqual(credential.installation_id, 222)
