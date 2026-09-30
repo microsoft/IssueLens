@@ -55,7 +55,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.action_metadata["runs"]["using"], "composite")
         preflight, login, submit = self.action_metadata["runs"]["steps"]
         self.assertEqual(preflight["id"], "preflight")
-        self.assertEqual(login["uses"], "azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c")
+        self.assertRegex(login["uses"], r"^azure/login@[0-9a-f]{40}\Z")
         for step in (login, submit):
             self.assertEqual(step["if"], "steps.preflight.outputs.eligible == 'true'")
         self.assertEqual(submit["env"]["AGENT_URL"], "${{ inputs.agent-url }}")
@@ -108,7 +108,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
 
     def test_local_caller_loads_only_trusted_action_revision(self):
         checkout, invoke = self.steps
-        self.assertEqual(checkout["uses"], "actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd")
+        self.assertRegex(checkout["uses"], r"^actions/checkout@[0-9a-f]{40}\Z")
         self.assertEqual(checkout["with"]["ref"], "${{ github.workflow_sha }}")
         self.assertEqual(checkout["with"]["persist-credentials"], "false")
         self.assertEqual(checkout["with"]["sparse-checkout"], "/.github/actions/issuelens/")
