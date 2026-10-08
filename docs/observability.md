@@ -52,9 +52,9 @@ retained host requests do not establish full per-call trace coverage.
 
 The allowlisted facts contain no raw prompts, answers, reasoning, issue bodies,
 source/file/image contents, tool arguments/results, credentials, email
-addresses, or URL query strings. Tool failure facts may contain a bounded,
-credential-scrubbed `error_message` derived only from an IssueLens-owned tool's
-static `error.telemetry_message`. Agent-facing `error.message`, unstructured SDK
+addresses, or URL query strings. Tool failure facts may contain a content-free
+static `error_message` derived only from an IssueLens-owned tool's
+`error.telemetry_message`. Agent-facing `error.message`, unstructured SDK
 and transport exceptions, and arbitrary envelope content remain excluded.
 Repository names/IDs, issue/PR numbers,
 conversation/session/run IDs and trace IDs are still sensitive metadata: restrict

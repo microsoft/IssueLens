@@ -15,7 +15,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from github_app_mcp.src.issuelens_github_mcp.github import GitHubClient
 from telemetry import RunTelemetry, Settings, copilot_environment, prepare_environment
-from telemetry_targets import MAX_ERROR_MESSAGE, result_metadata, safe_error_message
+from telemetry_targets import result_metadata
 
 
 class RecordingBackend:
@@ -860,61 +860,6 @@ class SettingsTests(unittest.TestCase):
         result = result_metadata({"structuredContent": {"number": 7, "body": "SECRET", "pull_request": {}}})
         self.assertEqual(result, {"number": 7, "is_pull_request": True, "is_error": False})
         self.assertEqual(result_metadata({"content": "[" * (128 * 1024 + 1)}), {})
-
-    def test_error_messages_are_bounded_and_scrub_common_credentials(self):
-        secret = "PRIVATE-CANARY"
-        message = safe_error_message(
-            "\x1b[31mFailure\x1b[0m "
-            f"Bearer {secret} token={secret} \"client_secret\":\"{secret}\" "
-            f"ghp_{'a' * 32} https://example.invalid/path?sig={secret} "
-            + "x" * (MAX_ERROR_MESSAGE * 2)
-        )
-        self.assertIsNotNone(message)
-        self.assertLessEqual(len(message), MAX_ERROR_MESSAGE)
-        self.assertNotIn(secret, message)
-        self.assertNotIn("ghp_", message)
-        self.assertNotIn("?sig=", message)
-        self.assertNotIn("\x1b", message)
-        self.assertIn("<redacted>", message)
-
-    def test_authorization_redaction_consumes_scheme_and_credential(self):
-        self.assertEqual(
-            safe_error_message("Authorization: Basic PRIVATE-CANARY\r\nrequest failed"),
-            "Authorization: <redacted> request failed",
-        )
-        self.assertEqual(
-            safe_error_message('"authorization": "Bearer PRIVATE-CANARY", status=401'),
-            '"authorization": <redacted>, status=401',
-        )
-        self.assertEqual(
-            safe_error_message(
-                'Authorization: Digest username="alice", response="PRIVATE-CANARY"\n'
-                "request failed"
-            ),
-            "Authorization: <redacted> request failed",
-        )
-        self.assertEqual(
-            safe_error_message(
-                "Authorization: AWS4-HMAC-SHA256 "
-                "Credential=PRIVATE-CANARY, Signature=PRIVATE-CANARY\nrequest failed"
-            ),
-            "Authorization: <redacted> request failed",
-        )
-
-    def test_url_redaction_removes_userinfo_query_and_fragment(self):
-        self.assertEqual(
-            safe_error_message(
-                "GET https://alice:PRIVATE-CANARY@example.invalid/path"
-                "?sig=PRIVATE-CANARY#fragment failed"
-            ),
-            "GET https://example.invalid/path failed",
-        )
-
-    def test_email_addresses_are_redacted_from_failure_diagnostics(self):
-        self.assertEqual(
-            safe_error_message("recipient alice@example.invalid was rejected"),
-            "recipient <redacted-email> was rejected",
-        )
 
     def test_outer_mcp_errors_survive_missing_unparseable_and_nested_content(self):
         for content in (None, "[" * (128 * 1024 + 1), "[]"):

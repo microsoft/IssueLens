@@ -155,7 +155,7 @@ owning agent. Unknown write outcomes require state inspection rather than blind
 retry. This applies to GitHub,
 repository configuration, email, and Teams tools. External tools retain their
 own documented contracts. Telemetry records allowlisted classifications and
-known HTTP statuses plus bounded, credential-scrubbed messages from
+known HTTP statuses plus content-free static messages from
 IssueLens-owned tool failures. It exports only the explicit static
 `error.telemetry_message`, not agent-facing `error.message`, raw exception
 objects, tool arguments/results, credentials, or unstructured SDK exception

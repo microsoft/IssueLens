@@ -3,41 +3,12 @@
 from __future__ import annotations
 
 import json
-import re
-import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
 from github_app_mcp.src.issuelens_github_mcp.outcomes import (
     ERROR_TYPES,
     telemetry_error_message,
-)
-
-
-MAX_ERROR_MESSAGE = 1024
-_BEARER_SECRET = re.compile(r"(?i)\bBearer\s+\S+")
-_AUTHORIZATION_SECRET = re.compile(
-    r"""(?ix)
-    ((?:"|')?authorization(?:"|')?\s*[:=]\s*)
-    (?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)
-    """
-)
-_NAMED_SECRET = re.compile(
-    r"""(?ix)
-    ((?:"|')?
-    (?:token|secret|password|sig|api[_-]?key|access[_-]?token|client[_-]?secret)
-    (?:"|')?\s*[:=]\s*)
-    (?:"[^"]*"|'[^']*'|[^\s,;]+)
-    """
-)
-_GITHUB_SECRET = re.compile(
-    r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
-)
-_URL_SECRET = re.compile(
-    r"(?i)(https?://)(?:[^/\s?#@]+@)?([^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?"
-)
-_EMAIL_SECRET = re.compile(
-    r"(?i)(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![A-Z0-9.-])"
 )
 
 
@@ -48,28 +19,6 @@ def _failed(value: Any) -> bool:
             or value.get("success") is False or value.get("result_type") == "failure"
         )
     return getattr(value, "is_error", False) is True or getattr(value, "result_type", None) == "failure"
-
-
-def safe_error_message(value: Any) -> str | None:
-    """Bound tool-authored diagnostics while removing common credential carriers."""
-    if not isinstance(value, str):
-        return None
-    message = _AUTHORIZATION_SECRET.sub(r"\1<redacted>", value)
-    message = "".join(
-        " " if unicodedata.category(character)[0] == "C" else character
-        for character in message
-    )
-    message = " ".join(message.split())
-    message = _BEARER_SECRET.sub("Bearer <redacted>", message)
-    message = _NAMED_SECRET.sub(r"\1<redacted>", message)
-    message = _GITHUB_SECRET.sub("<redacted>", message)
-    message = _URL_SECRET.sub(r"\1\2", message)
-    message = _EMAIL_SECRET.sub("<redacted-email>", message)
-    if not message:
-        return None
-    if len(message) > MAX_ERROR_MESSAGE:
-        message = message[:MAX_ERROR_MESSAGE - 3] + "..."
-    return message
 
 
 def _content_text(result: Any) -> str | None:
