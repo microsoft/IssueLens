@@ -842,6 +842,31 @@ class SettingsTests(unittest.TestCase):
         self.assertNotIn("\x1b", message)
         self.assertIn("<redacted>", message)
 
+    def test_authorization_redaction_consumes_scheme_and_credential(self):
+        self.assertEqual(
+            safe_error_message("Authorization: Basic PRIVATE-CANARY request failed"),
+            "Authorization: <redacted> request failed",
+        )
+        self.assertEqual(
+            safe_error_message('"authorization": "Bearer PRIVATE-CANARY", status=401'),
+            '"authorization": <redacted>, status=401',
+        )
+
+    def test_url_redaction_removes_userinfo_query_and_fragment(self):
+        self.assertEqual(
+            safe_error_message(
+                "GET https://alice:PRIVATE-CANARY@example.invalid/path"
+                "?sig=PRIVATE-CANARY#fragment failed"
+            ),
+            "GET https://example.invalid/path failed",
+        )
+
+    def test_email_addresses_are_redacted_from_failure_diagnostics(self):
+        self.assertEqual(
+            safe_error_message("recipient alice@example.invalid was rejected"),
+            "recipient <redacted-email> was rejected",
+        )
+
     def test_outer_mcp_errors_survive_missing_unparseable_and_nested_content(self):
         for content in (None, "[" * (128 * 1024 + 1), "[]"):
             self.assertEqual(result_metadata({"isError": True, "content": content}), {"is_error": True})

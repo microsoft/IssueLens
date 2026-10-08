@@ -13,10 +13,16 @@ from github_app_mcp.src.issuelens_github_mcp.outcomes import ERROR_TYPES
 
 MAX_ERROR_MESSAGE = 1024
 _BEARER_SECRET = re.compile(r"(?i)\bBearer\s+\S+")
+_AUTHORIZATION_SECRET = re.compile(
+    r"""(?ix)
+    ((?:"|')?authorization(?:"|')?\s*[:=]\s*)
+    (?:"[^"]*"|'[^']*'|(?:basic|bearer|token|negotiate|ntlm)\s+\S+|[^\s,;]+)
+    """
+)
 _NAMED_SECRET = re.compile(
     r"""(?ix)
     ((?:"|')?
-    (?:authorization|token|secret|password|sig|api[_-]?key|access[_-]?token|client[_-]?secret)
+    (?:token|secret|password|sig|api[_-]?key|access[_-]?token|client[_-]?secret)
     (?:"|')?\s*[:=]\s*)
     (?:"[^"]*"|'[^']*'|[^\s,;]+)
     """
@@ -24,7 +30,12 @@ _NAMED_SECRET = re.compile(
 _GITHUB_SECRET = re.compile(
     r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"
 )
-_URL_SECRET = re.compile(r"(?i)(https?://[^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?")
+_URL_SECRET = re.compile(
+    r"(?i)(https?://)(?:[^/\s?#@]+@)?([^\s?#]+)(?:\?[^\s#]*)?(?:#[^\s]*)?"
+)
+_EMAIL_SECRET = re.compile(
+    r"(?i)(?<![A-Z0-9._%+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![A-Z0-9.-])"
+)
 
 
 def _failed(value: Any) -> bool:
@@ -45,10 +56,12 @@ def safe_error_message(value: Any) -> str | None:
         for character in value
     )
     message = " ".join(message.split())
+    message = _AUTHORIZATION_SECRET.sub(r"\1<redacted>", message)
     message = _BEARER_SECRET.sub("Bearer <redacted>", message)
     message = _NAMED_SECRET.sub(r"\1<redacted>", message)
     message = _GITHUB_SECRET.sub("<redacted>", message)
-    message = _URL_SECRET.sub(r"\1", message)
+    message = _URL_SECRET.sub(r"\1\2", message)
+    message = _EMAIL_SECRET.sub("<redacted-email>", message)
     if not message:
         return None
     if len(message) > MAX_ERROR_MESSAGE:
