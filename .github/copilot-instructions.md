@@ -182,12 +182,15 @@ agent's role or tool restrictions to repository contributors.
   logical operation. Validation, scoped authentication, bounded prerequisite
   reads, and result verification stay inside tools; tools do not retry failed
   business operations or rebase edits. All repository-owned MCP and host tools
-  return `success`, `outcome`, `result`, and `error` (type, safe message, known
-  HTTP status), with native failure flags preserved. Distinguish confirmed
+  return `success`, `outcome`, `result`, and `error` (type, agent-facing message,
+  static telemetry message, known HTTP status), with native failure flags
+  preserved. Distinguish confirmed
   completion, a rejected/not-applied operation, and an unknown write outcome.
   The owning agent decides recovery. Recovery never grants new write authority
-  or bypasses scope/privacy/precondition checks. Export only allowlisted error
-  classifications and statuses to telemetry, not arbitrary exception messages.
+  or bypasses scope/privacy/precondition checks. Export allowlisted error
+  classifications, outcomes, known statuses, and explicit static telemetry
+  messages produced by IssueLens-owned tools, not agent-facing messages or raw
+  exception objects.
 - **GitHub access has one model-facing boundary** — both deployed protocols
   must use only the bundled IssueLens GitHub MCP tools. The constrained
   `issuelens-config` host tool returns one validated policy domain. Do not add

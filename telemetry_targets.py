@@ -6,7 +6,10 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from github_app_mcp.src.issuelens_github_mcp.outcomes import ERROR_TYPES
+from github_app_mcp.src.issuelens_github_mcp.outcomes import (
+    ERROR_TYPES,
+    telemetry_error_message,
+)
 
 
 def _failed(value: Any) -> bool:
@@ -18,6 +21,23 @@ def _failed(value: Any) -> bool:
     return getattr(value, "is_error", False) is True or getattr(value, "result_type", None) == "failure"
 
 
+def _content_text(result: Any) -> str | None:
+    if isinstance(result, str):
+        return result
+    content = (
+        result.get("content")
+        if isinstance(result, Mapping) else getattr(result, "content", None)
+    )
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (list, tuple)) and len(content) == 1:
+        item = content[0]
+        text = item.get("text") if isinstance(item, Mapping) else getattr(item, "text", None)
+        if isinstance(text, str):
+            return text
+    return None
+
+
 def result_metadata(result: Any) -> dict[str, Any]:
     failed = _failed(result)
     structured = (
@@ -25,13 +45,15 @@ def result_metadata(result: Any) -> dict[str, Any]:
         if isinstance(result, Mapping) else getattr(result, "structured_content", None)
     )
     if structured is None:
-        content = result.get("content") if isinstance(result, Mapping) else getattr(result, "content", None)
+        content = _content_text(result)
         if not isinstance(content, str) or len(content) > 128 * 1024:
             return {"is_error": True} if failed else {}
         try:
             structured = json.loads(content)
         except (ValueError, RecursionError):
-            return {"is_error": True} if failed else {}
+            if not failed:
+                return {}
+            return {"is_error": True}
     if not isinstance(structured, Mapping):
         return {"is_error": True} if failed else {}
     failed = failed or _failed(structured)
@@ -53,6 +75,12 @@ def result_metadata(result: Any) -> dict[str, Any]:
             status = error.get("http_status")
             if type(status) is int and 100 <= status <= 599:
                 execution["http_status"] = status
+            else:
+                status = None
+            if isinstance(error_type, str) and error_type in ERROR_TYPES:
+                expected_message = telemetry_error_message(error_type, status)
+                if error.get("telemetry_message") == expected_message:
+                    execution["error_message"] = expected_message
         structured = structured.get("result")
         if not isinstance(structured, Mapping):
             return {**execution, "is_error": failed}

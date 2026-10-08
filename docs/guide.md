@@ -145,8 +145,9 @@ repository to retry. See [MCP details](../github_app_mcp/README.md).
 
 **Tool design:** every repository-owned MCP and host tool returns
 `{success, outcome, result, error}`. Read the domain payload from `result`;
-failures include a safe `error.type`, `error.message`, and `error.http_status`
-(null when unknown). Outcomes distinguish `completed`, `not_applied`, and
+failures include `error.type`, an agent-facing `error.message`, a static
+`error.telemetry_message`, and `error.http_status` (null when unknown).
+Outcomes distinguish `completed`, `not_applied`, and
 `unknown`; native MCP/Copilot error flags agree with the envelope. Tools perform
 one logical operation, not recovery workflows. Authorization, validation, and
 bounded prerequisite reads remain internal; recovery decisions belong to the
@@ -154,7 +155,11 @@ owning agent. Unknown write outcomes require state inspection rather than blind
 retry. This applies to GitHub,
 repository configuration, email, and Teams tools. External tools retain their
 own documented contracts. Telemetry records allowlisted classifications and
-known HTTP statuses, never raw error messages or tool payloads.
+known HTTP statuses plus content-free static messages from
+IssueLens-owned tool failures. It exports only the explicit static
+`error.telemetry_message`, not agent-facing `error.message`, raw exception
+objects, tool arguments/results, credentials, or unstructured SDK exception
+strings.
 
 **Integration scope:** this simplifies direct maintenance, without a standalone
 host publisher or database/proposal/approval persistence. The opt-in

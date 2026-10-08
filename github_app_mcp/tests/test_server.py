@@ -16,6 +16,7 @@ sys.path.insert(0, os.fspath(PACKAGE_ROOT))
 from issuelens_github_mcp.config import ConfigurationError  # noqa: E402
 from issuelens_github_mcp.auth import GitHubAppError  # noqa: E402
 from issuelens_github_mcp.github import GitHubClient  # noqa: E402
+from issuelens_github_mcp.outcomes import ERROR_TYPES, ToolFailure, failure_result  # noqa: E402
 from issuelens_github_mcp.server import (  # noqa: E402
     build_server_from_environment,
     create_server,
@@ -73,6 +74,19 @@ class FakeGitHubClient:
 
 
 class MCPServerTests(unittest.IsolatedAsyncioTestCase):
+    def test_every_error_type_has_static_telemetry_message(self):
+        for error_type in ERROR_TYPES | {"PRIVATE-CANARY"}:
+            with self.subTest(error_type=error_type):
+                result = failure_result(ToolFailure(
+                    "Repository content: PRIVATE-CANARY",
+                    error_type=error_type,
+                    http_status=503,
+                ))
+                details = result["error"]
+                self.assertIsNotNone(details)
+                self.assertNotIn("PRIVATE-CANARY", details["telemetry_message"])
+                self.assertIn("HTTP 503", details["telemetry_message"])
+
     async def test_every_tool_returns_one_structured_execution_outcome(self):
         github = FakeGitHubClient(writes_enabled=True, wiki_writes_enabled=True)
         values = {
@@ -116,7 +130,12 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             envelope = json.loads(response.content[0].text)
             self.assertEqual(envelope, {
                 "success": False, "outcome": outcome, "result": None,
-                "error": {"type": "upstream_error", "message": "GitHub API returned HTTP 503", "http_status": 503},
+                "error": {
+                    "type": "upstream_error",
+                    "message": "GitHub API returned HTTP 503",
+                    "telemetry_message": "Upstream service request failed (HTTP 503).",
+                    "http_status": 503,
+                },
             })
             self.assertEqual(response.structured_content, envelope)
             github.add_issue_comment.assert_awaited_once()

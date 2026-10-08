@@ -583,27 +583,50 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(span.status.status_code, trace.StatusCode.ERROR)
         self.assertIn("failed", [attrs.get("status") for _, _, attrs in self.backend.metrics])
 
-    def test_structured_tool_failure_preserves_only_allowlisted_diagnostics(self):
-        for source in ("result", "error"):
+    def test_structured_tool_failure_preserves_bounded_diagnostics_across_sdk_shapes(self):
+        message = "Upstream service request failed (HTTP 503)."
+        envelope = {
+            "success": False, "outcome": "unknown", "result": None,
+            "error": {
+                "type": "upstream_error",
+                "message": "GitHub API returned HTTP 503",
+                "telemetry_message": message,
+                "http_status": 503,
+            },
+        }
+        encoded = json.dumps(envelope)
+        completions = {
+            "result-structured": {
+                "success": True, "result": {"structuredContent": envelope},
+            },
+            "result-string": {
+                "success": False, "result": encoded,
+            },
+            "result-text-content": {
+                "success": False,
+                "result": {"content": [{"type": "text", "text": encoded}]},
+            },
+            "error-object": {
+                "success": False, "error": {"message": encoded},
+            },
+            "error-string": {
+                "success": False, "error": encoded,
+            },
+        }
+        for source, completion in completions.items():
             identifier = "failure-" + source
             self.tool_start(identifier, "wiki-writer-write_wiki_pages", issue_number=None)
-            envelope = {
-                "success": False, "outcome": "unknown", "result": None,
-                "error": {"type": "upstream_error", "message": "PRIVATE-CANARY", "http_status": 503},
-            }
-            completion = {"toolCallId": identifier, "success": source == "result"}
-            if source == "result":
-                completion["result"] = {"structuredContent": envelope}
-            else:
-                completion["error"] = {"message": json.dumps(envelope)}
-            self.run.observe(event("tool.execution_complete", completion))
+            self.run.observe(event("tool.execution_complete", {
+                "toolCallId": identifier, **completion,
+            }))
         summary = self.complete()
-        self.assertEqual(summary["tools_failed"], 2)
+        self.assertEqual(summary["tools_failed"], len(completions))
         self.assertEqual(summary["write_operations_succeeded"], 0)
         failures = self.backend.facts("issuelens.run.error")
-        self.assertEqual(len(failures), 2)
+        self.assertEqual(len(failures), len(completions))
         for failure in failures:
             self.assertEqual(failure["error_type"], "upstream_error")
+            self.assertEqual(failure["error_message"], message)
             self.assertEqual(failure["http_status"], 503)
             self.assertEqual(failure["tool_outcome"], "unknown")
         spans = [span for span in self.backend.exporter.get_finished_spans() if span.name.startswith("execute_tool")]
@@ -611,8 +634,24 @@ class TelemetryTests(unittest.TestCase):
             self.assertEqual(span.attributes["error.type"], "upstream_error")
             self.assertEqual(span.attributes["http.response.status_code"], 503)
             self.assertEqual(span.attributes["issuelens.tool.outcome"], "unknown")
+            self.assertEqual(span.attributes["issuelens.error.message"], message)
+
+    def test_plain_owned_tool_failure_is_classification_only(self):
+        self.tool_start("failure", "github-get_file", issue_number=None)
+        self.run.observe(event("tool.execution_complete", {
+            "toolCallId": "failure", "success": False,
+            "result": {
+                "isError": True,
+                "content": "GitHub request failed before PRIVATE-CANARY was available",
+            },
+        }))
+        self.complete()
+        failure, = self.backend.facts("issuelens.run.error")
+        self.assertEqual(failure["error_type"], "tool_error")
+        self.assertNotIn("error_message", failure)
+        self.assertNotIn("http_status", failure)
+        self.assertNotIn("tool_outcome", failure)
         self.assertNotIn("PRIVATE-CANARY", json.dumps(self.backend.events))
-        self.assertNotIn("PRIVATE-CANARY", str([dict(span.attributes) for span in spans]))
 
     def test_successful_enveloped_wiki_result_still_records_confirmed_publication(self):
         self.tool_start("write", "wiki-writer-write_wiki_pages", issue_number=None)
@@ -628,12 +667,44 @@ class TelemetryTests(unittest.TestCase):
         for error_type, status in (("PRIVATE-CANARY", 0), (["conflict"], True), ({"type": "conflict"}, 999)):
             metadata = result_metadata({"structuredContent": {
                 "success": False, "outcome": "unknown", "result": None,
-                "error": {"type": error_type, "message": "PRIVATE-CANARY", "http_status": status},
+                "error": {
+                    "type": error_type,
+                    "message": "PRIVATE-CANARY",
+                    "telemetry_message": "Tool operation failed.",
+                    "http_status": status,
+                },
             }})
-            self.assertEqual(metadata, {"is_error": True, "tool_outcome": "unknown"})
+            self.assertEqual(metadata, {
+                "is_error": True, "tool_outcome": "unknown",
+            })
+        self.assertEqual(result_metadata({"structuredContent": {
+            "success": False, "outcome": "unknown", "result": None,
+            "error": {
+                "type": "configuration_error",
+                "message": "PRIVATE-CANARY",
+                "telemetry_message": "PRIVATE-CANARY",
+                "http_status": None,
+            },
+        }}), {
+            "is_error": True,
+            "tool_outcome": "unknown",
+            "error_type": "configuration_error",
+        })
         self.assertEqual(result_metadata({"structuredContent": {
             "success": False, "outcome": ["unknown"], "error": {"message": "PRIVATE-CANARY"},
         }}), {"is_error": True, "is_pull_request": False})
+        self.assertEqual(result_metadata({"structuredContent": {
+            "success": False, "outcome": "not_applied", "result": None,
+            "error": {
+                "type": "configuration_error",
+                "message": "Duplicate YAML key: PRIVATE-CANARY",
+                "http_status": None,
+            },
+        }}), {
+            "is_error": True,
+            "tool_outcome": "not_applied",
+            "error_type": "configuration_error",
+        })
 
     def test_successful_write_then_failure_is_partial_not_success(self):
         self.tool_start("write", "github-add_issue_comment", body="SECRET")
@@ -644,21 +715,26 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(result["transport_status"], "completed")
         self.assertEqual(result["business_outcome"], "partial")
 
-    def test_content_and_free_form_errors_are_not_exported(self):
+    def test_unstructured_sdk_tool_errors_are_classification_only(self):
         self.tool_start("notify", "send-email", body="PRIVATE-CANARY", recipients=["alice@example.invalid"])
         self.run.observe(event("tool.execution_complete", {
             "toolCallId": "notify", "success": False,
-            "error": {"message": "https://secret.invalid/?sig=PRIVATE-CANARY"},
+            "error": {"message": "Invalid argument body='PRIVATE-CANARY'"},
             "result": {"content": "PRIVATE-CANARY"},
         }))
         self.run.observe(event("assistant.reasoning_delta", {"deltaContent": "PRIVATE-CANARY"}))
         self.complete()
+        failure, = self.backend.facts("issuelens.run.error")
+        self.assertEqual(failure["error_type"], "tool_error")
+        self.assertNotIn("error_message", failure)
+        span, = [span for span in self.backend.exporter.get_finished_spans()
+                 if span.name.startswith("execute_tool")]
+        self.assertNotIn("issuelens.error.message", span.attributes)
         exported = json.dumps(self.backend.events) + str([
             dict(span.attributes) for span in self.backend.exporter.get_finished_spans()
         ])
         self.assertNotIn("PRIVATE-CANARY", exported)
         self.assertNotIn("alice@", exported)
-        self.assertNotIn("sig=", exported)
         for _, _, dimensions in self.backend.metrics:
             self.assertFalse({"repository", "run_id", "number", "session_id"} & dimensions.keys())
 
@@ -786,8 +862,12 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(result_metadata({"content": "[" * (128 * 1024 + 1)}), {})
 
     def test_outer_mcp_errors_survive_missing_unparseable_and_nested_content(self):
-        for content in (None, "PRIVATE-CANARY", "[" * (128 * 1024 + 1), "[]"):
+        for content in (None, "[" * (128 * 1024 + 1), "[]"):
             self.assertEqual(result_metadata({"isError": True, "content": content}), {"is_error": True})
+        self.assertEqual(
+            result_metadata({"isError": True, "content": "Safe failure detail"}),
+            {"is_error": True},
+        )
         nested = {"isError": True, "structuredContent": {"number": 7, "body": "PRIVATE-CANARY"}}
         self.assertEqual(result_metadata({"content": json.dumps(nested)}),
                          {"number": 7, "is_pull_request": False, "is_error": True})

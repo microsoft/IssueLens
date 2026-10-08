@@ -106,7 +106,9 @@ def create_server(
             "which requires App access; wiki operations never use anonymous access."
             " Each tool performs one logical operation and never retries or rebases "
             "a failed business operation. Results contain success, outcome, result, "
-            "and error (type, message, http_status). Read payloads from result. "
+            "and error (type, message, telemetry_message, http_status). Read payloads "
+            "from result. telemetry_message is static diagnostic metadata for host "
+            "telemetry; use message for agent recovery. "
             "The agent decides recovery; unknown outcomes require state inspection, "
             "not a blind repeat write."
         ),
