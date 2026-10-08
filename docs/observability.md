@@ -51,8 +51,10 @@ not export native per-call CLI traces. Event-derived diagnostic spans and
 retained host requests do not establish full per-call trace coverage.
 
 The allowlisted facts contain no raw prompts, answers, reasoning, issue bodies,
-source/file/image contents, tool arguments/results, error messages, credentials,
-email addresses, or URL query strings. Repository names/IDs, issue/PR numbers,
+source/file/image contents, tool arguments/results, credentials, email
+addresses, or URL query strings. Tool failure facts may contain a bounded,
+credential-scrubbed `error_message` produced by an IssueLens-owned tool.
+Repository names/IDs, issue/PR numbers,
 conversation/session/run IDs and trace IDs are still sensitive metadata: restrict
 reader access and retention to the repositories' intended audience. They belong
 in logs/spans, **never metric labels**. Only bounded dimensions such as
@@ -181,7 +183,7 @@ span attributes such as `issuelens.run_id` are not the fact field `run_id`.
 | `issuelens.run.agent` | One `(run_id, agent_run_id)` summary; parent ID, role, status, exclusive usage/tool counts and captured `duration_s`. |
 | `issuelens.run.model` | One `(run_id, model)` usage aggregate, not one model-call trace. |
 | `issuelens.run.target` | One `(run_id, repository, target_kind, number, relationship)` association with observed operation count and optional `repository_id`. |
-| `issuelens.run.error` | Bounded `stage`/`error_type` observations, not raw exceptions. Structured tool failures retain allowlisted classifications, `tool_outcome`, and known `http_status` values. The error report counts affected runs per category, not distinct attempts. |
+| `issuelens.run.error` | Bounded `stage`/`error_type` observations, not raw exception objects. IssueLens-owned tool failures retain a credential-scrubbed `error_message`, allowlisted classification, `tool_outcome`, and known `http_status`. The error report counts affected runs per category, not distinct attempts. |
 
 Common dimensions are `schema_version`, `run_id`, `protocol` (`invocations` or
 `responses`), `release`, `run_trace_id`, and optional
@@ -347,6 +349,28 @@ trace messages. Because metadata facts use an isolated, trace-independent contex
 their own automatic `operation_Id` is not the correlation contract: use the
 explicit `run_trace_id`. A native portal Details link is not a promise of
 native per-call CLI trace export.
+
+For one-run tool failure details, query the bounded error facts directly:
+
+```kusto
+customEvents
+| where name == "issuelens.run.error"
+| extend d = todynamic(customDimensions)
+| where tostring(d.stage) == "tool"
+| where isempty("{run_id}") or tostring(d.run_id) == "{run_id}"
+| project timestamp,
+          run_id = tostring(d.run_id),
+          tool = tostring(d.tool),
+          error_type = tostring(d.error_type),
+          error_message = tostring(d.error_message),
+          tool_outcome = tostring(d.tool_outcome),
+          http_status = toint(d.http_status)
+| order by timestamp asc
+```
+
+Replace `{run_id}` with the selected run ID, or remove that predicate to inspect
+the current time range. `error_message` is present only for IssueLens-owned tool
+failures whose SDK event retained a usable diagnostic.
 
 No retained request row means only that this panel found none in the selected
 scope/window. The run may still have dependencies, a sampled-out trace, delayed

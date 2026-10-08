@@ -22,7 +22,7 @@ from github_app_mcp.src.issuelens_github_mcp.auth import (
     GitHubAppError,
     validate_repository,
 )
-from telemetry_targets import result_metadata
+from telemetry_targets import result_metadata, safe_error_message
 
 
 logger = logging.getLogger("issuelens.telemetry")
@@ -47,6 +47,7 @@ WRITE_TOOLS = frozenset({
     "write_wiki_pages",
 })
 LOCAL_TOOLS = frozenset({"task", "issuelens-config", "send-email", "send-teams-notification"})
+MESSAGE_TOOLS = READ_TOOLS | WRITE_TOOLS | (LOCAL_TOOLS - {"task"})
 Scalar = str | int | float | bool
 Attributes = dict[str, Scalar]
 
@@ -115,6 +116,14 @@ def _tool_name(data: Any) -> tuple[str, str]:
             if name in READ_TOOLS | WRITE_TOOLS:
                 return wire_name, name
     return (wire_name, wire_name) if wire_name in LOCAL_TOOLS else ("other", "other")
+
+
+def _tool_error_payload(data: Any) -> str | None:
+    error = _get(data, "error")
+    if isinstance(error, str):
+        return error
+    message = _get(error, "message")
+    return message if isinstance(message, str) else None
 
 
 @dataclass(frozen=True)
@@ -666,10 +675,14 @@ class RunTelemetry:
             return
         tool.finished = True
         metadata = result_metadata(_get(data, "result"))
-        if "error_type" not in metadata:
-            error_metadata = result_metadata({"content": _get(_get(data, "error"), "message")})
+        error_payload = _tool_error_payload(data)
+        if error_payload is not None:
+            error_metadata = result_metadata({"isError": True, "content": error_payload})
             if error_metadata.get("is_error"):
-                metadata.update(error_metadata)
+                metadata["is_error"] = True
+            for name in ("error_type", "error_message", "http_status", "tool_outcome"):
+                if name not in metadata and name in error_metadata:
+                    metadata[name] = error_metadata[name]
         success = _get(data, "success") is True and not metadata.get("is_error")
         tool.owner.tools_completed += 1
         tool.owner.tools_failed += int(not success)
@@ -685,6 +698,12 @@ class RunTelemetry:
                 tool.span.set_attribute("http.response.status_code", metadata["http_status"])
             if "tool_outcome" in metadata:
                 details["tool_outcome"] = metadata["tool_outcome"]
+            error_message = metadata.get("error_message")
+            if not isinstance(error_message, str) and tool.operation in MESSAGE_TOOLS:
+                error_message = safe_error_message(error_payload)
+            if isinstance(error_message, str) and tool.operation in MESSAGE_TOOLS:
+                details["error_message"] = error_message
+                tool.span.set_attribute("issuelens.error.message", error_message)
             self._event("issuelens.run.error", {
                 "stage": "tool", "error_type": error_type, "tool": tool.name,
                 "role": tool.owner.role, "agent_run_id": tool.owner.identity,

@@ -186,8 +186,9 @@ agent's role or tool restrictions to repository contributors.
   HTTP status), with native failure flags preserved. Distinguish confirmed
   completion, a rejected/not-applied operation, and an unknown write outcome.
   The owning agent decides recovery. Recovery never grants new write authority
-  or bypasses scope/privacy/precondition checks. Export only allowlisted error
-  classifications and statuses to telemetry, not arbitrary exception messages.
+  or bypasses scope/privacy/precondition checks. Export allowlisted error
+  classifications, outcomes, known statuses, and bounded credential-scrubbed
+  messages produced by IssueLens-owned tools, not raw exception objects.
 - **GitHub access has one model-facing boundary** — both deployed protocols
   must use only the bundled IssueLens GitHub MCP tools. The constrained
   `issuelens-config` host tool returns one validated policy domain. Do not add
