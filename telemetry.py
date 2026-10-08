@@ -22,7 +22,7 @@ from github_app_mcp.src.issuelens_github_mcp.auth import (
     GitHubAppError,
     validate_repository,
 )
-from telemetry_targets import result_metadata, safe_error_message
+from telemetry_targets import result_metadata
 
 
 logger = logging.getLogger("issuelens.telemetry")
@@ -677,7 +677,10 @@ class RunTelemetry:
         metadata = result_metadata(_get(data, "result"))
         error_payload = _tool_error_payload(data)
         if error_payload is not None:
-            error_metadata = result_metadata({"isError": True, "content": error_payload})
+            error_metadata = result_metadata(
+                {"isError": True, "content": error_payload},
+                allow_plain_error_message=False,
+            )
             if error_metadata.get("is_error"):
                 metadata["is_error"] = True
             for name in ("error_type", "error_message", "http_status", "tool_outcome"):
@@ -699,8 +702,6 @@ class RunTelemetry:
             if "tool_outcome" in metadata:
                 details["tool_outcome"] = metadata["tool_outcome"]
             error_message = metadata.get("error_message")
-            if not isinstance(error_message, str) and tool.operation in MESSAGE_TOOLS:
-                error_message = safe_error_message(error_payload)
             if isinstance(error_message, str) and tool.operation in MESSAGE_TOOLS:
                 details["error_message"] = error_message
                 tool.span.set_attribute("issuelens.error.message", error_message)

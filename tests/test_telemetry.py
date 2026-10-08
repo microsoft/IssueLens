@@ -680,26 +680,26 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(result["transport_status"], "completed")
         self.assertEqual(result["business_outcome"], "partial")
 
-    def test_free_form_tool_errors_are_bounded_and_scrub_credentials(self):
+    def test_unstructured_sdk_tool_errors_are_classification_only(self):
         self.tool_start("notify", "send-email", body="PRIVATE-CANARY", recipients=["alice@example.invalid"])
         self.run.observe(event("tool.execution_complete", {
             "toolCallId": "notify", "success": False,
-            "error": {"message": "https://secret.invalid/?sig=PRIVATE-CANARY"},
+            "error": {"message": "Invalid argument body='PRIVATE-CANARY'"},
             "result": {"content": "PRIVATE-CANARY"},
         }))
         self.run.observe(event("assistant.reasoning_delta", {"deltaContent": "PRIVATE-CANARY"}))
         self.complete()
         failure, = self.backend.facts("issuelens.run.error")
-        self.assertEqual(failure["error_message"], "https://secret.invalid/")
+        self.assertEqual(failure["error_type"], "tool_error")
+        self.assertNotIn("error_message", failure)
         span, = [span for span in self.backend.exporter.get_finished_spans()
                  if span.name.startswith("execute_tool")]
-        self.assertEqual(span.attributes["issuelens.error.message"], "https://secret.invalid/")
+        self.assertNotIn("issuelens.error.message", span.attributes)
         exported = json.dumps(self.backend.events) + str([
             dict(span.attributes) for span in self.backend.exporter.get_finished_spans()
         ])
         self.assertNotIn("PRIVATE-CANARY", exported)
         self.assertNotIn("alice@", exported)
-        self.assertNotIn("sig=", exported)
         for _, _, dimensions in self.backend.metrics:
             self.assertFalse({"repository", "run_id", "number", "session_id"} & dimensions.keys())
 
@@ -844,12 +844,26 @@ class SettingsTests(unittest.TestCase):
 
     def test_authorization_redaction_consumes_scheme_and_credential(self):
         self.assertEqual(
-            safe_error_message("Authorization: Basic PRIVATE-CANARY request failed"),
+            safe_error_message("Authorization: Basic PRIVATE-CANARY\r\nrequest failed"),
             "Authorization: <redacted> request failed",
         )
         self.assertEqual(
             safe_error_message('"authorization": "Bearer PRIVATE-CANARY", status=401'),
             '"authorization": <redacted>, status=401',
+        )
+        self.assertEqual(
+            safe_error_message(
+                'Authorization: Digest username="alice", response="PRIVATE-CANARY"\n'
+                "request failed"
+            ),
+            "Authorization: <redacted> request failed",
+        )
+        self.assertEqual(
+            safe_error_message(
+                "Authorization: AWS4-HMAC-SHA256 "
+                "Credential=PRIVATE-CANARY, Signature=PRIVATE-CANARY\nrequest failed"
+            ),
+            "Authorization: <redacted> request failed",
         )
 
     def test_url_redaction_removes_userinfo_query_and_fragment(self):

@@ -156,7 +156,7 @@ repository configuration, email, and Teams tools. External tools retain their
 own documented contracts. Telemetry records allowlisted classifications and
 known HTTP statuses plus bounded, credential-scrubbed messages from
 IssueLens-owned tool failures. It does not export raw exception objects, tool
-arguments/results, or credentials.
+arguments/results, credentials, or unstructured SDK exception strings.
 
 **Integration scope:** this simplifies direct maintenance, without a standalone
 host publisher or database/proposal/approval persistence. The opt-in

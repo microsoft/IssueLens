@@ -16,7 +16,7 @@ _BEARER_SECRET = re.compile(r"(?i)\bBearer\s+\S+")
 _AUTHORIZATION_SECRET = re.compile(
     r"""(?ix)
     ((?:"|')?authorization(?:"|')?\s*[:=]\s*)
-    (?:"[^"]*"|'[^']*'|(?:basic|bearer|token|negotiate|ntlm)\s+\S+|[^\s,;]+)
+    (?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n]*)
     """
 )
 _NAMED_SECRET = re.compile(
@@ -51,12 +51,12 @@ def safe_error_message(value: Any) -> str | None:
     """Bound tool-authored diagnostics while removing common credential carriers."""
     if not isinstance(value, str):
         return None
+    message = _AUTHORIZATION_SECRET.sub(r"\1<redacted>", value)
     message = "".join(
         " " if unicodedata.category(character)[0] == "C" else character
-        for character in value
+        for character in message
     )
     message = " ".join(message.split())
-    message = _AUTHORIZATION_SECRET.sub(r"\1<redacted>", message)
     message = _BEARER_SECRET.sub("Bearer <redacted>", message)
     message = _NAMED_SECRET.sub(r"\1<redacted>", message)
     message = _GITHUB_SECRET.sub("<redacted>", message)
@@ -86,7 +86,9 @@ def _content_text(result: Any) -> str | None:
     return None
 
 
-def result_metadata(result: Any) -> dict[str, Any]:
+def result_metadata(
+    result: Any, *, allow_plain_error_message: bool = True,
+) -> dict[str, Any]:
     failed = _failed(result)
     structured = (
         result.get("structured_content", result.get("structuredContent"))
@@ -102,9 +104,10 @@ def result_metadata(result: Any) -> dict[str, Any]:
             if not failed:
                 return {}
             metadata: dict[str, Any] = {"is_error": True}
-            message = safe_error_message(content)
-            if message is not None:
-                metadata["error_message"] = message
+            if allow_plain_error_message:
+                message = safe_error_message(content)
+                if message is not None:
+                    metadata["error_message"] = message
             return metadata
     if not isinstance(structured, Mapping):
         return {"is_error": True} if failed else {}

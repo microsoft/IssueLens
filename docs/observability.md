@@ -54,6 +54,8 @@ The allowlisted facts contain no raw prompts, answers, reasoning, issue bodies,
 source/file/image contents, tool arguments/results, credentials, email
 addresses, or URL query strings. Tool failure facts may contain a bounded,
 credential-scrubbed `error_message` produced by an IssueLens-owned tool.
+Unstructured SDK and transport exception strings remain excluded unless they
+contain a validated IssueLens tool-result envelope.
 Repository names/IDs, issue/PR numbers,
 conversation/session/run IDs and trace IDs are still sensitive metadata: restrict
 reader access and retention to the repositories' intended audience. They belong
