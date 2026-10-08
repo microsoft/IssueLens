@@ -8,7 +8,10 @@ import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
-from github_app_mcp.src.issuelens_github_mcp.outcomes import ERROR_TYPES
+from github_app_mcp.src.issuelens_github_mcp.outcomes import (
+    ERROR_TYPES,
+    telemetry_error_message,
+)
 
 
 MAX_ERROR_MESSAGE = 1024
@@ -86,9 +89,7 @@ def _content_text(result: Any) -> str | None:
     return None
 
 
-def result_metadata(
-    result: Any, *, allow_plain_error_message: bool = True,
-) -> dict[str, Any]:
+def result_metadata(result: Any) -> dict[str, Any]:
     failed = _failed(result)
     structured = (
         result.get("structured_content", result.get("structuredContent"))
@@ -103,12 +104,7 @@ def result_metadata(
         except (ValueError, RecursionError):
             if not failed:
                 return {}
-            metadata: dict[str, Any] = {"is_error": True}
-            if allow_plain_error_message:
-                message = safe_error_message(content)
-                if message is not None:
-                    metadata["error_message"] = message
-            return metadata
+            return {"is_error": True}
     if not isinstance(structured, Mapping):
         return {"is_error": True} if failed else {}
     failed = failed or _failed(structured)
@@ -127,12 +123,15 @@ def result_metadata(
             error_type = error.get("type")
             if isinstance(error_type, str) and error_type in ERROR_TYPES:
                 execution["error_type"] = error_type
-            message = safe_error_message(error.get("message"))
-            if message is not None:
-                execution["error_message"] = message
             status = error.get("http_status")
             if type(status) is int and 100 <= status <= 599:
                 execution["http_status"] = status
+            else:
+                status = None
+            if isinstance(error_type, str) and error_type in ERROR_TYPES:
+                expected_message = telemetry_error_message(error_type, status)
+                if error.get("telemetry_message") == expected_message:
+                    execution["error_message"] = expected_message
         structured = structured.get("result")
         if not isinstance(structured, Mapping):
             return {**execution, "is_error": failed}

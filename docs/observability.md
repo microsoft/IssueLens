@@ -53,9 +53,9 @@ retained host requests do not establish full per-call trace coverage.
 The allowlisted facts contain no raw prompts, answers, reasoning, issue bodies,
 source/file/image contents, tool arguments/results, credentials, email
 addresses, or URL query strings. Tool failure facts may contain a bounded,
-credential-scrubbed `error_message` produced by an IssueLens-owned tool.
-Unstructured SDK and transport exception strings remain excluded unless they
-contain a validated IssueLens tool-result envelope.
+credential-scrubbed `error_message` derived only from an IssueLens-owned tool's
+static `error.telemetry_message`. Agent-facing `error.message`, unstructured SDK
+and transport exceptions, and arbitrary envelope content remain excluded.
 Repository names/IDs, issue/PR numbers,
 conversation/session/run IDs and trace IDs are still sensitive metadata: restrict
 reader access and retention to the repositories' intended audience. They belong
@@ -185,7 +185,7 @@ span attributes such as `issuelens.run_id` are not the fact field `run_id`.
 | `issuelens.run.agent` | One `(run_id, agent_run_id)` summary; parent ID, role, status, exclusive usage/tool counts and captured `duration_s`. |
 | `issuelens.run.model` | One `(run_id, model)` usage aggregate, not one model-call trace. |
 | `issuelens.run.target` | One `(run_id, repository, target_kind, number, relationship)` association with observed operation count and optional `repository_id`. |
-| `issuelens.run.error` | Bounded `stage`/`error_type` observations, not raw exception objects. IssueLens-owned tool failures retain a credential-scrubbed `error_message`, allowlisted classification, `tool_outcome`, and known `http_status`. The error report counts affected runs per category, not distinct attempts. |
+| `issuelens.run.error` | Bounded `stage`/`error_type` observations, not raw exception objects. IssueLens-owned tool failures retain the static `error.telemetry_message` as `error_message`, plus allowlisted classification, `tool_outcome`, and known `http_status`. The error report counts affected runs per category, not distinct attempts. |
 
 Common dimensions are `schema_version`, `run_id`, `protocol` (`invocations` or
 `responses`), `release`, `run_trace_id`, and optional
@@ -372,7 +372,7 @@ customEvents
 
 Replace `{run_id}` with the selected run ID, or remove that predicate to inspect
 the current time range. `error_message` is present only for IssueLens-owned tool
-failures whose SDK event retained a usable diagnostic.
+failures whose SDK event retained the explicit static telemetry diagnostic.
 
 No retained request row means only that this panel found none in the selected
 scope/window. The run may still have dependencies, a sampled-out trace, delayed

@@ -677,10 +677,7 @@ class RunTelemetry:
         metadata = result_metadata(_get(data, "result"))
         error_payload = _tool_error_payload(data)
         if error_payload is not None:
-            error_metadata = result_metadata(
-                {"isError": True, "content": error_payload},
-                allow_plain_error_message=False,
-            )
+            error_metadata = result_metadata({"isError": True, "content": error_payload})
             if error_metadata.get("is_error"):
                 metadata["is_error"] = True
             for name in ("error_type", "error_message", "http_status", "tool_outcome"):

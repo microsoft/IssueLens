@@ -105,6 +105,29 @@ class IssueLensConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.result_type, "failure")
         self.assertIn("file not found", result.error)
 
+    async def test_config_details_are_excluded_from_static_telemetry_message(self):
+        client = RepositoryClient({
+            ".github/issuelens.yml": (
+                "version: 1\n"
+                "PRIVATE-CANARY: first\n"
+                "PRIVATE-CANARY: second\n"
+            ),
+        })
+        result = await create_tool(client).handler(ToolInvocation(arguments={
+            "repository": "microsoft/IssueLens", "domain": "team_memory",
+        }))
+        self.assertEqual(result.result_type, "failure")
+        payload = json.loads(result.text_result_for_llm)
+        self.assertIn("PRIVATE-CANARY", payload["error"]["message"])
+        self.assertEqual(
+            payload["error"]["telemetry_message"],
+            "Tool configuration is invalid.",
+        )
+        self.assertNotIn(
+            "PRIVATE-CANARY",
+            payload["error"]["telemetry_message"],
+        )
+
     def test_team_memory_schema_retains_path_ref_and_scopes_destination(self):
         schema = json.loads((ROOT / "schemas" / "issuelens.schema.json").read_text(encoding="utf-8"))
         domains = schema["properties"]["instructions"]["properties"]
