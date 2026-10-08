@@ -103,7 +103,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         phase_seconds = action.DISCOVERY_SECONDS + token_seconds + connection_seconds + stream_seconds
         self.assertGreaterEqual(int(self.job["timeout-minutes"]) * 60 - phase_seconds, 5 * 60)
         self.assertEqual(self.job["timeout-minutes"], "30")
-        self.assertIn("30-minute timeout", (ROOT / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("30-minute timeout", (ROOT / "docs" / "guide.md").read_text(encoding="utf-8"))
         self.assertIn("30-minute job timeout", (ACTION_DIR / "README.md").read_text(encoding="utf-8"))
 
     def test_local_caller_loads_only_trusted_action_revision(self):
@@ -177,18 +177,18 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
             self.assertIn(requirement, orchestrator)
 
     def test_workflow_owns_its_request_and_setup_contract(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        guide = (ROOT / "docs" / "guide.md").read_text(encoding="utf-8")
         request = action.build_team_memory_request({})["input"]
         for field in ("source_repository", "pull_number", "merge_commit_sha", "wiki_repository", "wiki_sha", "reason"):
             self.assertIn(field, request)
         self.assertIn("Return a final JSON object only", request)
         self.assertIn("add reactions/comments", request)
-        self.assertIn("requested response format", readme)
-        self.assertIn("ISSUELENS_TEAM_MEMORY_ENABLED=true", readme)
-        self.assertIn("default-branch pushes", readme)
-        self.assertIn("OIDC federation", readme)
-        self.assertIn("inspect the mapped wiki/history", readme)
-        for path in ("agents/issuelens.md", "agents/team-memory.md", "README.md", "github_app_mcp/README.md",
+        self.assertIn("requested response format", guide)
+        self.assertIn("ISSUELENS_TEAM_MEMORY_ENABLED=true", guide)
+        self.assertIn("default-branch pushes", guide)
+        self.assertIn("OIDC federation", guide)
+        self.assertIn("inspect the mapped wiki/history", guide)
+        for path in ("agents/issuelens.md", "agents/team-memory.md", "README.md", "docs/guide.md", "github_app_mcp/README.md",
                      ".github/copilot-instructions.md", ".github/issuelens/team-memory.md", "examples/team-memory.md"):
             with self.subTest(path=path):
                 content = " ".join((ROOT / path).read_text(encoding="utf-8").split())

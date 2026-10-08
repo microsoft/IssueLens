@@ -125,7 +125,7 @@ class CIWorkflowTests(unittest.TestCase):
             for pin in pins:
                 version, = [spec.version for spec in pin.specifier if spec.operator == "=="]
                 self.assertIn(version, runtime[pin.name].specifier)
-                self.assertIn(str(pin), (ROOT / "README.md").read_text(encoding="utf-8"))
+                self.assertIn(str(pin), (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8"))
 
     def test_both_suites_run_directly_so_failures_fail_the_job(self):
         for job_id, command in (
@@ -159,24 +159,24 @@ class CIWorkflowTests(unittest.TestCase):
         self.assertNotIn("--system-site-packages", commands)
 
     def test_validation_tools_and_commands_are_documented(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
         syntax = "python -m compileall -q *.py .github/actions/issuelens github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests"
         self.assertIn(syntax, self.commands("application-tests"))
-        self.assertIn(syntax, readme)
+        self.assertIn(syntax, contributing)
         lint = self.commands("workflow-validation")
         install = re.search(r"go install github.com/rhysd/actionlint/cmd/actionlint@[0-9a-f]{40}", lint)
         self.assertIsNotNone(install)
-        self.assertIn(install.group(), readme)
+        self.assertIn(install.group(), contributing)
         command = '"$(go env GOPATH)/bin/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml'
         self.assertIn(command, lint)
-        self.assertIn(command, readme)
+        self.assertIn(command, contributing)
         for job in self.jobs.values():
             for version in ("3.12", "3.13") if "strategy" in job else ("3.13",):
-                self.assertIn(job["name"].replace("${{ matrix.python-version }}", version), readme)
+                self.assertIn(job["name"].replace("${{ matrix.python-version }}", version), contributing)
         for job_id in ("application-tests", "mcp-tests"):
             for step in self.jobs[job_id]["steps"]:
                 if "run" in step:
-                    self.assertIn(step["run"], readme)
+                    self.assertIn(step["run"], contributing)
 
     def test_actionlint_exception_is_limited_to_existing_billing_permission(self):
         config = yaml.load(

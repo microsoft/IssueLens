@@ -1,0 +1,1120 @@
+# Setup and usage guide
+
+This guide covers running, configuring, and operating IssueLens. For a project
+overview, see the [README](../README.md). To work on the code or run offline
+tests without service credentials, see [CONTRIBUTING.md](../CONTRIBUTING.md).
+
+## In this guide
+
+- [Running locally](#running-locally)
+- [Environment variables](#environment-variables)
+- [Requests, chat, and media inputs](#invoke-with-azd)
+- [Repository configuration](#target-repository-configuration) and [built-in commands](#built-in-commands)
+- [GitHub Actions automation](#triggering-with-github-actions)
+- [Team memory](#team-memory) and [post-merge automation](#post-merge-team-memory-automation)
+- [Foundry model authentication](#using-your-own-foundry-model)
+- [Deployment](#deploying-the-agent-to-microsoft-foundry)
+- [Architecture and protocols](#how-it-works), [observability](#observability), and [troubleshooting](#troubleshooting)
+
+Commands below assume you are in the repository root. Live requests can perform
+authorized GitHub writes; use a test repository and review the requested scope.
+Deployment requires explicit approval and is separate from local development.
+
+## How It Works
+
+Both protocols run in the same process and share the same orchestrator, skills,
+four sub-agents, and bundled GitHub App MCP reads. Wiki writes use a separate,
+parent-configured MCP server local to the maintenance agent.
+
+### Team memory
+
+The `team-memory` agent makes minimal, evidence-backed Markdown wiki updates
+through `write_wiki_pages`. The shared `team-memory` skill remains read-only and
+is preloaded on every agent, including the orchestrator. Agents retrieve relevant
+knowledge directly without delegating ordinary reads to the maintenance agent.
+
+Both paths first call `issuelens-config` with the explicit source project and
+`domain="team_memory"`. Read its returned `wiki_repository` for the validated
+destination and `content` for organization and topics. For example, to store
+`microsoft/project` memory in `microsoft/team-knowledge.wiki.git`, configure the
+source project's `.github/issuelens.yml`:
+
+```yaml
+version: 1
+instructions:
+  team_memory:
+    path: .github/issuelens/team-memory.md
+    wiki_repository: microsoft/team-knowledge
+```
+
+The policy `path` remains required when the domain is present. Optional
+`wiki_repository` must pass GitHub parent repository identifier validation as
+`owner/repository`; it is not a wiki UI name, `.wiki.git` URL, or arbitrary Git
+remote. The shared package policy parser returns its resolved value alongside
+`content` in the config-tool response. Markdown supplies only organization,
+navigation, topics, inclusion/exclusion, and evidence guidance; it cannot override
+the target or supply arbitrary Git URLs, tokens, or shell settings.
+
+All wiki read/write MCP calls in this example still use
+`repository="microsoft/project"`, **not** `microsoft/team-knowledge`. Every tool
+independently re-reads and validates the same mapping, then resolves credentials
+and Git transport to the destination. See [the policy example](../examples/team-memory.md) and
+[IssueLens's own customization](../.github/issuelens/team-memory.md). An absent
+field, config, or domain defaults to the source project's own wiki. Invalid
+configuration or an inaccessible target stops memory access without silent
+source-wiki fallback. Other work may continue with authorized source evidence
+while reporting that memory was unavailable.
+
+Validated `team_memory.wiki_repository` is a narrow scope exception selecting
+only the wiki capability's destination. It grants no other writes, additional
+source repositories, or notification scope. Never publish private/internal-source
+knowledge to a public wiki or read a private/internal wiki for public-source context.
+Cross-repository mappings between private/internal repositories are rejected
+for both reads and writes because their audience relationship cannot be
+verified; use the source project's own wiki. Same-repository and public-to-public
+mappings remain supported. A private/internal source may read a public wiki,
+and a public source may write public information to a private/internal wiki,
+subject to job authorization and destination App access. Source-user authorization is
+separate from App installation access.
+Writes require an explicit current request or parent handoff authorizing a wiki
+update for the source project and its mapped wiki, regardless of origin.
+Existing issue-loop commands and repository policy alone do not authorize them. Sensitive, conflicting,
+destructive, or unsupported changes need ordinary human interaction.
+
+Only the team-memory agent-local server exposes `write_wiki_pages`; the parent
+supplies its internal `--wiki-writer` launch mode automatically. Users need no
+environment flag or per-repository App environment configuration. Shared
+reader/triage servers do not expose the writer. The existing
+`GITHUB_MCP_ENABLE_WRITES` gate remains for triage issue writes, not wiki writes.
+An initialized destination wiki is required. The App must be installed
+at the actual destination with **Contents: read** for wiki reads and **Contents:
+write** for maintenance; source installation alone is insufficient. Tokens are
+scoped to that destination and the operation's required permission.
+
+Wiki Git network and object operations use the Dulwich Python library (1.2.14),
+not `git.exe`, the Git CLI, or a Git subprocess. The Foundry ZIP
+`codeConfiguration` uses `remote_build` with `runtime: python_3_13` and installs
+the root `requirements.txt`; the standalone MCP `github_app_mcp/pyproject.toml`
+declares the same Dulwich dependency. No Git installation, Dockerfile change,
+or runtime installer is needed in either mode. IssueLens still launches its
+stdio MCP server as a Python subprocess; the wiki backend never spawns Git,
+SSH, or credential helpers.
+
+Maintenance pins reads to one full wiki SHA and sends full UTF-8 page contents
+with both required preconditions from the same snapshot:
+
+```python
+snapshot_response = get_wiki_snapshot(repository="microsoft/project")
+if not snapshot_response["success"]:
+  raise RuntimeError(snapshot_response["error"]["message"])
+read_snapshot = snapshot_response["result"]
+write_response = write_wiki_pages(
+  repository="microsoft/project",
+  pages={"Architecture.md": full_utf8_content},
+  expected_wiki_repository=read_snapshot["wiki_repository"],
+  expected_base=read_snapshot["sha"],
+  message=short_summary,
+)
+```
+
+`expected_wiki_repository` is a precondition, never a destination override.
+The writer validates the identifier and compares it case-insensitively with the
+freshly resolved policy destination before destination metadata, token lookup,
+or wiki access. Policy still selects the actual destination and scoped App
+credentials; a mismatch is rejected even if the SHA is unchanged.
+Pages cite evidence and the full source commit SHA, not an
+abbreviation, where relevant; the short commit summary also includes that full
+SHA. No force option is exposed. The [MCP wiki backend](../github_app_mcp/src/issuelens_github_mcp/wiki.py)
+persists pages and history in an atomic Git commit. No knowledge change means no
+write. Limits are 20 `.md` pages, 64 KiB each, 256 KiB total; deletion/rename are
+unsupported. Unchanged assets are preserved byte-for-byte; diffs report binary
+changes as notices, not binary patches. Only SHA-1 Git repositories (GitHub's
+current format) are supported; SHA-256 repositories are rejected.
+The writer makes at most one atomic publication attempt against `expected_base`;
+it never rebases or retries internally. A stale base or competing update returns
+a classified failure to the agent. The team-memory agent decides whether to
+read fresh state, reconcile minimal edits while preserving concurrent changes,
+and make a separate write, or stop for human direction. Matching desired content
+may return no-change without publishing, but partial matches do not bypass the
+base check. Conflicts require re-reading and regeneration; a lost response
+requires comparing current content before retrying. Only tool-confirmed status
+and wiki SHAs are reported. On a destination mismatch, read a fresh snapshot and
+re-establish destination, authorization, and evidence; never overwrite
+automatically, reuse edits for another wiki, or merely replace the expected
+repository to retry. See [MCP details](../github_app_mcp/README.md).
+
+**Tool design:** every repository-owned MCP and host tool returns
+`{success, outcome, result, error}`. Read the domain payload from `result`;
+failures include a safe `error.type`, `error.message`, and `error.http_status`
+(null when unknown). Outcomes distinguish `completed`, `not_applied`, and
+`unknown`; native MCP/Copilot error flags agree with the envelope. Tools perform
+one logical operation, not recovery workflows. Authorization, validation, and
+bounded prerequisite reads remain internal; recovery decisions belong to the
+owning agent. Unknown write outcomes require state inspection rather than blind
+retry. This applies to GitHub,
+repository configuration, email, and Teams tools. External tools retain their
+own documented contracts. Telemetry records allowlisted classifications and
+known HTTP statuses, never raw error messages or tool payloads.
+
+**Integration scope:** this simplifies direct maintenance, without a standalone
+host publisher or database/proposal/approval persistence. The opt-in
+[post-merge workflow](../.github/workflows/team-memory-post-merge.yml) validates
+merged PRs and submits wiki-maintenance jobs. There is no durable job queue,
+reconciliation service, or guaranteed exactly-once delivery. Git is knowledge,
+history, and conflict detection, not an external workflow scheduler. These local
+contracts do not establish live hosted sub-agent dispatch or deployment.
+
+### Post-merge team-memory automation
+
+1. Add a caller workflow on the source repository's default branch using the
+  [reusable IssueLens action](../.github/actions/issuelens/README.md) with
+  `request-type: team-memory`. The guide
+  includes a complete example pinned to a reviewed action commit; external
+  consumers need no checkout. It uses default-branch pushes, including pushes
+  that land fork PRs, so the trusted base workflow has endpoint credentials
+  without a `pull_request_target` policy exception. Set the `push.branches`
+  filter to the source repository's default branch (`main` in this repository).
+  IssueLens's
+  own workflow loads only the local action directory from `github.workflow_sha`
+  with credentials not persisted. Neither path checks out or executes PR-head
+  code. Protect workflow and action changes as privileged code.
+2. Reuse the issue-loop Actions secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
+  `AZURE_SUBSCRIPTION_ID`, `ISSUELENS_AGENT_URL` (the complete Foundry
+  invocations endpoint), and `ISSUELENS_AGENT_SCOPE`. The old skeleton's
+  `ISSUELENS_AGENT_ENDPOINT` is not used. Configure Azure OIDC federation for
+  this repository and the actual workflow event/ref subject, including manual
+  dispatch if used. Migrating from `pull_request_target` can change the OIDC
+  subject; verify the actual default-branch subject, including immutable
+  repository/owner IDs where enabled. Do not assume the old PR-scoped credential
+  covers `push`, or broaden federation to untrusted refs.
+  The identity needs permission to invoke the existing Foundry agent, not
+  deployment or GitHub wiki-write credentials. No App private key is stored here.
+3. Use a deployed agent with wiki-maintenance support and source-independent
+  request handling, configure optional `instructions.team_memory` policy, initialize the chosen
+  wiki, and confirm destination App Contents read/write access. The workflow
+  neither initializes the wiki nor changes permissions or agent deployments.
+4. Set the repository Actions variable `ISSUELENS_TEAM_MEMORY_ENABLED=true`
+  when ready. This opts into automatic maintenance; it is not an agent
+  environment flag or a wiki-destination allowlist. Without it, the job skips
+  before acquiring Azure credentials.
+
+Each eligible push produces one invocation containing its verified merged PRs,
+not one invocation per PR. The preflight checks the complete fast-forward
+commit inventory and discovers associated PRs through bounded metadata-only
+GitHub queries. It does not send raw combined diffs to the model. Direct pushes
+without newly merged PRs skip before Azure login. Missing/truncated inventories,
+force pushes, and ambiguous discovery fail without submitting a partial source
+list; use manual PR dispatch to recover. This batches PRs within one push, not
+across separate pushes, so an ordinary one-PR merge still usually produces one run.
+
+Only PRs merged into the current default branch are accepted. Manual **Run
+workflow** requires a positive `pull_request_number` and the default branch;
+it revalidates the same merged PR instead of inventing a merge event. GitHub
+repository and PR metadata are re-read before Azure login. PR titles, bodies,
+comments, and fork source are not embedded in the trusted task. The authenticated
+request authorizes only minimal wiki maintenance; the agent independently
+rechecks the merge and treats retrieved content as untrusted evidence. Endpoint
+authentication alone does not cryptographically attest the JSON metadata.
+
+Both GitHub workflows use one composite action with three request adapters:
+`issue-loop`, `team-memory`, and `task`. The selected adapter prepares and
+validates the request before shared Azure OIDC login and invocation. The helper is
+a normal, directly testable Python module; no Python is embedded in the YAML.
+The action is one client of the same agent used by chat and other callers.
+It supplies its origin, merge evidence, validation constraints, no-reaction
+instruction, and requested response format in `input`. Its JSON result schema
+belongs to this caller, not to the shared agent prompts or knowledge policy.
+Other callers may request different formats or updates unrelated to a merge;
+the same authorization, evidence, and wiki preconditions still apply. Shared
+instructions use explicit request context rather than assuming a workflow,
+Teams conversation, or other delivery surface. Changes to those shared
+instructions require normal deployment approval; changing caller metadata or
+formatting does not introduce a new agent protocol.
+
+The job has a 30-minute timeout, providing setup and discovery headroom around
+the bounded streamed response. It submits once
+without following redirects or automatically retrying a write-capable request.
+It requires an SSE completion event and a final structured result matching the
+submitted repository and source revisions. Push results must account for every
+submitted PR exactly once. The agent may publish an independent, fully verified
+subset in one atomic wiki update, while deferring incomplete or dependent changes.
+Mixed completed/incomplete outcomes are `partial`: the job fails for attention,
+but preserves the per-PR response and any confirmed wiki SHA rather than claiming
+that nothing was written. Only all-complete `updated` or `no-change` results
+with a verified wiki repository and full SHA succeed. The Actions summary records
+source identities and per-PR outcomes as tables; the default hybrid log streams sanitized agent text
+and compact tool activity, without raw event JSON or tool payloads. Publication
+is configurable through `output-mode` and `summary-mode`; use activity/status
+or quiet/none when the log audience should not see agent text.
+`needs-review`, failures, invalid results, and incomplete streams fail the job.
+GitHub readers can reject oversized metadata or patches. For change evidence,
+the agent uses small file pages and targeted source reads instead of repeating
+the same oversized request. Unsupported content and missing evidence remain
+explicit limitations, never unverified maintenance success.
+
+Different pushes have independent concurrency groups so a later push cannot
+replace another push's pending run. Manual dispatch retains per-PR grouping.
+Jobs may overlap or finish out of merge order:
+the agent uses pinned evidence, current knowledge, and wiki compare-and-swap to
+avoid overwriting newer edits. This is not a durable queue. After an ambiguous
+failure or partial publication, inspect the mapped wiki/history and per-PR
+receipt before rerunning or manually dispatching deferred PRs. Replays compare current content and skip unchanged knowledge; run IDs
+are not proof of publication. Sensitive/conflicting changes require human review.
+
+### Automation — `POST /invocations`
+
+1. Receives a JSON task. The payload requires `input` (the task, a free-form
+   text prompt), with optional inline `attachments`, e.g.
+   `{"input": "Triage open issues in owner/repo"}`.
+2. Creates a **fresh Copilot session per request** configured with:
+   - the **Foundry model** (BYOK via Microsoft Entra identity) or the **GitHub Copilot model** for inference;
+   - the bundled **GitHub App stdio MCP server**, whose process and token cache
+     belong only to that Copilot session;
+   - the constrained in-process `issuelens-config` tool, backed by a separate
+     request-local read-only App client;
+   - in-process notification tools when their Logic App endpoints are configured.
+3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents/issuelens.md`. It routes issue-level work to `triage`, critical-issue scans to `find-criticals`, and planning work to `plan`. For trusted issue-loop events it re-reads current issue context and chooses initial triage, re-triage, initial planning, re-planning, or no action. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions. The `plan` sub-agent investigates a triaged issue, returns an action plan followed by a design specification, reports readiness, and waits for human direction.
+4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Critical-issue scans end with a JSON report.
+
+### Chat — `POST /responses`
+
+1. Receives an OpenAI Responses request (Foundry playground, Teams, or any Responses client), including inline `input_image` and `input_file` content.
+2. Starts the bundled GitHub App stdio MCP server for the Copilot session. It
+  resolves the installation for each `owner/repository`, mints tokens limited
+  to that repository and the minimum required permissions, and never returns
+  credentials to the model.
+3. Uses a request-local read-only App client for issue-body images and the
+  constrained `issuelens-config` tool.
+4. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
+5. Performs only the bundled issue-triage operations: repository/file reads,
+   issue and comment reads/searches, fixed-eyes activity acknowledgements, label
+   reads/additions, assignee updates, and explicitly requested issue comments.
+  Wiki retrieval is read-only; separately authorized maintenance uses only the
+  `team-memory` agent-local writer.
+6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
+
+### Large PR and commit analysis
+
+The `triage`, `plan`, and `team-memory` agents preload the `change-analysis`
+skill. It guides normal Copilot tool/model turns using existing GitHub reads:
+PR metadata, small `list_pull_request_files` pages, and targeted `get_file`
+reads at verified commit SHAs. A size error prompts smaller pages, down to one
+file per call, with pagination restarted when the page size changes.
+
+`get_commit` now supports upstream-style `detail="none" | "stats" | "full_patch"`
+and file pagination. **The default is `stats`, without patches**; callers that
+need patches must explicitly request `full_patch`. Commit identity, parents,
+and tree metadata remain available. Its transport allowance is separate from
+the projected model-result limit, so discarding patches happens before the
+model-result size check. No custom diff reader, analysis controller, or
+additional SDK runtime is involved.
+
+| Boundary | Default limit |
+| --- | --- |
+| REST HTTP response | 128 KiB; commit detail only: 1 MiB before projection |
+| REST JSON result | 100,000 serialized bytes |
+| SDK output-file threshold | 128 KiB, above the PR/commit result budget to avoid requiring local file access |
+| `get_file` text | 64 KiB |
+| PR/commit file pagination | 1-100 files per page, at most 3,000 pages; GitHub's 3,000-file ceiling still applies |
+
+Pages remain in the ordinary SDK conversation; this is not a hard total-context
+bound or a guarantee of exhaustive analysis. PR metadata is revalidated around
+paging because the file-list endpoint is not commit-pinned. A final commit of a
+multi-commit rebase merge does not cover the whole PR. Missing patches, API
+ceilings, unsupported files, and unresolved source questions remain explicit
+limitations. Wiki publication still requires its existing authorization,
+source verification, and destination preconditions. See the
+[MCP read contracts](../github_app_mcp/README.md) for details.
+
+## Observability
+
+Content-free run accounting is always on for both protocols through the existing
+Foundry/Application Insights pipeline. Content capture stays disabled. See the
+[observability guide](observability.md) for configuration, privacy,
+measurement definitions and limitations, the
+[Azure Monitor Workbook](../observability/workbook.json), and
+[copyable KQL reports](../observability/queries.kql). Reports keep transport,
+execution, confirmed operations and telemetry coverage separate; missing usage is not
+zero, and HTTP success is not business success. Assets are checked offline;
+live ingestion/import validation and any deployment need separate authorization.
+
+## Environment Variables
+
+### Model (inference) — configure one
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `FOUNDRY_PROJECT_ENDPOINT` | For Foundry model | Azure AI Foundry project endpoint URL. Auto-injected when hosted — only needed locally |
+| `AZURE_AI_MODEL_DEPLOYMENT_NAME` | For Foundry model | Model deployment name (e.g. `gpt-4o`) |
+| `GITHUB_TOKEN` | For Copilot model | GitHub fine-grained PAT with **Copilot Requests → Read-only** permission |
+
+Setting `FOUNDRY_PROJECT_ENDPOINT` selects Foundry exclusively and requires a
+non-empty `AZURE_AI_MODEL_DEPLOYMENT_NAME`. Missing configuration or failed
+authentication never falls back to GitHub. Foundry uses Microsoft Entra tokens,
+not model API keys; see [identity and migration guidance](#using-your-own-foundry-model).
+
+### GitHub resource access
+
+Configure the IssueLens GitHub App registration for both protocols. Every tool
+names its target as `owner/repository`, and the server resolves the matching App
+installation dynamically:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GITHUB_APP_ID` | Yes | Numeric GitHub App ID |
+| `GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Yes | Azure Key Vault secret URI containing the App PEM |
+
+Store the PEM in Key Vault; never place it in `.env`, an azd environment, or a
+deployment manifest. Grant the hosted agent's managed identity **Key Vault
+Secrets User**, then configure only the App ID and secret URI:
+
+```powershell
+# Run directly in your own terminal so the PEM never passes through chat.
+az keyvault secret set --vault-name <vault> --name issuelens-github-app-key `
+  --file .secrets/issuelens.pem
+
+azd env set GITHUB_APP_ID <app-id>
+azd env set GITHUB_APP_PRIVATE_KEY_SECRET_URI `
+  "https://<vault>.vault.azure.net/secrets/issuelens-github-app-key"
+```
+
+Target repositories and all repositories receiving writes must be included in
+an installation of the App. Bounded REST reads prefer App authentication but fall
+back to anonymous access for public repositories when no installation is
+available. Private repository reads still require an installation. Each Copilot
+session owns its stdio MCP processes. Each process caches tokens only in memory by
+repository and permission set, refreshes them five minutes before expiry, and
+discards them when the process exits. Configure the App with **Metadata: Read**,
+**Issues: Read and write**, **Pull requests: Read and write**, and **Contents:
+Read**. Wiki reads require destination App access; maintenance additionally
+requires **Contents: Write** for that actual destination. Tokens and the private
+key never enter model context.
+
+## Target Repository Configuration
+
+A target repository may select capability-specific Markdown instructions with
+one case-insensitive filename match for `.github/issuelens.yml`. The `.github`
+directory and every configured instruction path use their exact repository
+casing. See [examples/issuelens.yml](../examples/issuelens.yml) and validate files
+against [schemas/issuelens.schema.json](../schemas/issuelens.schema.json).
+
+```yaml
+version: 1
+instructions:
+  criticality:
+    path: .github/issuelens/criticality.md
+  duplicate_detection:
+    path: .github/issuelens/duplicates.md
+  labeling:
+    path: .github/issuelens/labels.md
+  assignment:
+    path: .github/issuelens/assignment.md
+  notification_content:
+    path: .github/issuelens/notifications.md
+  planning:
+    path: .github/issuelens/planning.md
+  team_memory:
+    path: .github/issuelens/team-memory.md
+    wiki_repository: owner/project-knowledge
+```
+
+Every instruction domain is optional:
+
+| Domain | Repository-specific policy it may contain |
+|--------|-------------------------------------------|
+| `criticality` | Criticality criteria, thresholds, core functions, known workarounds, and priority presentation |
+| `duplicate_detection` | Matching evidence, confidence thresholds, canonical issue conventions, exclusions, and related repositories for read-only candidate search |
+| `labeling` | Existing-label mappings, priority rubric, and component classification |
+| `assignment` | Area owners, keyword/path mappings, routing rules, and default owners |
+| `notification_content` | Report title, grouping, emphasis, and presentation only |
+| `planning` | Required planning sections, repository design expectations, readiness statuses, and human signals |
+| `team_memory` | Required policy `path` for organization, topics, and evidence guidance; optional structured `wiki_repository` selects the GitHub wiki destination, never write authorization |
+
+Target repositories do not need `.github/issuelens.yml` or any customization
+Markdown files. When the config is absent, or when it omits a capability,
+IssueLens uses that capability's legacy or built-in behavior. Only a present but
+invalid config or an unreadable configured instruction stops the capability.
+
+Within each sub-agent's role, behavior precedence is:
+
+1. Explicit instructions from the current user
+2. Validated capability customization from the target repository
+3. Built-in defaults
+
+User instructions and customization may replace default workflows, criteria,
+thresholds, mappings, readiness states, publication behavior, and response
+presentation. They cannot change the owning sub-agent's role, required
+parent-facing data contract, security or repository-scope boundaries, or write
+authorization. Explicit user instructions win when they conflict with
+customization within content guidance; they cannot override the structured wiki
+destination. Validated `team_memory.wiki_repository` is the narrow wiki-only
+scope exception described above, not access to additional source repositories,
+other writes, or notifications. Omitting that field defaults to the source's
+own wiki without making the domain's policy `path` optional.
+
+The global IssueLens command language is outside this precedence and has no
+configuration domain. Target repositories cannot rename commands, add aliases,
+change command routing or authorization, or assign a meaning to a reserved
+command.
+
+Planning instructions can replace the built-in readiness names and define how
+explicit human signals move a proposal between states. They cannot authorize a
+GitHub write or implementation. Without configured planning instructions,
+IssueLens uses `draft`, `needs-review`, `needs-clarification`, `blocked`, and
+`approved`. Even `approved` describes only the planning artifact.
+
+### Built-in commands
+
+IssueLens recognizes these immutable commands in the current Responses user
+turn or a validated GitHub issue comment:
+
+| Command | Current behavior |
+|---|---|
+| `@issuelens triage` | Run initial issue triage through `triage` |
+| `@issuelens retriage` | Re-run triage from current evidence through `triage` |
+| `@issuelens plan` | Create initial planning artifacts through `plan` |
+| `@issuelens replan` | Revise planning artifacts through `plan` |
+| `@issuelens go` | Reserved for a future coding loop; currently no action or write |
+
+A turn or comment may contain one command together with additional prose, for
+example `Verify whether the issue still needs work. @issuelens retriage`.
+IssueLens routes the command and passes the remaining text to its fixed owner as
+scoped guidance. Inputs with multiple commands are rejected as ambiguous, and
+commands inside Markdown block quotes, inline code, fenced code blocks, or
+pasted logs are ignored. Supplemental text cannot change command ownership,
+repository scope, security rules, or write authorization.
+
+Responses chat clients, including Teams, treat the current authenticated user
+as a trusted team maintainer. A command may include an explicit target such as
+`@issuelens plan microsoft/IssueLens#14`, or use an issue already established
+unambiguously in the conversation. IssueLens asks for a target when neither is
+available. The Responses endpoint is therefore a trusted team surface and must
+remain protected by the hosting platform's access controls.
+
+For a GitHub issue-loop invocation, the issue containing the comment is the
+target. IssueLens accepts a command only for an `issue_comment.created` event,
+after using the trusted repository, issue number, comment ID, actor, and author
+association to retrieve and verify the authoritative comment. The author must
+be a human `OWNER`, `MEMBER`, or `COLLABORATOR` in both the event and current
+authoritative comment snapshots. The two trusted association labels may differ,
+for example `MEMBER` and `COLLABORATOR`, because GitHub can classify the same
+maintainer differently across API contexts. Reporter commands, bot comments,
+edited comments, actor mismatches, untrusted associations, aliases, commands
+inside Markdown block quotes, inline code, fenced code blocks, or pasted logs,
+and ambiguous multiple-command inputs are rejected.
+
+`@issuelens go` is not planning approval or a readiness signal. Planning
+artifacts may be explicitly accepted as `approved`, but that status still does
+not authorize coding, pull requests, merges, or deployment.
+
+### Planning loop
+
+Planning is available on demand through both protocols and does not change the
+issue-triage workflow trigger. For an initial request, the `plan` sub-agent:
+
+1. Loads the validated `planning` instruction domain.
+2. Re-reads the authoritative issue and inspects the relevant implementation,
+   interfaces, configuration, and tests through bounded repository reads.
+3. Produces an action plan, then a design specification.
+4. Reports readiness, assumptions, risks, open questions, and the human input
+  needed next.
+5. By default, posts the Action Plan and Design Specification to the target
+  issue as two separate comments, in that order. User instructions or validated
+  planning customization may replace this publication behavior.
+6. Stops and waits for human review, approval, clarification, or revision.
+
+Triage also performs targeted source and test inspection whenever its conclusion
+depends on current implementation state, such as deciding whether a requested
+feature already exists, whether an issue remains actionable, or whether a root
+cause is supported. For both triage and planning, issue history is supporting
+context rather than proof of current code behavior. If necessary source evidence
+cannot be accessed, IssueLens reports the limitation instead of presenting an
+unsupported technical conclusion.
+
+The agent does not autonomously repeat review passes. In a Responses
+conversation, later feedback uses the resumed session context. Invocations are
+stateless, so a revision request must identify the issue and the planning
+artifact or requested section to revise.
+
+The planning agent receives the shared tools, not the maintenance-only wiki
+writer. A request
+to plan or revise a specific issue authorizes publication of the planning
+artifacts on that issue using explicit user instructions, validated planning
+customization, or the two-comment default. Labels, assignments, notifications,
+unrelated comments, and other writes still require an explicit request.
+Planning approval never authorizes source changes, branches, pull requests,
+commits, or deployment.
+The orchestrator assigns work by responsibility rather than tool availability:
+triage follow-up actions stay with `triage`, while planning-status labels,
+planning-artifact comments, and planning notifications stay with `plan`. For a
+planning-owned write, `plan` applies the same label, assignment, or notification
+skill safeguards before using the shared tool. Those skills also use built-in
+behavior when the target repository has no customization files.
+
+Fallback behavior is backward compatible:
+
+- If `.github/issuelens.yml` does not exist, labeling still checks
+  `.github/label-instructions.md`, assignment still checks
+  `.github/area_owners.md`, `docs/area_owners.md`, then `area_owners.md`, and
+  all other capabilities use their built-in behavior.
+- If the config exists but omits a domain, that domain uses the same legacy or
+  built-in fallback.
+- If more than one case variant exists, the YAML is invalid, or a configured
+  file is missing or invalid, IssueLens stops that capability and does not
+  perform its related write. It does not silently bypass a present but invalid
+  configuration.
+
+Configuration is limited to one 16 KB YAML document and 64 KB per UTF-8
+Markdown instruction file. Paths must be repository-relative POSIX paths.
+Repository policy cannot change sub-agent roles, authorize writes, weaken
+security boundaries, choose notification recipients/channels, or replace a
+required parent-facing data contract. Within those boundaries it may replace
+built-in evidence criteria and response presentation. Duplicate instructions
+or explicit user instructions may name related repositories. IssueLens accesses
+them through the same MCP tools, using anonymous fallback for public
+repositories without an App installation, and never uses this scope for writes.
+
+### Foundry toolbox
+
+Set `TOOLBOX_ENDPOINT` to the versioned MCP endpoint for the toolbox containing
+non-GitHub chat capabilities. GitHub must remain excluded from this toolbox;
+GitHub access is provided only by the bundled stdio MCP server.
+
+### Notifications
+
+Email and Teams notification tools are registered in process when their Logic
+App endpoint variables are configured.
+
+## Running Locally
+
+### Prerequisites
+
+- Python 3.13 (the hosted runtime); the standalone MCP package also supports 3.12
+- One model backend: a Foundry project and model deployment, or a GitHub Copilot token
+- A GitHub App with its private key stored in Azure Key Vault; see [GitHub resource access](#github-resource-access)
+- Azure credentials that can read the configured Key Vault secret
+- An initialized destination wiki only if you use team memory
+
+For the Copilot model option, create a fine-grained PAT at
+[github.com/settings/personal-access-tokens/new](https://github.com/settings/personal-access-tokens/new)
+with **Account permissions → Copilot Requests → Read-only**. Foundry inference
+does not need this token; see [model authentication](#using-your-own-foundry-model).
+
+> **Note:** Classic tokens (`ghp_`) are not supported. Use a fine-grained PAT (`github_pat_`), OAuth token (`gho_`), or GitHub App user token (`ghu_`).
+
+### Using `azd`
+
+<details>
+<summary><strong>Show steps</strong></summary>
+
+Create a local `.env` file from the sample template. Configure one model backend
+plus the GitHub App ID and Key Vault secret URI:
+
+```bash
+cp .env.example .env  # skip if .env already exists
+# Edit .env and set the model variables plus GITHUB_APP_ID and
+# GITHUB_APP_PRIVATE_KEY_SECRET_URI.
+```
+
+The sample loads `.env` automatically when running locally. `GITHUB_TOKEN` is
+needed only when using the optional GitHub Copilot model for local inference;
+Foundry BYOK deployments do not use or inject it.
+
+Next, start the agent locally with the `run` command:
+
+```bash
+azd ai agent run
+```
+
+The agent starts on `http://localhost:8088/`.
+
+</details>
+
+### Using the Foundry Toolkit VS Code Extension
+
+The [Foundry Toolkit VS Code extension](https://learn.microsoft.com/en-us/azure/foundry/agents/quickstarts/quickstart-hosted-agent?view=foundry&pivots=vscode) has a built-in sample gallery. You can open this sample directly from the extension without cloning the repository, it scaffolds the project into a new workspace, generates `agent.yaml`, `.env`, and `.vscode/tasks.json` + `launch.json` automatically, and configures a one-click **F5** debug experience.
+
+Chat with a running agent using the **Agent Inspector**:
+
+1. Start the agent locally first using [azd](#using-azd) or [manual setup](#manual-setup). The agent listens on `http://localhost:8088/`.
+2. Open the Command Palette (`Ctrl+Shift+P`) and run **Foundry Toolkit: Open Agent Inspector**.
+3. The Inspector auto-connects to the running agent. Send messages to chat with the agent and watch the streamed responses.
+
+### Manual setup
+
+```bash
+pip install -r requirements.txt
+cp .env.example .env  # skip if .env already exists
+# Edit .env and set the model variables plus GITHUB_APP_ID and
+# GITHUB_APP_PRIVATE_KEY_SECRET_URI.
+python main.py
+```
+
+The agent starts on `http://localhost:8088/`.
+
+## Invoke with azd
+
+<details>
+<summary><strong>Show steps</strong></summary>
+
+### Local
+
+**Bash:**
+```bash
+azd ai agent invoke --local '{"input": "Triage open issues in microsoft/vscode-java-pack and label the critical ones"}'
+```
+
+**PowerShell:**
+```powershell
+azd ai agent invoke --local '{\"input\": \"Triage open issues in microsoft/vscode-java-pack and label the critical ones\"}'
+```
+
+### Test with curl
+
+```bash
+# Triage a repository (find critical issues) and notify
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Triage open issues updated in the last 24h in owner/repo, then send the report"}'
+
+# Label a single issue
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Label issue owner/repo#123"}'
+
+# Assign a single issue using area ownership and historical patterns
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Assign issue owner/repo#123 to the right owner"}'
+
+# Find duplicate or related reports for a single issue
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Find duplicates for issue owner/repo#123"}'
+
+# Create an action plan followed by a design specification
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Plan implementation for triaged issue owner/repo#123. Return an action plan followed by a design specification, then wait for human review."}'
+
+# Free-form instruction
+curl -N -X POST http://localhost:8088/invocations \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Summarize open issues in owner/repo"}'
+
+# Chat (responses protocol) — no token in the body; the bundled server resolves
+# the repository's App installation internally.
+curl -N -X POST http://localhost:8088/responses \
+  -H "Content-Type: application/json" \
+  -d '{"input": "Find duplicates for issue owner/repo#123", "stream": true}'
+```
+
+### Image and file inputs
+
+Invocation clients send Copilot `blob` attachments. The `data` field is raw
+base64 without a data-URL prefix:
+
+```json
+{
+  "input": "Use this screenshot while triaging owner/repo#123",
+  "attachments": [
+    {
+      "type": "blob",
+      "data": "iVBORw0KGgo...",
+      "mimeType": "image/png",
+      "displayName": "screenshot.png"
+    }
+  ]
+}
+```
+
+Responses clients use standard polymorphic message content. Images use a
+base64 data URL; generic files use inline `file_data`:
+
+```json
+{
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "Triage owner/repo#123 using this evidence"},
+        {
+          "type": "input_image",
+          "image_url": "data:image/png;base64,iVBORw0KGgo...",
+          "detail": "auto"
+        },
+        {
+          "type": "input_file",
+          "filename": "diagnostics.txt",
+          "file_data": "data:text/plain;base64,ZXJyb3IgbG9n..."
+        }
+      ]
+    }
+  ],
+  "stream": true
+}
+```
+
+Only inline base64 media is accepted. Remote URLs, platform `file_id` values,
+and invocation `file` paths are rejected to prevent server-side URL fetching
+and arbitrary container-file access. Requests may contain up to 10 attachments,
+20 MB each and 50 MB combined. The selected model must support the supplied
+image or file MIME type.
+
+Issue images are also loaded automatically during issue-link triage. Before the
+agent turn, the trusted host loader resolves explicit GitHub issue URLs and
+`owner/repository#number` references, reads each issue body, and adds validated
+image bytes as Copilot blob attachments. Clients do not need to add those images
+to the invocation payload. It accepts up to 5 PNG, JPEG, GIF, or WebP images,
+5 MB each and 15 MB combined. Arbitrary image hosts and unsafe redirects are
+rejected, and GitHub credentials are never forwarded to signed storage
+redirects.
+
+### Chat from a terminal
+
+`chat.py` is a small REPL for the chat protocol — it chains `previous_response_id`
+so turns stay in one conversation:
+
+```bash
+python chat.py                                   # interactive
+python chat.py "Triage open issues in owner/repo"  # one-shot
+python chat.py --attach screenshot.png "Triage owner/repo#123"  # with media
+```
+
+Type `new` to start a fresh conversation, `exit` to quit.
+
+### Request fields
+
+Invocations (`POST /invocations`):
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `input` | Yes | The task — a free-form text prompt describing what to triage, plan, label, or report |
+| `attachments` | No | Inline Copilot `blob` attachments with base64 `data`, `mimeType`, and optional `displayName` |
+
+Chat (`POST /responses`) takes a standard OpenAI Responses body; both protocols
+use the same internal GitHub App MCP authentication.
+
+### SSE Event Format
+
+Each Copilot SDK event is streamed via `event.to_dict()`:
+
+```
+data: {"type": "assistant.message_delta", "data": {"delta_content": "Python is"}}\n\n
+data: {"type": "assistant.message_delta", "data": {"delta_content": " a programming"}}\n\n
+...
+event: done
+data: {"invocation_id": "...", "session_id": "..."}
+```
+
+</details>
+
+## Triggering with GitHub Actions
+
+The recommended trigger is a **GitHub Actions workflow in the target
+repository**. It authenticates only to the Foundry endpoint through Azure OIDC
+and sends the task. The hosted agent owns its Key Vault-backed App identity, so
+target repositories store no App private key and transmit no GitHub token.
+
+- **Event-driven:** issue opened/reopened and human-authored issue-comment
+  created/edited events send a neutral issue-loop task. IssueLens re-reads the
+  issue and comments, then chooses triage, re-triage, planning, re-planning, or
+  no action.
+- **Manual:** `workflow_dispatch` with a required `issue_number` input sends the
+  same neutral issue-loop task for an existing issue.
+
+The workflow does not currently trigger on issue title/body edits or pull
+request comments. Its preflight step rejects PR-backed comments and comments
+whose sender or author is a bot, records the accepted/skipped reason before
+Azure login, and passes only trusted event metadata to the agent. It never
+copies issue or comment body text into the workflow-generated control prompt.
+
+Runs are grouped by repository and issue. Different issues run independently;
+events for one issue are serialized. GitHub Actions keeps one active and one
+pending run per group by default, so bursts may coalesce by replacing an older
+pending run. The eventual invocation re-reads current issue state.
+
+For an eligible event, the trusted workflow task authorizes only the selected
+role's bounded writes on that issue. Comment text remains untrusted context and
+cannot authorize implementation, deployment, external notification,
+cross-repository writes, or role changes. The sole command exception is an
+authoritative comment containing one valid built-in command occurrence whose
+maintainer association is validated by the global IssueLens contract against
+trusted event provenance. The workflow carries that provenance but does not
+parse commands. A no-action decision performs no GitHub write.
+
+Use the [IssueLens action guide](../.github/actions/issuelens/README.md) to create
+an external caller using `request-type: issue-loop` and a full action commit SHA.
+The repository's [issue workflow](../.github/workflows/issue-triage.yml) is a thin
+local caller and shares the same action as team memory. External consumers
+omit its local checkout step. Configure the Azure OIDC identity and agent
+URL/scope, and use the default branch for manual dispatch. Keep repository-specific policy in
+`.github/issuelens.yml`; the
+workflow filename intentionally differs from the policy filename.
+
+For explicit triage, planning, or other supported requests, use `request-type:
+task` with trusted `input` text. This does not synthesize issue-loop event or
+maintainer-command authority. Both generic adapters accept a completed final
+answer in the format chosen by the caller. `status=completed` confirms invocation
+completion, not a successful requested write; the original answer is available
+through a runner-local `response-path`. The default hybrid view streams readable
+text and tool activity, and the full job summary renders the final answer. Use
+the [publication controls](../.github/actions/issuelens/README.md#publication-controls)
+for sensitive requests. Raw protocol events and tool payloads are not logged. Only
+`team-memory` enforces the wiki-specific result schema. The agent retains role
+routing and command validation; no new permanent agent contract is introduced.
+
+## Using Your Own Foundry Model
+
+To use your own Azure AI Foundry model instead of the Copilot model, set the Foundry variables (no `GITHUB_TOKEN` needed):
+
+```bash
+FOUNDRY_PROJECT_ENDPOINT=https://<account>.services.ai.azure.com/api/projects/<project> \
+AZURE_AI_MODEL_DEPLOYMENT_NAME=gpt-4o \
+python main.py
+```
+
+Authentication uses **Microsoft Entra bearer tokens only**, requested for
+`https://ai.azure.com/.default` through async `DefaultAzureCredential`. The
+Copilot SDK's per-request `bearer_token_provider` callback (supported by the
+existing minimum SDK 1.0.7) is registered on both new and resumed sessions.
+Azure Identity's async `get_bearer_token_provider` owns in-memory token caching,
+early refresh, and concurrent acquisition, including during long-running turns;
+no static token is saved in session configuration. Credential acquisition does
+not block the host event loop. The lazy credential is closed after the existing
+Responses graceful-shutdown handler, without replacing its cleanup.
+
+When hosted, `FOUNDRY_PROJECT_ENDPOINT` is platform-injected; set the deployment
+name in `azure.yaml` / `agent.yaml`. Keep the **project endpoint**, rather than
+switching to an account-level OpenAI endpoint. Three identities are distinct:
+
+| Identity | Inference/deployment responsibility |
+| --- | --- |
+| Hosted **agent runtime identity** | Foundry supplies a dedicated Microsoft Entra service principal and the runtime credential flow. It has implicit model-inference access through its own project endpoint in the standard hosted case. |
+| **Project managed identity** | Foundry proxies project-endpoint inference to the account's model deployment using this identity. It needs **Foundry User** (formerly **Azure AI User**) on the Foundry account. It is not the agent's runtime token principal. |
+| GitHub Actions **deployment service principal** | OIDC authenticates the runner for deployment. Its `AZURE_CLIENT_ID` is not forwarded into the hosted process and its permissions do not authenticate runtime inference. |
+
+See Microsoft's [hosted agent identities](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agents#agent-identity-and-endpoint)
+and [permissions reference](https://learn.microsoft.com/en-us/azure/foundry/agents/concepts/hosted-agent-permissions#agent-access-beyond-defaults).
+An administrator should verify the **actual principal and scope** of any
+existing role assignment; an assignment to a deployment principal is not proof
+of runtime or project-to-account access. This repository change does not verify
+or create Azure role assignments.
+
+For local service-principal execution, use the existing Azure Identity
+environment or workload-identity credential setup for that principal (for
+example, `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, and a provisioned
+`AZURE_FEDERATED_TOKEN_FILE`). Existing certificate/secret-based service-principal
+credentials are also supported by `DefaultAzureCredential`; keep those values
+outside source control and do not copy deployment credentials into the hosted
+manifest. Without an application credential, local developer credentials can
+also be selected by the default chain. The selected local principal needs
+project-level model data-plane access, such as **Foundry User** or an approved
+narrower custom role. ARM **Contributor** alone is not model authorization.
+
+**Migration and diagnosis:** `AZURE_AI_MODEL_API_KEY` is no longer read for
+authentication, passed by the deployment workflow/manifests, or forwarded to the
+Copilot child process. A stale value cannot enable key authentication. Remove
+obsolete values from local configuration and deployment secret stores through
+your normal approved process; changing this code neither deletes existing
+secrets nor updates a running deployment. Token-acquisition failures indicate a
+missing/unusable runtime credential; check the credential source first. A
+service-side `403` after token acquisition instead requires checking model
+data-plane authorization, including the project identity's account access.
+Neither case falls back to a key or to GitHub. `GITHUB_TOKEN` remains an inference
+option only when the Foundry endpoint is absent.
+
+## Deploying the Agent to Microsoft Foundry
+
+### GitHub Actions deployment
+
+[`Deploy IssueLens to Foundry`](../.github/workflows/deploy-foundry.yml) follows
+Microsoft's [Set up CI/CD for a hosted agent](https://learn.microsoft.com/en-us/azure/foundry/agents/quickstarts/set-up-cicd-hosted-agent):
+install `azd` and `microsoft.foundry`, log in with Azure OIDC, configure the azd
+environment, run `azd deploy`, inspect status, and invoke the agent.
+It uses the existing repository-root `azure.yaml` Python 3.13 ZIP/remote-build
+service directly, without a custom deployment helper or packaging hook.
+Actions are commit-pinned; azd is **1.34.2** and the Foundry bundle is
+**1.0.0-beta.2**. The bundle's dependency ranges are not a version lock, so the
+workflow explicitly installs each component with `--no-dependencies` and verifies
+the complete installed set's `installedVersion` fields before Azure login:
+
+| Extension | Pinned version |
+| --- | --- |
+| `azure.ai.agents` | `1.0.0-beta.16` |
+| `azure.ai.connections` | `1.0.0-beta.7` |
+| `azure.ai.inspector` | `1.0.0-beta.7` |
+| `azure.ai.projects` | `1.0.0-beta.11` |
+| `azure.ai.routines` | `1.0.0-beta.6` |
+| `azure.ai.skills` | `1.0.0-beta.6` |
+| `azure.ai.toolboxes` | `1.0.0-beta.7` |
+| `microsoft.foundry` | `1.0.0-beta.2` |
+
+These component releases come from the [azd 1.34.2 registry snapshot](https://github.com/Azure/azure-dev/blob/azure-dev-cli_1.34.2/cli/azd/extensions/registry.json).
+Missing, extra, duplicate, or mismatched installed components stop the job.
+New registry releases do not change these pins; upgrades require a reviewed
+workflow, test, and documentation change. The executable workflow regression
+tests require Bash and jq, both provided by the configured Ubuntu runner.
+
+Unlike the quickstart's push trigger, this workflow is **manual only**, restricted
+to this repository's default branch, and requires approval through the fixed
+**`foundry-production`** environment. It checks required reviewers, disabled
+administrator bypass, and a successful push-CI run for the exact dispatched SHA
+before Azure login. Self-review follows the GitHub Environment's configured
+policy. Deployments are serialized without cancelling an active
+publication. No live deployment, provisioning, or permission change is
+authorized by creating or merging the workflow.
+
+**One-time setup**
+
+The Foundry project, model deployment, and `IssueLens` hosted agent must already
+exist, as required by the quickstart. An administrator must create
+`foundry-production` with required reviewers, disable
+administrator bypass, and allow only the exact default branch (`main`), not tags.
+Set **Prevent self-review** according to the team's approval policy; the workflow
+accepts either setting while still requiring environment approval.
+
+The workflow reuses the repository's existing Azure ID secret names. Reusing
+their names does not grant deployment permissions: if the existing identity is
+invocation-only, override the same secrets in `foundry-production` with a
+**dedicated deployment identity**, rather than expanding the invocation identity's
+permissions. Configure Azure OIDC with issuer `https://token.actions.githubusercontent.com`,
+audience `api://AzureADTokenExchange`, and subject
+`repo:microsoft/IssueLens:environment:foundry-production`. The referenced CI/CD
+guide specifies **Foundry User** plus **Contributor** on the target project for
+code deployment; use an approved narrower equivalent where available. Role
+assignments and initial provisioning are separate administrator operations.
+The hosted agent runtime identity, not the deployer, needs **Key Vault Secrets User**
+on the App-key secret. Model inference always uses Entra authentication with the
+runtime/project identity responsibilities [described above](#using-your-own-foundry-model).
+
+The existing repository secrets `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID`, and variable `ISSUELENS_APP_ID`, are reused directly.
+Store additional deployment-only settings as **environment-scoped secrets** in
+`foundry-production`. Same-named environment secrets override repository secrets.
+Unlike the quickstart's variables, all Azure configuration is kept in secrets
+to avoid exposing infrastructure details:
+
+| Name | Storage | Purpose |
+| --- | --- | --- |
+| `AZURE_CLIENT_ID` | Secret | Existing Azure identity secret; override for a deployment-specific identity if needed. |
+| `AZURE_TENANT_ID` | Secret | Existing Azure tenant secret. |
+| `AZURE_SUBSCRIPTION_ID` | Secret | Existing subscription secret. |
+| `AZURE_LOCATION` | Secret | Existing project's Azure region. |
+| `AZURE_AI_PROJECT_ID` | Secret | Full ARM resource ID ending in `/accounts/<account>/projects/<project>`. |
+| `FOUNDRY_PROJECT_ENDPOINT` | Secret | Existing project's HTTPS endpoint on `*.services.ai.azure.com`. |
+| `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Secret | Existing model deployment used for inference. |
+| `ISSUELENS_APP_ID` | Variable | Existing GitHub App registration variable, passed as runtime `GITHUB_APP_ID`. |
+| `ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Secret | Key Vault secret URI, passed as `GITHUB_APP_PRIVATE_KEY_SECRET_URI`, never PEM contents. |
+| `TOOLBOX_ENDPOINT` | Optional secret | Existing non-GitHub toolbox endpoint in this Foundry project. |
+| `MAILING_URL` | Optional secret | Secret-bearing Logic App email endpoint. |
+| `PERSONAL_NOTIFICATION_URL` | Optional secret | Secret-bearing Logic App Teams endpoint. |
+
+The existing `ISSUELENS_AGENT_URL` secret is an invocation endpoint, not the
+project-level `FOUNDRY_PROJECT_ENDPOINT`; these are not interchangeable.
+The App settings use an `ISSUELENS_` prefix because GitHub reserves `GITHUB_`
+configuration names. IssueLens uses `AZURE_AI_MODEL_DEPLOYMENT_NAME` instead of
+the quickstart's example `FOUNDRY_MODEL_NAME`. No App PEM or GitHub user token is
+passed to deployment. `.agentignore` controls the native code ZIP and excludes
+local credentials, azd state, and Git metadata.
+
+**Run, verify, and recover**
+
+Wait for `CI` on the intended default-branch commit, select **Actions > Deploy
+IssueLens to Foundry > Run workflow**, and approve the environment job. The
+workflow checks that azd's recorded version is `active`, then invokes both
+protocols in fresh version-bound sessions. Responses uses a plain-text prompt;
+Invocations uses IssueLens's `{"input": "..."}` payload, not the quickstart's
+generic `message` example. Both must complete with `ISSUELENS_DEPLOYMENT_OK`;
+CLI headings or merely non-empty output do not count as a successful reply.
+The fixed prompt requests no tools, repository access, wiki writes, or
+notifications. These are protocol/inference smoke checks, not proof of App,
+wiki, or notification access, nor a host-enforced tool-isolation mode.
+Invocations permits the SDK's root `subagent.selected` event for `issuelens`
+only when `agentId`, `data.parentToolCallId`, and `data.toolCallId` are absent
+or null. Its available-tools inventory is not tool execution; tool requests,
+tool events, and all other sub-agent events still fail the smoke check.
+
+The job is limited to 40 minutes, the native deployment wait to 20 minutes, and
+each invocation to 120 seconds within a 3-minute step. The summary records the
+commit, logical GitHub environment, version, readiness, and protocol outcomes,
+not Azure identifiers or endpoints. Azure CLI account output is disabled;
+azd configuration/deployment output, readiness details, and raw agent responses
+stay in runner-local files, including on failure. The workflow never prints
+`azd env get-values` or uploads these files. Temporary files and `.azure` are
+removed after the run; abrupt termination also relies on hosted-runner disposal.
+
+No automatic retry or rollback is performed. A failed deployment or smoke
+check may occur **after publication**: inspect Foundry before another attempt.
+Recovery requires a reviewed fix/revert, successful CI, and separately
+authorized deployment with environment approval. Local validation does not
+establish live OIDC, RBAC, or hosted readiness. The configured GitHub-hosted
+runner needs network access to the target project; private-network targets
+require a separately approved runner/network arrangement.
+
+### Manual deployment with azd
+
+Once you've tested locally and explicitly authorized the deployment, deploy to
+Microsoft Foundry:
+
+```bash
+# Provision Azure resources (skip if already done during local setup)
+azd provision
+
+# Build, push, and deploy the agent to Foundry
+azd deploy
+```
+
+After deploying, invoke the agent running in Foundry:
+
+**Bash:**
+```bash
+azd ai agent invoke '{"input": "What can you help me with?"}'
+```
+
+**PowerShell:**
+```powershell
+azd ai agent invoke '{\"input\": \"What can you help me with?\"}'
+```
+
+To stream logs from the running agent:
+
+```bash
+azd ai agent monitor
+```
+
+For the full deployment guide, see [Azure AI Foundry hosted agents](https://aka.ms/azdaiagent/docs).
+
+### Deploying with the Foundry Toolkit VS Code Extension
+
+1. Open the Command Palette (`Ctrl+Shift+P`) and run **Foundry Toolkit: Deploy Hosted Agent**. The extension opens a tab-based **Deploy Hosted Agent** wizard and reads `agent.yaml` to auto-populate what it can.
+2. If prompted, complete **Foundry Project Setup** to pick the subscription and Foundry project (or create a new one) to deploy to.
+3. On the **Basics** tab, configure the core deployment settings:
+   - **Deployment Method**: **Code** (upload as a ZIP) or **Container** (Docker image via ACR).
+   - For **Code**, pick a packaging option: **Remote** or **Local**.
+   - For **Container**, pick a registry option: default ACR, your own ACR, or a prebuilt ACR image.
+   - **Hosted Agent Name**: confirm the name to register with the hosting service.
+4. On the **Review + Deploy** tab, finalize the runtime and resources:
+   - Confirm the auto-detected runtime details (language, entry point, or Dockerfile).
+   - Pick a **CPU and Memory** size.
+   - Click **Deploy**. Fields are validated inline, and the extension handles the build/upload, agent version creation, and RBAC role assignment.
+5. After deployment, invoke the agent in the Agent Playground and stream live logs from the **Logs** tab.
+
+## Troubleshooting
+
+### Images built on Apple Silicon or other ARM64 machines do not work on our service
+
+The default deployment uses Python ZIP/remote build, not a locally built
+container. If you choose the optional container deployment path, build for
+`linux/amd64`.
+
+If you choose to **build locally**, and your machine is **not `linux/amd64`** (for example, an Apple Silicon Mac), the image will **not be compatible with our service**, causing runtime failures.
+
+**Fix for local builds:**
+
+```bash
+docker build --platform=linux/amd64 -t image .
+```
+
+This forces the image to be built for the required `amd64` architecture.
