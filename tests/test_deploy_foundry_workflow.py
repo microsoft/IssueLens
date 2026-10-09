@@ -400,7 +400,7 @@ azd() {
             "tenant-id": "${{ secrets.AZURE_TENANT_ID }}",
             "subscription-id": "${{ secrets.AZURE_SUBSCRIPTION_ID }}",
         })
-        for filename in ("issue-triage.yml", "team-memory-post-merge.yml"):
+        for filename in ("issue-triage.yml", "team-memory-coordinator.yml"):
             caller = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             for reference in login["with"].values():
                 self.assertIn(reference, caller)
