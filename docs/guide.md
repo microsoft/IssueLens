@@ -163,8 +163,8 @@ strings.
 
 **Integration scope:** this simplifies direct maintenance, without a standalone
 host publisher or database/proposal/approval persistence. The opt-in
-[post-merge workflow](../.github/workflows/team-memory-post-merge.yml) validates
-merged PRs and submits wiki-maintenance jobs. There is no durable job queue,
+[team-memory coordinator](../.github/workflows/team-memory-coordinator.yml) validates
+merged PRs and submits queued wiki-maintenance jobs. There is no durable job ledger,
 reconciliation service, or guaranteed exactly-once delivery. Git is knowledge,
 history, and conflict detection, not an external workflow scheduler. These local
 contracts do not establish live hosted sub-agent dispatch or deployment.
@@ -179,8 +179,8 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   that land fork PRs, so the trusted base workflow has endpoint credentials
   without a `pull_request_target` policy exception. Set the `push.branches`
   filter to the source repository's default branch (`main` in this repository).
-  IssueLens's
-  own workflow loads only the local action directory from `github.workflow_sha`
+  IssueLens's own push dispatcher and coordinator load only the local action
+  directory from `github.workflow_sha`
   with credentials not persisted. Neither path checks out or executes PR-head
   code. Protect workflow and action changes as privileged code.
 2. Reuse the issue-loop Actions secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
@@ -188,7 +188,12 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   invocations endpoint), and `ISSUELENS_AGENT_SCOPE`. The old skeleton's
   `ISSUELENS_AGENT_ENDPOINT` is not used. Configure Azure OIDC federation for
   this repository and the actual workflow event/ref subject, including manual
-  dispatch if used. Migrating from `pull_request_target` can change the OIDC
+  dispatch if used. In IssueLens's two-workflow pilot, only the coordinator uses
+  Azure OIDC, under its default-branch `workflow_dispatch` identity; also verify
+  any workflow-specific federation conditions. The dispatcher needs only
+  repository-scoped `GITHUB_TOKEN` Actions write access. No new cross-repository
+  credential is required for this same-repository pilot.
+  Migrating from `pull_request_target` can change the OIDC
   subject; verify the actual default-branch subject, including immutable
   repository/owner IDs where enabled. Do not assume the old PR-scoped credential
   covers `push`, or broaden federation to untrusted refs.
@@ -212,8 +217,42 @@ force pushes, and ambiguous discovery fail without submitting a partial source
 list; use manual PR dispatch to recover. This batches PRs within one push, not
 across separate pushes, so an ordinary one-PR merge still usually produces one run.
 
+**IssueLens coordinator pilot:** the
+[push-triggered workflow](../.github/workflows/team-memory-post-merge.yml) no
+longer calls Foundry. It validates the push, stores a bounded identity-only
+source artifact for seven days, and dispatches the
+[coordinator workflow](../.github/workflows/team-memory-coordinator.yml) with
+only the source run, attempt, and immutable artifact IDs. No source code,
+commit messages, issue/PR bodies, agent output, or credentials are uploaded.
+The coordinator checks the originating dispatcher, source repository/default
+branch, run attempt, head SHA, and artifact provenance before downloading.
+Missing digests, digest mismatches, expired or oversized artifacts, and mismatched source
+identities fail before Azure login. The shared action revalidates the source
+and complete push inventory before invoking the agent; it never substitutes
+the coordinator's newer head for the original push range.
+
+Both automatic requests and manual PR updates execute in the coordinator
+repository under `issuelens-team-memory-wiki-microsoft-IssueLens`, using
+`queue: max` and `cancel-in-progress: false`. There is one active coordinator
+run through invocation and result validation, plus at most 100 pending runs.
+An accepted dispatch is not a completed maintenance job; inspect the
+coordinator's outcome. Monitor queue overflow and failed/canceled runs rather
+than assuming guaranteed delivery. The queue wait happens before an agent
+invocation, outside its 15-minute response-read budget.
+
+This rollout accepts only `microsoft/IssueLens` sources. Its request requires
+the agent to verify the validated wiki destination matches `microsoft/IssueLens`
+and stop without writing if not; the action rejects receipts naming another
+wiki. The mapping in `.github/issuelens.yml` is unchanged. Other
+source repositories and caller-selected wiki destinations are not accepted.
+Java tooling rollout is separate: those repositories share the
+`microsoft/vscode-java-pack` wiki and will need their own central queue and
+authenticated source adapter. The existing direct-action consumers continue
+working unchanged, but are not serialized by this pilot.
+
 Only PRs merged into the current default branch are accepted. Manual **Run
-workflow** requires a positive `pull_request_number` and the default branch;
+workflow** now uses the coordinator, with a positive `pull_request_number`
+instead of source identifiers, and the default branch;
 it revalidates the same merged PR instead of inventing a merge event. GitHub
 repository and PR metadata are re-read before Azure login. PR titles, bodies,
 comments, and fork source are not embedded in the trusted task. The authenticated
@@ -221,7 +260,8 @@ request authorizes only minimal wiki maintenance; the agent independently
 rechecks the merge and treats retrieved content as untrusted evidence. Endpoint
 authentication alone does not cryptographically attest the JSON metadata.
 
-Both GitHub workflows use one composite action with three request adapters:
+Issue-loop and the team-memory coordinator use one composite action with three
+request adapters:
 `issue-loop`, `team-memory`, and `task`. The selected adapter prepares and
 validates the request before shared Azure OIDC login and invocation. The helper is
 a normal, directly testable Python module; no Python is embedded in the YAML.
@@ -257,11 +297,17 @@ the agent uses small file pages and targeted source reads instead of repeating
 the same oversized request. Unsupported content and missing evidence remain
 explicit limitations, never unverified maintenance success.
 
-Different pushes have independent concurrency groups so a later push cannot
-replace another push's pending run. Manual dispatch retains per-PR grouping.
-Jobs may overlap or finish out of merge order:
+IssueLens's automatic and manual maintenance runs share one queued concurrency
+group. Other repositories using the direct-action example retain independent
+per-push groups and can overlap; neither reusable workflows nor matching group
+names in different repositories create a shared queue. This pilot does not
+serialize interactive chat or issue-loop work. Queue order is based on when
+runs start waiting, not source merge order:
 the agent uses pinned evidence, current knowledge, and wiki compare-and-swap to
-avoid overwriting newer edits. This is not a durable queue. After an ambiguous
+avoid overwriting newer edits. Cancellation or a client timeout does not prove
+the hosted invocation stopped; a workflow slot is not a distributed agent lock.
+The bounded queue and seven-day metadata artifacts do not provide durable
+recovery or exactly-once execution. After an ambiguous
 failure or partial publication, inspect the mapped wiki/history and per-PR
 receipt before rerunning or manually dispatching deferred PRs. Replays compare current content and skip unchanged knowledge; run IDs
 are not proof of publication. Sensitive/conflicting changes require human review.

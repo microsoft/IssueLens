@@ -317,9 +317,17 @@ comments before Azure login, then sends a neutral orchestration task with
 trusted event metadata. Per-issue concurrency allows different issues to run
 independently while coalescing bursts for the same issue.
 
-Team-memory postmerge orchestration uses the opt-in
-`.github/workflows/team-memory-post-merge.yml`: default-branch pushes and
-explicit single-PR manual dispatch. The shared composite action in `.github/actions/issuelens`
+Team-memory postmerge orchestration in this repository uses two opt-in workflows:
+`.github/workflows/team-memory-post-merge.yml` validates default-branch pushes,
+uploads a bounded identity-only source artifact retained for seven days, and
+dispatches `.github/workflows/team-memory-coordinator.yml` with source run,
+attempt, and immutable artifact IDs. The dispatcher needs repository-scoped
+Actions write access, but no Azure credentials or agent invocation. The
+coordinator verifies the trusted source workflow/run and artifact provenance
+before download; the pinned downloader rejects digest mismatches. The shared
+action revalidates that evidence before source discovery and OIDC login.
+Explicit single-PR manual requests use the coordinator instead of source IDs.
+The shared composite action in `.github/actions/issuelens`
 owns preflight, pinned Azure OIDC login, and submission through a standalone
 Python helper. External callers pin an action commit and need no checkout;
 this repository's thin caller sparsely loads the local action from the trusted
@@ -328,8 +336,17 @@ action checks authoritative GitHub metadata before OIDC login and submits a
 bounded wiki-only job using the issue-loop secrets. For a push, it verifies the
 complete fast-forward commit inventory and discovers all eligible merged PRs
 using bounded GitHub metadata reads before submitting one batch. It fails on
-incomplete discovery rather than silently omitting sources. Different pushes
-have separate concurrency groups; manual dispatch keeps per-PR grouping.
+incomplete discovery rather than silently omitting sources. IssueLens automatic
+and manual requests share `issuelens-team-memory-wiki-microsoft-IssueLens`
+with `queue: max` and no in-progress cancellation: one complete coordinator
+run and at most 100 pending runs. Queue admission and dispatch acknowledgement
+are not maintenance success. Only `microsoft/IssueLens` sources and its validated
+`microsoft/IssueLens` wiki destination are accepted in this first rollout;
+policy is never overridden to force a destination. Java tooling callers remain
+unchanged and will need authenticated cross-repository dispatch and a separate
+queue for their shared `microsoft/vscode-java-pack` wiki. Direct external action
+callers retain their existing event behavior and per-push concurrency.
+The pilot does not serialize chat, issue-loop work, or external direct requests.
 Verify default-branch Azure OIDC federation when migrating from a PR-scoped subject.
 Enable it with the repository
 variable `ISSUELENS_TEAM_MEMORY_ENABLED=true`, not an agent environment flag.
@@ -343,8 +360,10 @@ fully verified PRs while deferring incomplete or dependent changes. Every PR
 must appear exactly once in the result. A partial batch fails the job while
 retaining its per-PR response and any confirmed wiki publication, never implying
 that no write occurred. The batch schema remains caller-owned.
-Ambiguous submissions
-are not retried automatically. Git provides knowledge, history, and conflict
+Ambiguous agent submissions and workflow dispatches are not retried
+automatically. A timeout or cancellation does not prove the hosted invocation
+stopped; the queue is not a distributed runtime lock. Monitor overflow,
+expired artifacts, and failed/canceled runs. Git provides knowledge, history, and conflict
 detection, not a durable job queue or guaranteed exactly-once delivery. Local
 tests do not establish live OIDC federation, hosted writer dispatch, or publication.
 

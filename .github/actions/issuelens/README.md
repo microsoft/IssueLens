@@ -16,7 +16,7 @@ GitHub App private key is required.
 | `request-type` | Preparation | Result |
 | --- | --- | --- |
 | `issue-loop` | Accept issue opened/reopened, human issue-comment created/edited, or manual issue dispatch. Preserve workflow-owned event metadata; exclude issue/comment bodies and skip PR/bot comments before login. | A completed root agent response, without a required JSON schema. The orchestrator chooses triage, planning, or no action. |
-| `team-memory` | Discover and verify merged PRs introduced by a default-branch push, or accept a manual single-PR request. | Require matching source revisions, verified wiki identity for completed work, and one outcome per PR in a push batch. Partial batches retain their receipts but fail the step. |
+| `team-memory` | Discover and verify merged PRs introduced by a default-branch push, accept a manual single-PR request, or verify an IssueLens coordinator source artifact. | Require matching source revisions, verified wiki identity for completed work, and one outcome per PR in a push batch. Partial batches retain their receipts but fail the step. |
 | `task` | Require explicit non-empty `input`, bounded to 64 KiB UTF-8. No issue-loop event metadata or maintainer-command authority is synthesized. | A completed root agent response in the requested format. |
 
 All request types validate the caller repository identity and that the caller
@@ -90,12 +90,63 @@ that could redirect maintenance to another source repository. PR titles, bodies,
 and fork contents are not embedded in the task.
 
 IssueLens's [issue workflow](../../workflows/issue-triage.yml) and
-[team-memory workflow](../../workflows/team-memory-post-merge.yml) use the same
+[team-memory coordinator](../../workflows/team-memory-coordinator.yml) use the same
 local action so a new action version can be reviewed and merged with its callers.
 It uses pinned `actions/checkout` with `ref: github.workflow_sha`, sparse checkout
 of the action directory, and `persist-credentials: false`. This checks out the
 trusted workflow revision, never a PR head or merge-test ref. Do not copy that
 local-action step to consumer repositories; use the remote reference above.
+
+### IssueLens Coordinator Pilot
+
+IssueLens itself now uses two workflows. The
+[push dispatcher](../../workflows/team-memory-post-merge.yml) validates a
+default-branch push and uploads only its repository, source run/attempt,
+workflow revision, before/after SHAs, and commit IDs. It does not upload commit
+messages, source code, issue/PR bodies, agent responses, or credentials. The
+immutable artifact is named per run attempt and retained for seven days.
+The dispatcher sends one `workflow_dispatch` to the coordinator on the trusted
+default branch, passing only source run, attempt, and artifact IDs. Its
+repository-scoped `GITHUB_TOKEN` needs `actions: write`; it has no Azure secrets,
+OIDC permission, or agent invocation.
+
+The coordinator accepts either those three identifiers or one manual
+`pull_request_number`, never both. Before download it verifies the source
+repository, exact dispatcher path, push event, default branch, run attempt,
+full head SHA, and the artifact's run identity, name, digest, size, and expiry.
+The pinned downloader rejects digest mismatches. Action preflight independently
+revalidates the source and reads the bounded identity-only artifact, then runs
+the same complete push discovery as direct callers. It preserves the original
+push range and source provenance even if the coordinator starts at a newer
+default-branch revision. Queue admission is not merge verification or proof of
+wiki publication.
+
+Automatic pushes and manual PR requests share the fixed
+`issuelens-team-memory-wiki-microsoft-IssueLens` concurrency group, with
+`queue: max` and `cancel-in-progress: false`. The slot covers the complete
+coordinator run, including discovery, Azure OIDC login, the one agent invocation,
+and final result validation. GitHub retains up to 100 pending runs; further runs
+are canceled when that queue is full. Monitor canceled/failed runs and artifact
+expiry. Dispatch acknowledgement means GitHub accepted the request, not that
+maintenance completed. Inspect the coordinator run for its outcome.
+
+This first rollout accepts only `microsoft/IssueLens` sources. The caller
+requires the agent to verify its validated wiki destination matches
+`microsoft/IssueLens` and stop without writing on a mismatch, never override
+policy. The action also rejects a receipt naming another wiki.
+IssueLens's existing wiki configuration remains unchanged. Java
+tooling repositories are not enabled or modified by this pilot. Their future
+centralized requests will need authenticated cross-repository dispatch,
+source validation, and a separate queue for the shared
+`microsoft/vscode-java-pack` wiki. Reusing a workflow or composite action alone
+does not move its run into the coordinator repository.
+
+Use **Run workflow** on the coordinator with `pull_request_number` for a manual
+single-PR update. The push dispatcher no longer has a manual trigger. The
+existing direct-action example above remains supported for other repositories,
+but does not provide a cross-repository queue. This coordinator does not
+serialize chat, issue-loop requests, or other repositories' direct invocations.
+Keep current-knowledge and wiki compare-and-swap safeguards.
 
 ### Push Discovery and Partial Publication
 
@@ -241,8 +292,11 @@ identity check is not authorization for any additional repositories named by a t
 | `request-type` | Yes | `issue-loop`, `team-memory`, or `task`. |
 | `input` | For `task` | Explicit task text, 1-64 KiB UTF-8; do not combine with event adapters. |
 | `issue-number` | For manual `issue-loop` | Positive issue number; automatic events use their containing issue. |
-| `github-token` | No | Defaults to `github.token`; repository read for all types, Issues read for manual issue dispatch, Pull requests read for team memory. |
+| `github-token` | No | Defaults to `github.token`; repository read for all types, Issues read for manual issue dispatch, Pull requests read for team memory, and Actions read for coordinated sources. |
 | `pull-request-number` | For manual `team-memory` | Positive merged PR number. Pushes discover their own complete PR batch. |
+| `source-run-id` | For coordinated `team-memory` | Source push run ID; reserved for the IssueLens coordinator, not an arbitrary source repository. |
+| `source-run-attempt` | With `source-run-id` | Positive originating run attempt. |
+| `source-artifact-id` | With `source-run-id` | Immutable identity-only artifact from that run attempt. Supply all three source inputs, never with `pull-request-number`; the coordinator downloads it before invoking the action. |
 | `azure-client-id` | Yes | Existing Azure OIDC identity's client ID. |
 | `azure-tenant-id` | Yes | Tenant used by Azure login. |
 | `azure-subscription-id` | Yes | Subscription used by Azure login. |
@@ -379,6 +433,9 @@ content. Already tracked public messages can still complete normally.
   enabled. A PR-scoped credential used by `pull_request_target` is not proof that
   these triggers are covered; do not broaden trust to arbitrary refs. No Azure
   credential, role, or infrastructure is created or changed by this action.
+  In the IssueLens pilot only the coordinator logs into Azure; verify its
+  default-branch `workflow_dispatch` subject and any workflow-specific trust
+  conditions. The push dispatcher does not log into Azure.
 - Protect changes to caller workflows and review the pinned action code. Never
   execute PR-head code, untrusted scripts, or dependencies in a credentialed job.
 - Configure wiki policy and destination App permissions on the agent side, then
@@ -413,16 +470,20 @@ headroom for checkout, source-repository validation, Azure login, cooperative
 timeout overruns, and saving the receipt and summary. These socket/cooperative
 limits are not hard end-to-end deadlines.
 
-Different push jobs (and manual single-PR jobs) may overlap or finish out of order.
-Concurrency is keyed by push SHA rather than only the branch, so GitHub's pending
-run replacement cannot discard a different push's PR batch. The agent retains its
+Direct-action callers using the example's per-push groups may overlap or finish
+out of order; those groups do not coordinate different repositories. The
+IssueLens pilot instead queues all its maintenance runs in one wiki-specific
+group. GitHub orders queued work by when it begins waiting, not by source merge
+order, so current-knowledge checks remain necessary. Cancellation or a client
+timeout is not proof that a hosted invocation stopped. The agent retains its
 current-knowledge checks and wiki compare-and-swap safeguards. After an ambiguous
 failure, inspect the target's current state before retrying. For team memory,
 inspect the mapped wiki/history and per-PR receipts before retrying the same
 batch or manually dispatching incomplete PRs. Previously confirmed updates are
 not rolled back when another PR fails, and replays must not blindly repeat them.
 Content comparison avoids unnecessary writes but does not provide a durable
-queue, guaranteed delivery, or exactly-once execution.
+job ledger, guaranteed delivery, or exactly-once execution. The coordinator
+queue and seven-day source artifacts are bounded, not durable recovery storage.
 
 Local tests exercise the imported helper and action/caller wiring with mocked
 services. They do not establish live OIDC federation, hosted writer dispatch,

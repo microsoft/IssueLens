@@ -175,7 +175,12 @@ go install github.com/rhysd/actionlint/cmd/actionlint@914e7df21a07ef503a81201c76
 Optional ShellCheck and Pyflakes integrations are disabled to keep local and CI
 scope the same. [`.github/actionlint.yaml`](.github/actionlint.yaml) suppresses
 only the unknown `copilot-requests` permission diagnostic in the manual billing
-probe; remove that exception when actionlint supports the scope. Deployment
+probe and the unrecognized `queue` concurrency key in the team-memory
+coordinator. GitHub supports `queue: max`, but actionlint v1.7.12 does not;
+`test_team_memory_workflow.py` separately checks the exact fixed queue group,
+`queue: max`, and `cancel-in-progress: false`. All other workflow diagnostics
+remain enabled. Remove these file-specific exceptions when actionlint supports
+the features. Deployment
 workflow regression tests also require Bash and jq, available on CI's Ubuntu
 runner; run those checks in a matching environment.
 
