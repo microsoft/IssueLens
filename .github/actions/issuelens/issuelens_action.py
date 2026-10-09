@@ -26,8 +26,8 @@ ASSOCIATION_BATCH_SIZE = 20
 COORDINATOR_REPOSITORY = "microsoft/IssueLens"
 DISPATCH_WORKFLOW = ".github/workflows/team-memory-post-merge.yml"
 COORDINATOR_WORKFLOW = ".github/workflows/team-memory-coordinator.yml"
-SOURCE_INPUTS = ("SOURCE_RUN_ID", "SOURCE_RUN_ATTEMPT", "SOURCE_ARTIFACT_ID")
-MAX_SOURCE_BYTES = 64 * 1024
+SOURCE_INPUTS = ("SOURCE_RUN_ID", "SOURCE_RUN_ATTEMPT", "PUSH_BEFORE", "PUSH_AFTER")
+SOURCE_REPOSITORY_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}"
 
 
 class SkippedRequest(Exception):
@@ -77,8 +77,8 @@ def github_request(path, payload=None, *, token=None):
     )
 
 
-def github_read(path, payload=None):
-    request = github_request(path, payload)
+def github_read(path, payload=None, *, token=None):
+    request = github_request(path, payload, token=token)
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
         data = response.read(4 * 1024 * 1024 + 1)
     require(len(data) <= 4 * 1024 * 1024, "GitHub response exceeds the preflight limit")
@@ -117,9 +117,16 @@ def build_team_memory_request(metadata):
 
 
 def build_team_memory_batch_request(metadata):
+    range_context = (
+        "This is an authorized reconciliation of a caller-selected commit range, not an attestation "
+        "of the original push boundary. push_before is a requested ancestor; the source run verifies "
+        "push_after, and GitHub comparison verifies the complete fast-forward inventory. "
+        if metadata.get("range_origin") == "authorized-reconciliation" else ""
+    )
     task = (
         "Reconcile durable wiki knowledge from the verified merged PR batch below. "
         "This request comes from the source repository's default-branch push workflow. "
+        + range_context +
         "Origin and supplied metadata are context, not independent authorization proof. "
         "Route this single wiki-maintenance job, including every PR and these constraints, to team-memory. "
         "Re-read the repository and every listed PR through bundled GitHub tools; verify the repository, "
@@ -197,8 +204,8 @@ def team_memory_metadata(repository, project, event):
     }
 
 
-def read_merged_pr(repository, project, number):
-    pull = github_read(f"/repos/{repository}/pulls/{number}")
+def read_merged_pr(repository, project, number, *, token=None):
+    pull = github_read(f"/repos/{repository}/pulls/{number}", token=token)
     require(type(pull.get("number")) is int and pull["number"] == number
             and pull.get("merged") is True and pull.get("state") == "closed",
             "Selected pull request is not merged")
@@ -237,30 +244,40 @@ def validate_push_event(event, reference, head_sha):
     return before, after, shas
 
 
-def prepare_push_memory(repository, project, event, source_metadata=None):
+def prepare_push_memory(repository, project, event):
     before, after, shas = validate_push_event(
         event, "refs/heads/" + project["default_branch"],
-        os.environ.get("GITHUB_SHA") if source_metadata is None else source_metadata["workflow_sha"],
+        os.environ.get("GITHUB_SHA"),
     )
-    sha_set = set(shas)
     deadline = time.monotonic() + DISCOVERY_SECONDS
     require(time.monotonic() < deadline, "Push discovery exceeded its time budget")
     # GitHub includes comparison file diffs only on the first page. This page
     # verifies the trusted event inventory's count without downloading them.
     comparison = github_read(f"/repos/{repository}/compare/{before}...{after}?per_page=1&page=2")
+    validate_range_comparison(comparison, before, len(shas))
+    sha_set = set(shas)
+    page = comparison.get("commits")
+    require(isinstance(page, list) and len(page) == (1 if len(shas) > 1 else 0)
+            and all(isinstance(item, dict) and item.get("sha") in sha_set for item in page),
+            "Comparison page does not match the push inventory")
+    metadata = team_memory_metadata(repository, project, event)
+    return prepare_memory_inventory(repository, project, before, after, shas, metadata, deadline)
+
+
+def validate_range_comparison(comparison, before, count):
     require(isinstance(comparison.get("base_commit"), dict)
             and isinstance(comparison.get("merge_base_commit"), dict)
             and comparison["base_commit"].get("sha") == before
             and comparison["merge_base_commit"].get("sha") == before
             and comparison.get("status") == "ahead"
             and type(comparison.get("behind_by")) is int and comparison["behind_by"] == 0
-            and type(comparison.get("ahead_by")) is int and comparison["ahead_by"] == len(shas)
-            and type(comparison.get("total_commits")) is int and comparison["total_commits"] == len(shas),
+            and type(comparison.get("ahead_by")) is int and comparison["ahead_by"] == count
+            and type(comparison.get("total_commits")) is int and comparison["total_commits"] == count,
             "Push range is not a complete fast-forward inventory; use manual PR dispatch")
-    page = comparison.get("commits")
-    require(isinstance(page, list) and len(page) == (1 if len(shas) > 1 else 0)
-            and all(isinstance(item, dict) and item.get("sha") in sha_set for item in page),
-            "Comparison page does not match the push inventory")
+
+
+def prepare_memory_inventory(repository, project, before, after, shas, metadata, deadline, *, token=None):
+    sha_set = set(shas)
     owner, name = repository.split("/", 1)
     pulls = {}
     rest_merges = {}
@@ -278,7 +295,7 @@ def prepare_push_memory(repository, project, event, source_metadata=None):
             "query": "query($owner:String!,$name:String!) { repository(owner:$owner,name:$name) { "
                      "databaseId nameWithOwner defaultBranchRef { name target { oid } } " + selections + " } }",
             "variables": {"owner": owner, "name": name},
-        })
+        }, token=token)
         require(not response.get("errors") and isinstance(response.get("data"), dict),
                 "Commit-to-PR metadata lookup failed")
         resolved = response["data"].get("repository")
@@ -292,6 +309,8 @@ def prepare_push_memory(repository, project, event, source_metadata=None):
         target = resolved["defaultBranchRef"].get("target")
         require(isinstance(target, dict), "Current default-branch source is unavailable")
         source_tip_sha = full_sha(target.get("oid"))
+        require(metadata.get("source_tip_sha", source_tip_sha) == source_tip_sha,
+                "Source default branch changed during reconciliation discovery")
         for index, sha in enumerate(batch):
             commit = resolved.get(f"c{index}")
             require(isinstance(commit, dict) and commit.get("oid") == sha
@@ -327,7 +346,7 @@ def prepare_push_memory(repository, project, event, source_metadata=None):
                         require(len(rest_merges) < MAX_BATCH_PRS,
                                 "Push exceeds the PR metadata lookup limit; use manual PR dispatch")
                         require(time.monotonic() < deadline, "Push discovery exceeded its time budget")
-                        rest_merges[number] = read_merged_pr(repository, project, number)
+                        rest_merges[number] = read_merged_pr(repository, project, number, token=token)
                         require(time.monotonic() < deadline, "Push discovery exceeded its time budget")
                     resolved_merge = rest_merges[number]
                     require(resolved_merge["merged_at"] == pull.get("mergedAt"),
@@ -350,7 +369,6 @@ def prepare_push_memory(repository, project, event, source_metadata=None):
     require(time.monotonic() < deadline, "Push discovery exceeded its time budget")
     if not pulls:
         raise SkippedRequest("no_merged_pull_requests")
-    metadata = dict(source_metadata) if source_metadata is not None else team_memory_metadata(repository, project, event)
     metadata.update(
         push_before=before, push_after=after, source_tip_sha=source_tip_sha, commit_count=len(shas),
         pull_requests=[pulls[number] for number in sorted(pulls)],
@@ -364,9 +382,8 @@ def coordinator_workflow(repository, project):
 
 
 def require_coordinator(repository, event):
-    require(repository.lower() == COORDINATOR_REPOSITORY.lower()
-            and os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch",
-            "The coordinator currently accepts only IssueLens workflow dispatches")
+    require(os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch",
+            "Coordinated reconciliation requires a workflow dispatch")
     project = validate_workflow(repository, event)
     require(os.environ["GITHUB_WORKFLOW_REF"] == coordinator_workflow(repository, project),
             "Unexpected coordinator workflow")
@@ -380,63 +397,43 @@ def source_identifiers():
         positive(os.environ.get("DISPATCH_PR", ""))
         return None
     require(all(values) and not os.environ.get("DISPATCH_PR", ""),
-            "Supply all three source identifiers or one manual PR, not both")
-    return tuple(positive(value) for value in values)
+            "Supply run ID, attempt, before and after, or one manual PR, not both")
+    before, after = full_sha(values[2]), full_sha(values[3])
+    require(before != after, "Reconciliation requires a nonempty commit range")
+    return positive(values[0]), positive(values[1]), before, after
 
 
 def verify_dispatch_source(repository, project, identifiers):
-    run_id, attempt, artifact_id = identifiers
-    source = github_read(f"/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}")
-    require(source.get("id") == run_id and source.get("run_attempt") == attempt
+    run_id, attempt, _, after = identifiers
+    source = github_read(f"/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}",
+                         token=os.environ["SOURCE_GH_TOKEN"])
+    require(type(source.get("id")) is int and source["id"] == run_id
+            and type(source.get("run_attempt")) is int and source["run_attempt"] == attempt
             and source.get("event") == "push" and source.get("path") == DISPATCH_WORKFLOW
+            and source.get("head_sha") == after
             and source.get("head_branch") == project["default_branch"]
             and isinstance(source.get("repository"), dict)
+            and type(source["repository"].get("id")) is int
             and source["repository"].get("id") == project["id"]
             and source["repository"].get("full_name", "").lower() == repository.lower()
             and isinstance(source.get("head_repository"), dict)
+            and type(source["head_repository"].get("id")) is int
             and source["head_repository"].get("id") == project["id"],
-            "Source run is not the trusted IssueLens default-branch push workflow")
+            "Source run does not match the allowed default-branch workflow and requested after SHA")
     head_sha = full_sha(source.get("head_sha"))
     actor, triggering_actor = source.get("actor"), source.get("triggering_actor")
     require(isinstance(actor, dict) and isinstance(triggering_actor, dict)
             and all(isinstance(item.get("login"), str)
                     and re.fullmatch(r"[A-Za-z0-9-]+(?:\[bot\])?", item["login"])
                     for item in (actor, triggering_actor)), "Invalid source run actors")
-    artifact = github_read(f"/repos/{repository}/actions/artifacts/{artifact_id}")
-    origin = artifact.get("workflow_run")
-    require(artifact.get("id") == artifact_id and artifact.get("expired") is False
-            and artifact.get("name") == f"issuelens-team-memory-source-{attempt}"
-            and isinstance(artifact.get("digest"), str)
-            and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"])
-            and type(artifact.get("size_in_bytes")) is int
-            and 0 < artifact["size_in_bytes"] <= MAX_SOURCE_BYTES
-            and isinstance(origin, dict) and origin.get("id") == run_id
-            and origin.get("repository_id") == project["id"]
-            and origin.get("head_repository_id") == project["id"]
-            and origin.get("head_branch") == project["default_branch"]
-            and origin.get("head_sha") == head_sha,
-            "Source artifact is expired, oversized, lacks integrity metadata, or belongs to a different run")
     return {
         "repository": repository, "repository_id": project["id"], "base_ref": project["default_branch"],
         "event_name": "push", "event_action": "push",
         "actor_login": actor["login"], "triggering_actor": triggering_actor["login"],
         "workflow_ref": repository + "/" + DISPATCH_WORKFLOW + "@refs/heads/" + project["default_branch"],
         "workflow_sha": head_sha, "run_id": run_id, "run_attempt": attempt,
+        "range_origin": "authorized-reconciliation",
     }
-
-
-def source_event_path():
-    return Path(os.environ["RUNNER_TEMP"]) / "issuelens-team-memory-source" / "source-event.json"
-
-
-def read_source_event():
-    with source_event_path().open("rb") as source_file:
-        content = source_file.read(MAX_SOURCE_BYTES + 1)
-    require(len(content) <= MAX_SOURCE_BYTES, "Source event exceeds 64 KiB")
-    snapshot = json.loads(content)
-    require(isinstance(snapshot, dict) and set(snapshot) == {"metadata", "event"},
-            "Invalid source event artifact")
-    return snapshot
 
 
 def coordinator_metadata(repository):
@@ -446,102 +443,98 @@ def coordinator_metadata(repository):
         "coordinator_workflow_sha": full_sha(os.environ["GITHUB_WORKFLOW_SHA"]),
         "coordinator_run_id": positive(os.environ["GITHUB_RUN_ID"]),
         "coordinator_run_attempt": positive(os.environ["GITHUB_RUN_ATTEMPT"]),
-        "required_wiki_repository": COORDINATOR_REPOSITORY,
+        "required_wiki_repository": repository,
     }
 
 
-def prepare_coordinated_memory(repository, event):
+def source_policy(coordinator):
+    repository = os.environ.get("SOURCE_REPOSITORY", "") or coordinator
+    require(re.fullmatch(SOURCE_REPOSITORY_PATTERN, repository) and ".." not in repository,
+            "Invalid source-repository")
+    content = os.environ.get("SOURCE_REPOSITORIES", "{}")
+    require(len(content.encode("utf-8")) <= 4096, "source-repositories exceeds 4 KiB")
+    try:
+        allowed = json.loads(content, object_pairs_hook=unique_object)
+    except json.JSONDecodeError:
+        raise ValueError("source-repositories must be a repository-to-ID JSON object") from None
+    require(isinstance(allowed, dict) and len(allowed) <= 100
+            and all(re.fullmatch(SOURCE_REPOSITORY_PATTERN, name) and ".." not in name
+                    and type(identifier) is int and identifier > 0 for name, identifier in allowed.items()),
+            "source-repositories must map repository names to positive numeric IDs")
+    require(len({name.lower() for name in allowed}) == len(allowed), "Duplicate source repository names")
+    allowed = {name.lower(): identifier for name, identifier in allowed.items()}
+    require(repository.lower() == coordinator.lower() or repository.lower() in allowed,
+            "Source repository is not allowed by the coordinator workflow")
+    return repository, allowed.get(repository.lower())
+
+
+def read_reconciliation_inventory(repository, before, after, deadline):
+    token = os.environ["SOURCE_GH_TOKEN"]
+    count = None
+    shas = []
+    for page in range(1, MAX_PUSH_COMMITS // 100 + 1):
+        require(time.monotonic() < deadline, "Reconciliation discovery exceeded its time budget")
+        comparison = github_read(f"/repos/{repository}/compare/{before}...{after}?per_page=100&page={page}", token=token)
+        if count is None:
+            count = comparison.get("total_commits")
+            require(type(count) is int and 0 < count <= MAX_PUSH_COMMITS,
+                    "Reconciliation range is empty or exceeds the 1000-commit limit")
+        validate_range_comparison(comparison, before, count)
+        commits = comparison.get("commits")
+        require(isinstance(commits, list) and len(commits) == min(100, count - len(shas))
+                and all(isinstance(commit, dict) for commit in commits),
+                "Reconciliation commit pagination is incomplete")
+        shas.extend(full_sha(commit.get("sha")) for commit in commits)
+        require(len(set(shas)) == len(shas) and before not in shas,
+                "Reconciliation inventory has duplicate or invalid identities")
+        if len(shas) == count:
+            require(after in shas, "Reconciliation inventory does not contain the source run head")
+            return shas
+    raise ValueError("Reconciliation commit pagination is incomplete")
+
+
+def prepare_coordinated_memory(coordinator, event):
     identifiers = source_identifiers()
-    project = require_coordinator(repository, event)
-    require(identifiers is not None, "Coordinated push requires source identifiers")
-    metadata = verify_dispatch_source(repository, project, identifiers)
-    snapshot = read_source_event()
-    require(snapshot["metadata"] == metadata, "Source artifact metadata does not match the verified run")
-    push = snapshot["event"]
-    require(isinstance(push, dict)
-            and set(push) == {"repository", "ref", "before", "after", "created", "deleted",
-                             "forced", "commits", "head_commit"}
-            and push["repository"] == {"id": project["id"], "full_name": repository}
-            and isinstance(push["commits"], list)
-            and all(isinstance(item, dict) and set(item) == {"id"} for item in push["commits"])
-            and push["head_commit"] == {"id": metadata["workflow_sha"]},
-            "Invalid identity-only push artifact")
-    return prepare_push_memory(repository, project, push, {**metadata, **coordinator_metadata(repository)})
-
-
-def prepare_dispatch():
-    repository = os.environ["GITHUB_REPOSITORY"]
-    require(repository.lower() == COORDINATOR_REPOSITORY.lower()
-            and os.environ["GITHUB_EVENT_NAME"] == "push", "Only IssueLens pushes may use this dispatcher")
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-    require(event["repository"]["full_name"].lower() == repository.lower(), "Event repository mismatch")
-    project = validate_workflow(repository, event)
-    require(os.environ["GITHUB_WORKFLOW_REF"] == repository + "/" + DISPATCH_WORKFLOW
-            + "@refs/heads/" + project["default_branch"], "Unexpected dispatch workflow")
-    before, after, shas = validate_push_event(event, os.environ["GITHUB_REF"], os.environ.get("GITHUB_SHA"))
-    require(os.environ["GITHUB_WORKFLOW_SHA"] == after, "Source workflow revision does not match the push")
-    snapshot = {
-        "metadata": team_memory_metadata(repository, project, event),
-        "event": {
-            "repository": {"id": project["id"], "full_name": repository}, "ref": event["ref"],
-            "before": before, "after": after, "created": False, "deleted": False, "forced": False,
-            "commits": [{"id": sha} for sha in shas], "head_commit": {"id": after},
-        },
-    }
-    content = json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
-    require(len(content) <= MAX_SOURCE_BYTES, "Source event exceeds 64 KiB")
-    path = source_event_path()
-    path.parent.mkdir(exist_ok=True)
-    path.write_bytes(content)
-    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        output.write(f"source-event-path={path}\n")
-    print("Prepared identity-only team-memory source event")
-
-
-def dispatch():
-    repository = os.environ["GITHUB_REPOSITORY"]
-    require(repository.lower() == COORDINATOR_REPOSITORY.lower()
-            and os.environ["GITHUB_EVENT_NAME"] == "push", "Only IssueLens pushes may use this dispatcher")
-    dispatch_token = os.environ.get("DISPATCH_TOKEN", os.environ["GH_TOKEN"])
-    require(dispatch_token.strip(), "dispatch-token must be non-empty")
-    snapshot = read_source_event()
-    metadata = snapshot["metadata"]
-    project = validate_workflow(repository, snapshot["event"])
-    require(os.environ["GITHUB_WORKFLOW_REF"] == repository + "/" + DISPATCH_WORKFLOW
-            + "@refs/heads/" + project["default_branch"]
-            and metadata == team_memory_metadata(repository, project, snapshot["event"]),
-            "Source dispatch metadata changed")
-    validate_push_event(snapshot["event"], os.environ["GITHUB_REF"], os.environ.get("GITHUB_SHA"))
-    artifact_id = positive(os.environ["SOURCE_ARTIFACT_ID"])
-    request = github_request(
-        f"/repos/{repository}/actions/workflows/team-memory-coordinator.yml/dispatches",
-        {"ref": metadata["base_ref"], "inputs": {
-            "source_run_id": str(metadata["run_id"]), "source_run_attempt": str(metadata["run_attempt"]),
-            "source_artifact_id": str(artifact_id),
-        }},
-        token=dispatch_token,
-    )
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
-        require(response.status in {200, 204}, "Coordinator dispatch was not acknowledged; do not retry blindly")
-    print("Coordinator dispatch accepted; maintenance completion is reported by the coordinator run")
-
-
-def validate_dispatch():
-    repository = os.environ["GITHUB_REPOSITORY"]
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-    identifiers = source_identifiers()
-    project = require_coordinator(repository, event)
-    if identifiers is not None:
-        verify_dispatch_source(repository, project, identifiers)
-    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        output.write(f"automatic={'true' if identifiers is not None else 'false'}\n")
-        if identifiers is not None:
-            output.write(f"source-run-id={identifiers[0]}\nsource-artifact-id={identifiers[2]}\n")
-    print("Validated queued team-memory source" if identifiers is not None else "Validated manual PR selection")
+    repository, expected_id = source_policy(coordinator)
+    require(re.fullmatch(r"[\x21-\x7e]{1,4096}", os.environ.get("SOURCE_GH_TOKEN", "")),
+            "source-github-token must be non-empty printable ASCII without whitespace (at most 4 KiB)")
+    deadline = time.monotonic() + DISCOVERY_SECONDS
+    central = require_coordinator(coordinator, event)
+    project = central if repository.lower() == coordinator.lower() else github_read(
+        f"/repos/{repository}", token=os.environ["SOURCE_GH_TOKEN"])
+    require(type(project.get("id")) is int and project["id"] > 0
+            and isinstance(project.get("full_name"), str) and project["full_name"] == repository
+            and (expected_id is None or project["id"] == expected_id),
+            "Source repository canonical identity does not match coordinator policy")
+    require(repository.lower() == coordinator.lower()
+            or project.get("visibility") == central.get("visibility") == "public",
+            "Cross-repository reconciliation currently requires public source and coordinator repositories")
+    metadata = coordinator_metadata(coordinator)
+    if identifiers is None:
+        merged = read_merged_pr(repository, project, positive(os.environ["DISPATCH_PR"]), token=os.environ["SOURCE_GH_TOKEN"])
+        metadata = {**team_memory_metadata(repository, project, event), **merged, **metadata}
+        return {"metadata": metadata, "request": build_team_memory_request(metadata)}
+    metadata = {**verify_dispatch_source(repository, project, identifiers), **metadata}
+    before, after = identifiers[2:]
+    tip = github_read(f"/repos/{repository}/branches/{urllib.parse.quote(project['default_branch'], safe='')}",
+                      token=os.environ["SOURCE_GH_TOKEN"])
+    require(tip.get("name") == project["default_branch"] and isinstance(tip.get("commit"), dict),
+            "Source default branch identity mismatch")
+    tip_sha = full_sha(tip["commit"].get("sha"))
+    if after != tip_sha:
+        ancestry = github_read(f"/repos/{repository}/compare/{after}...{tip_sha}?per_page=1&page=2",
+                               token=os.environ["SOURCE_GH_TOKEN"])
+        count = ancestry.get("total_commits")
+        require(type(count) is int and count > 0, "Source run head is not an ancestor of the current default branch")
+        validate_range_comparison(ancestry, after, count)
+    metadata["source_tip_sha"] = tip_sha
+    shas = read_reconciliation_inventory(repository, before, after, deadline)
+    return prepare_memory_inventory(repository, project, before, after, shas, metadata, deadline,
+                                    token=os.environ["SOURCE_GH_TOKEN"])
 
 
 def prepare_team_memory(repository, event):
-    if any(os.environ.get(name, "") for name in SOURCE_INPUTS):
+    if any(os.environ.get(name, "") for name in (*SOURCE_INPUTS, "SOURCE_REPOSITORY")):
         return prepare_coordinated_memory(repository, event)
     event_name = os.environ["GITHUB_EVENT_NAME"]
     require(event_name in {"push", "pull_request_target", "workflow_dispatch"}, "Unsupported event")
@@ -633,7 +626,8 @@ def preflight():
     display_options()
     request_type = os.environ.get("REQUEST_TYPE", "")
     require(request_type in REQUEST_TYPES, "Choose request-type issue-loop, team-memory, or task")
-    require(request_type == "team-memory" or not any(os.environ.get(name, "") for name in SOURCE_INPUTS),
+    require(request_type == "team-memory"
+            or not any(os.environ.get(name, "") for name in (*SOURCE_INPUTS, "SOURCE_REPOSITORY")),
             "Source identifiers are supported only for team-memory coordinator requests")
     if request_type != "task":
         require(not os.environ.get("TASK_INPUT", "").strip(), "The input field is supported only for request-type task")
@@ -662,7 +656,7 @@ def preflight():
 def unique_object(pairs):
     result = {}
     for key, value in pairs:
-        require(key not in result, "Agent result contains duplicate JSON keys")
+        require(key not in result, "Duplicate JSON keys are not allowed")
         result[key] = value
     return result
 
@@ -872,12 +866,6 @@ def run(command):
             preflight()
         elif command == "submit":
             submit()
-        elif command == "prepare-dispatch":
-            prepare_dispatch()
-        elif command == "dispatch":
-            dispatch()
-        elif command == "validate-dispatch":
-            validate_dispatch()
         else:
             raise ValueError("Unsupported action command")
     except ValueError as error:
@@ -886,8 +874,6 @@ def run(command):
         message = (
             "Agent submission failed or its outcome is unknown; inspect the target before retrying"
             if command == "submit" else
-            "Coordinator dispatch failed or its outcome is unknown; inspect coordinator runs before retrying"
-            if command == "dispatch" else
             "IssueLens preflight failed; no agent request was sent"
         )
         raise SystemExit(f"::error::{message}") from None
@@ -895,5 +881,5 @@ def run(command):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("preflight", "submit", "prepare-dispatch", "dispatch", "validate-dispatch"))
+    parser.add_argument("command", choices=("preflight", "submit"))
     run(parser.parse_args().command)

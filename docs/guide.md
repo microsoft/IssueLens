@@ -179,11 +179,11 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   that land fork PRs, so the trusted base workflow has endpoint credentials
   without a `pull_request_target` policy exception. Set the `push.branches`
   filter to the source repository's default branch (`main` in this repository).
-  IssueLens's own push dispatcher loads the local `queue-team-memory` action
-  and its sibling `issuelens` helper; the coordinator loads `issuelens`.
-  Both use `github.workflow_sha`
-  with credentials not persisted. Neither path checks out or executes PR-head
-  code. Protect workflow and action changes as privileged code.
+  IssueLens's own push workflow calls only an immutable remote
+  `queue-team-memory` action, with no checkout or preparation script.
+  The coordinator loads and calls only `issuelens`, using `github.workflow_sha`
+  with credentials not persisted. Neither path executes PR-head code.
+  Protect workflow and action changes as privileged code.
 2. Reuse the issue-loop Actions secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
   `AZURE_SUBSCRIPTION_ID`, `ISSUELENS_AGENT_URL` (the complete Foundry
   invocations endpoint), and `ISSUELENS_AGENT_SCOPE`. The old skeleton's
@@ -222,19 +222,30 @@ across separate pushes, so an ordinary one-PR merge still usually produces one r
 [push-triggered workflow](../.github/workflows/team-memory-post-merge.yml) no
 longer calls Foundry. It calls the reusable
 [queue-team-memory action](../.github/actions/queue-team-memory/README.md), which
-encapsulates source validation, artifact upload, and one coordinator dispatch.
-The wrapper separates source-read and dispatch-write token inputs, both defaulting
-to `github.token` for this pilot. It validates the push, stores a bounded identity-only
-source artifact for seven days, and dispatches the
-[coordinator workflow](../.github/workflows/team-memory-coordinator.yml) with
-only the source run, attempt, and immutable artifact IDs. No source code,
-commit messages, issue/PR bodies, agent output, or credentials are uploaded.
-The coordinator checks the originating dispatcher, source repository/default
-branch, run attempt, head SHA, and artifact provenance before downloading.
-Missing digests, digest mismatches, expired or oversized artifacts, and mismatched source
-identities fail before Azure login. The shared action revalidates the source
-and complete push inventory before invoking the agent; it never substitutes
-the coordinator's newer head for the original push range.
+is a standalone generic target dispatcher. The source workflow rejects unsafe
+push flags and mismatched workflow/head SHAs, then supplies only
+`source_repository`, `source_run_id`, `source_run_attempt`, `push_before`, and
+`push_after` as string values. There is no source checkout, script, artifact
+upload, or download. The dispatcher uses only a target token and these JSON inputs
+to dispatch the
+[coordinator workflow](../.github/workflows/team-memory-coordinator.yml).
+No source code, commit messages, issue/PR bodies, agent output, or credentials
+are included.
+The coordinator keeps the queue but only invokes the shared `issuelens` action
+after trusted sparse checkout. Before Azure login, that action authenticates
+the allowed source and exact default-branch push workflow/run/attempt, matches
+`push_after` to its head, verifies current default-branch ancestry, and retrieves
+the full fast-forward requested range in pages of 100 commits (at most 1,000).
+It then discovers all eligible merged PRs, rejecting incomplete inventories,
+duplicates, identity mismatches, divergent ranges, or a ref race. Source and
+coordinator heads remain distinct; a newer coordinator head never replaces
+the requested range.
+
+**Range trust:** this authorizes reconciliation of a selected ancestor range,
+not attestation of the original push event. The source run API cannot prove
+original `before` or push flags. `push_before` is explicitly a requested
+boundary, and this limitation is included in the agent task. No original-event
+snapshot, artifact digest, or seven-day lifetime is claimed.
 
 Both automatic requests and manual PR updates execute in the coordinator
 repository under `issuelens-team-memory-wiki-microsoft-IssueLens`, using
@@ -254,8 +265,30 @@ The wrapper executes in the source workflow; only the dispatched coordinator
 workflow owns the central concurrency queue.
 Java tooling rollout is separate: those repositories share the
 `microsoft/vscode-java-pack` wiki and will need their own central queue and
-authenticated source adapter. The existing direct-action consumers continue
+trusted source configuration. The existing direct-action consumers continue
 working unchanged, but are not serialized by this pilot.
+The standalone dispatch action supports `coordinator-repository` (default
+calling repository), required `coordinator-workflow` (YAML basename),
+`coordinator-ref` (default calling ref name), and caller-owned `workflow-inputs`
+JSON. It independently validates target identities using `dispatch-token` and
+never prepares artifacts or synthesizes source identity fields.
+The coordinator branch is independent of the source default branch.
+See the [queue action contract](../.github/actions/queue-team-memory/README.md)
+for the exact transport and reconciliation request contracts.
+Other coordinators can configure a reviewed `source-repositories` JSON map of
+canonical source names to immutable numeric IDs, with independent
+`source-github-token` Contents, Actions, and Pull requests read access.
+Never forward dispatched inputs into that map. Cross-repository sources and
+coordinators must both be public; the IssueLens workflow's empty map continues
+to accept only its own source. Coordinated receipts must name the coordinator's
+wiki, verified against source policy rather than overriding it.
+Receivers still own source allowlists, range validation, privacy, wiki scope, and maintenance outcomes;
+this transport interface does not enable other workflows or provide credentials.
+This deliberately replaces the coordinated artifact input with before/after
+inputs and removes the obsolete preparation/download entrypoints; the generic
+dispatch interface is unchanged. Java Pack remains pinned to the older revision
+and needs a separate migration to the range request/shared invocation path;
+this refactor does not alter it.
 
 Only PRs merged into the current default branch are accepted. Manual **Run
 workflow** now uses the coordinator, with a positive `pull_request_number`

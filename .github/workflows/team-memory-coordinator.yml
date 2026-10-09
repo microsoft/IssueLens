@@ -3,6 +3,10 @@ name: Coordinate IssueLens team memory (opt-in)
 on:
   workflow_dispatch:
     inputs:
+      source_repository:
+        description: Source repository (defaults to this repository; other sources require trusted coordinator configuration)
+        required: false
+        type: string
       source_run_id:
         description: Source push workflow run ID (automatic dispatch only)
         required: false
@@ -11,8 +15,12 @@ on:
         description: Source workflow attempt (required with source_run_id)
         required: false
         type: string
-      source_artifact_id:
-        description: Immutable source event artifact ID (required with source_run_id)
+      push_before:
+        description: Requested reconciliation ancestor SHA, not an attested original push boundary
+        required: false
+        type: string
+      push_after:
+        description: Source push run head SHA (required with source_run_id)
         required: false
         type: string
       pull_request_number:
@@ -50,35 +58,15 @@ jobs:
           sparse-checkout: /.github/actions/issuelens/
           sparse-checkout-cone-mode: false
 
-      - name: Verify queued source
-        id: source
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          SOURCE_RUN_ATTEMPT: ${{ inputs.source_run_attempt }}
-          SOURCE_ARTIFACT_ID: ${{ inputs.source_artifact_id }}
-          DISPATCH_PR: ${{ inputs.pull_request_number }}
-        run: python3 -I .github/actions/issuelens/issuelens_action.py validate-dispatch
-
-      - name: Download verified source event
-        if: steps.source.outputs.automatic == 'true'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          artifact-ids: ${{ steps.source.outputs.source-artifact-id }}
-          run-id: ${{ steps.source.outputs.source-run-id }}
-          repository: ${{ github.repository }}
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/issuelens-team-memory-source
-          digest-mismatch: error
-
       - name: Maintain team memory
         uses: ./.github/actions/issuelens
         with:
           request-type: team-memory
+          source-repository: ${{ inputs.source_repository }}
           source-run-id: ${{ inputs.source_run_id }}
           source-run-attempt: ${{ inputs.source_run_attempt }}
-          source-artifact-id: ${{ inputs.source_artifact_id }}
+          push-before: ${{ inputs.push_before }}
+          push-after: ${{ inputs.push_after }}
           pull-request-number: ${{ inputs.pull_request_number }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}

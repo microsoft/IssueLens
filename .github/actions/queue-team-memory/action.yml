@@ -1,46 +1,37 @@
-name: Queue IssueLens team memory
-description: Preserve a validated IssueLens push and dispatch its centrally queued team-memory workflow.
+name: Dispatch coordinator workflow
+description: Validate a target workflow and send one bounded dispatch with caller-supplied inputs.
 
 inputs:
-  source-token:
-    description: Source repository read token for push provenance validation.
-    required: false
-    default: ${{ github.token }}
   dispatch-token:
-    description: Token with Actions write access to the IssueLens coordinator repository.
+    description: Target repository token with Contents read and Actions write access.
     required: false
     default: ${{ github.token }}
-
-outputs:
-  source-artifact-id:
-    description: Uploaded source artifact ID; its presence does not imply accepted dispatch or completed maintenance.
-    value: ${{ steps.artifact.outputs.artifact-id }}
+  coordinator-repository:
+    description: Target owner/repository; defaults to the calling repository.
+    required: false
+    default: ${{ github.repository }}
+  coordinator-workflow:
+    description: Target YAML workflow basename, not a path or display name.
+    required: true
+  coordinator-ref:
+    description: Target branch, independent of the source branch; defaults to the calling ref name.
+    required: false
+    default: ${{ github.ref_name }}
+  workflow-inputs:
+    description: JSON object containing at most ten string-valued workflow inputs; no job-specific fields are inferred.
+    required: false
+    default: '{}'
 
 runs:
   using: composite
   steps:
-    - name: Prepare identity-only source event
-      id: source
+    - name: Dispatch coordinator workflow
       shell: bash
       env:
         GITHUB_ACTION_PATH: ${{ github.action_path }}
-        GH_TOKEN: ${{ inputs.source-token }}
-      run: python3 -I "$GITHUB_ACTION_PATH/../issuelens/issuelens_action.py" prepare-dispatch
-
-    - name: Preserve source event for the coordinator
-      id: artifact
-      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-      with:
-        name: issuelens-team-memory-source-${{ github.run_attempt }}
-        path: ${{ steps.source.outputs.source-event-path }}
-        if-no-files-found: error
-        retention-days: 7
-
-    - name: Queue team-memory request
-      shell: bash
-      env:
-        GITHUB_ACTION_PATH: ${{ github.action_path }}
-        GH_TOKEN: ${{ inputs.source-token }}
         DISPATCH_TOKEN: ${{ inputs.dispatch-token }}
-        SOURCE_ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
-      run: python3 -I "$GITHUB_ACTION_PATH/../issuelens/issuelens_action.py" dispatch
+        COORDINATOR_REPOSITORY: ${{ inputs.coordinator-repository }}
+        COORDINATOR_WORKFLOW: ${{ inputs.coordinator-workflow }}
+        COORDINATOR_REF: ${{ inputs.coordinator-ref }}
+        WORKFLOW_INPUTS: ${{ inputs.workflow-inputs }}
+      run: python3 -I "$GITHUB_ACTION_PATH/dispatch.py"

@@ -12,22 +12,25 @@ jobs:
       vars.ISSUELENS_TEAM_MEMORY_ENABLED == 'true' &&
       github.repository == 'microsoft/IssueLens' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
-      github.event_name == 'push'
+      github.event_name == 'push' &&
+      github.workflow_sha == github.sha &&
+      github.event.created == false &&
+      github.event.deleted == false &&
+      github.event.forced == false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
       actions: write
     steps:
-      - name: Load action from trusted workflow revision
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.workflow_sha }}
-          persist-credentials: false
-          sparse-checkout: |
-            /.github/actions/issuelens/
-            /.github/actions/queue-team-memory/
-          sparse-checkout-cone-mode: false
-
       - name: Queue team-memory request
-        uses: ./.github/actions/queue-team-memory
+        uses: microsoft/IssueLens/.github/actions/queue-team-memory@296350903a578f3bcd847b34ce85b51e90b4b919
+        with:
+          coordinator-workflow: team-memory-coordinator.yml
+          coordinator-ref: main
+          workflow-inputs: >-
+            {"source_repository":"${{ github.repository }}",
+             "source_run_id":"${{ github.run_id }}",
+             "source_run_attempt":"${{ github.run_attempt }}",
+             "push_before":"${{ github.event.before }}",
+             "push_after":"${{ github.sha }}"}

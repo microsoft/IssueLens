@@ -1,73 +1,106 @@
-# Queue Team Memory Action
+# Standalone Workflow Dispatch Action
 
-A composite action that validates a trusted default-branch push, uploads its
-bounded identity-only source artifact, and sends one dispatch to the central
-team-memory coordinator. It does not log in to Azure or invoke IssueLens.
+A generic, self-contained transport that validates a target repository,
+workflow, and branch, then sends one bounded GitHub `workflow_dispatch` with
+caller-supplied inputs. Its name/path is retained for existing team-memory
+callers, but it does not prepare source events, upload/download artifacts,
+discover PRs, invoke IssueLens, or interpret wiki policy or job authorization.
+Its only script, `dispatch.py`, lives in this action directory; there are no
+sibling action imports, checkout dependencies, or external Python packages.
 
-The current pilot accepts only `microsoft/IssueLens` pushes from
-`.github/workflows/team-memory-post-merge.yml` and dispatches
-`.github/workflows/team-memory-coordinator.yml` in that same repository.
-Packaging the dispatch sequence does not enable Java tooling repositories or
-cross-repository sources; that rollout still needs a validated source allowlist,
-cross-repository source/artifact access, and its own wiki-specific queue.
+## Inputs
 
-## Usage
+| Input | Purpose / default |
+| --- | --- |
+| `dispatch-token` | Target Contents read and Actions write access; defaults to `${{ github.token }}`. An explicitly empty token fails without fallback. |
+| `coordinator-repository` | Target `owner/repository`; defaults to `${{ github.repository }}`. |
+| `coordinator-workflow` | Required YAML workflow basename, such as `team-memory-coordinator.yml`, not a filesystem path, workflow ID, URL, or display name. |
+| `coordinator-ref` | Target branch; defaults to `${{ github.ref_name }}`. Set it explicitly when the central branch differs from the caller's branch. |
+| `workflow-inputs` | JSON object with at most ten string-valued inputs; defaults to `{}`. No source or job fields are synthesized. |
 
-The [IssueLens push workflow](../../workflows/team-memory-post-merge.yml) loads
-this action and its sibling `issuelens` helper from `github.workflow_sha` with
-credentials not persisted, then calls `./.github/actions/queue-team-memory`.
-The source workflow still owns its push trigger, opt-in gate, permissions, and
-timeout.
+Target values use a simple ASCII schema: owner 1-39 alphanumeric/hyphen
+characters, starting and ending alphanumeric; repository 1-100
+alphanumeric/dot/underscore/hyphen characters, starting alphanumeric; workflow
+basename starting alphanumeric with at most 100 characters before `.yml` or
+`.yaml`; branch up to 255 characters with slash-separated components starting
+alphanumeric and containing only alphanumeric/dot/underscore/hyphen.
+`..`, empty branch components, components ending in `.` or `.lock`, and
+`refs/`-prefixed branch names are rejected. Inputs use names starting with a
+letter or underscore followed by up to 99 alphanumeric/underscore/hyphen
+characters. Duplicate JSON keys, nonstring values, invalid JSON, and raw input
+or encoded dispatch payloads over 64 KiB fail before network access. Do not
+include credentials or sensitive bodies in dispatch inputs.
 
-A pinned remote action reference uses the same interface without a caller
-checkout. Replace `FULL_COMMIT_SHA` with the reviewed 40-character commit SHA;
-this placeholder is not a published version. This example applies only to the
-IssueLens pilot's trusted source workflow:
+The token must be caller-provided for cross-repository dispatch. A source
+repository's `GITHUB_TOKEN` does not expand repository access when permissions
+change. The action does not create credentials, install an App, change
+permissions, or grant the receiving job authorization.
+
+## Team-Memory Usage
+
+In IssueLens, [team-memory-post-merge.yml](../../workflows/team-memory-post-merge.yml)
+calls this action with only repository, run/attempt, and requested before/after
+SHAs. No checkout, preparation script, or artifact is needed. The
+[invocation action](../issuelens/README.md#issuelens-coordinator-pilot) validates
+allowed source identity, the authoritative run and current branch ancestry,
+then retrieves the complete requested commit range centrally.
+The request authorizes reconciliation; it does not attest original `before`,
+which the source run API cannot recover.
+
+A pinned remote dispatch action needs no caller checkout. Replace
+`FULL_COMMIT_SHA` with a reviewed full commit SHA; this is not a published version.
+The IssueLens pilot supplies its five-field reconciliation request to its
+same-repository coordinator:
 
 ```yaml
-- name: Queue team-memory update
+- name: Queue team-memory request
   uses: microsoft/IssueLens/.github/actions/queue-team-memory@FULL_COMMIT_SHA
   with:
-    source-token: ${{ github.token }}
-    dispatch-token: ${{ steps.dispatch-token.outputs.token }}
+    coordinator-workflow: team-memory-coordinator.yml
+    coordinator-ref: main
+    workflow-inputs: '{"source_repository":"${{ github.repository }}", "source_run_id":"${{ github.run_id }}", "source_run_attempt":"${{ github.run_attempt }}", "push_before":"${{ github.event.before }}", "push_after":"${{ github.sha }}"}'
 ```
 
-Both inputs default to `${{ github.token }}`, so the same-repository pilot
-needs no token-minting step or new secret. If an explicit `dispatch-token` is
-used, the caller must provide it, for example through a preceding GitHub App
-token-minting step named `dispatch-token`. A separate dispatch App must not use
-the hosted IssueLens App's private key. The action does not create credentials.
+For a source using `develop` and a central coordinator using `main`, set the
+target ref independently and supply the receiving coordinator's own payload:
 
-| Input | Purpose |
-| --- | --- |
-| `source-token` | Source repository read access for provenance validation, including the validation immediately before dispatch. |
-| `dispatch-token` | Actions write access to the coordinator repository, used only for the dispatch POST. An explicitly empty token fails instead of falling back. |
+```yaml
+- name: Queue team-memory request
+  uses: microsoft/IssueLens/.github/actions/queue-team-memory@FULL_COMMIT_SHA
+  with:
+    dispatch-token: ${{ steps.dispatch-token.outputs.token }}
+    coordinator-repository: microsoft/vscode-java-pack
+    coordinator-workflow: team-memory-coordinator.yml
+    coordinator-ref: main
+    workflow-inputs: '{"source_repository":"${{ github.repository }}", "source_run_id":"${{ github.run_id }}", "source_run_attempt":"${{ github.run_attempt }}", "push_before":"${{ github.event.before }}", "push_after":"${{ github.sha }}"}'
+```
 
-The IssueLens source job retains `contents: read` and `actions: write`
-permissions. A source repository's `GITHUB_TOKEN` does not expand repository access
-when its permissions change; future cross-repository callers must provide a
-token authorized for the central repository. The coordinator will separately
-need Actions read access to allowed source repositories.
+The second example is a later consumer migration contract, not enablement or
+a change to Java Pack. Configure the source workflow to reject created/deleted/
+forced pushes and mismatched workflow/head SHAs. The receiving coordinator owns
+the trusted source-name/ID allowlist, independent source-read credentials,
+run/head and complete-range validation, privacy/wiki scope, queue, and final
+maintenance validation. Never forward dispatch inputs into the source allowlist.
+Arbitrary input claims are not trusted provenance or new write authorization.
 
-## Execution and Outcomes
+## Transport and Outcomes
 
-The action runs preparation, pinned artifact upload, and one bounded dispatch
-in order. Failure stops the sequence; there is no retry or agent invocation.
-The artifact contains only source identities, not source code, commit messages,
-issue/PR bodies, agent responses, or credentials, and expires after seven days.
-The shared standard-library helper is resolved relative to `github.action_path`
-from the sibling `issuelens` directory in the same pinned action bundle, not
-from the caller's checkout.
+Before a write, authenticated GETs independently verify the target repository
+identity, exact active workflow path, and selected branch with a full nonzero
+SHA. All HTTP operations reject redirects, use a 30-second timeout, and bound
+metadata responses to 64 KiB. One POST is attempted, with no automatic retry.
+Errors are static/sanitized and never disclose response bodies, input values,
+or credentials.
 
-The `source-artifact-id` output identifies the uploaded artifact for diagnostics.
-An artifact may have been uploaded even when dispatch fails. Its presence proves
-neither dispatch acceptance nor maintenance completion. A transport error may
-leave dispatch outcome unknown; inspect coordinator runs before retrying.
+Acknowledgement means only that GitHub accepted the dispatch, not that a
+coordinator ran, was admitted to a queue, invoked the agent, or completed a job.
+An ambiguous POST failure reports an unknown outcome; inspect target runs
+before retrying. There is no success-shaped job receipt or artifact output.
+The action executes in the caller repository; the actual concurrency queue
+remains in the selected central workflow, not in the action.
 
-The composite action executes in the caller repository. The actual queue lives
-in the [central coordinator workflow](../../workflows/team-memory-coordinator.yml),
-not in the action: one active run and at most 100 pending runs in
-`issuelens-team-memory-wiki-microsoft-IssueLens`, with `queue: max` and no
-in-progress cancellation. Only that coordinator invokes IssueLens and validates
-the final maintenance receipt. This does not serialize chat or external direct
-invocations, guarantee delivery, or prove a timed-out hosted invocation stopped.
+**Compatibility change:** unlike the prior bundled dispatcher, this action
+requires `coordinator-workflow` and caller-owned `workflow-inputs`, no longer
+accepts `source-token`, and does not prepare/upload a source artifact or infer
+`source_repository`/run IDs. Consumers pinned to the older immutable revision
+continue unchanged until deliberately migrated.
