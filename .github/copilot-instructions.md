@@ -327,7 +327,16 @@ Actions write access, but no Azure credentials or agent invocation. The queue
 action separates `source-token` reads from the `dispatch-token` POST, defaulting
 both to `github.token` for this same-repository pilot. It resolves the existing
 `issuelens` Python helper from the same pinned action bundle, not the caller's
-checkout. Hosting the action centrally does not relocate its execution; the
+checkout. Explicit `coordinator-repository`, `coordinator-workflow` (YAML basename),
+and `coordinator-ref` (branch) inputs activate generic dispatch, supplied all
+together. Generic mode independently validates the target with `dispatch-token`
+and adds authenticated `source_repository` to its dispatch inputs, never to the
+unchanged identity-only artifact. The coordinator branch is independent of the
+source default branch. Omitting all target inputs preserves the IssueLens pilot's
+three-ID payload and defaults. Receiving coordinators own their source/workflow
+allowlists, artifact provenance, privacy/wiki scope, and final outcome validation;
+target inputs and tokens grant no new access or authority.
+Hosting the action centrally does not relocate its execution; the
 actual concurrency queue remains in the dispatched coordinator workflow. The
 coordinator verifies the trusted source workflow/run and artifact provenance
 before download; the pinned downloader rejects digest mismatches. The shared

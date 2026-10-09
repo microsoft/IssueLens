@@ -144,7 +144,13 @@ IssueLens's existing wiki configuration remains unchanged. Java
 tooling repositories are not enabled or modified by this pilot. Their future
 centralized requests will need authenticated cross-repository dispatch,
 source validation, and a separate queue for the shared
-`microsoft/vscode-java-pack` wiki. Reusing a workflow or composite action alone
+`microsoft/vscode-java-pack` wiki. The shared queue action now accepts explicit
+`coordinator-repository`, `coordinator-workflow`, and `coordinator-ref` inputs
+for that separate transport integration, with a four-input dispatch that adds
+the authenticated `source_repository`. Its artifact schema stays identical;
+its receiver owns source allowlists, provenance, privacy, and wiki scope.
+Omitting the target inputs preserves this pilot's three-ID contract and defaults.
+Reusing a workflow or composite action alone
 does not move its run into the coordinator repository.
 
 Use **Run workflow** on the coordinator with `pull_request_number` for a manual

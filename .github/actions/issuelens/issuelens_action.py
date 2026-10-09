@@ -77,8 +77,8 @@ def github_request(path, payload=None, *, token=None):
     )
 
 
-def github_read(path, payload=None):
-    request = github_request(path, payload)
+def github_read(path, payload=None, *, token=None):
+    request = github_request(path, payload, token=token)
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
         data = response.read(4 * 1024 * 1024 + 1)
     require(len(data) <= 4 * 1024 * 1024, "GitHub response exceeds the preflight limit")
@@ -469,18 +469,45 @@ def prepare_coordinated_memory(repository, event):
     return prepare_push_memory(repository, project, push, {**metadata, **coordinator_metadata(repository)})
 
 
-def prepare_dispatch():
+def dispatch_target():
+    values = tuple(os.environ.get(name, "") for name in
+                   ("COORDINATOR_REPOSITORY", "COORDINATOR_WORKFLOW", "COORDINATOR_REF"))
+    if not any(values):
+        return None
+    require(all(values), "Supply all three coordinator target inputs or omit all of them")
+    repository, workflow, reference = values
+    require(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}",
+                         repository) and ".." not in repository, "Invalid coordinator-repository")
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.ya?ml", workflow)
+            and ".." not in workflow, "coordinator-workflow must be a YAML workflow basename")
+    require(len(reference) <= 255
+            and all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", part)
+                    and not part.endswith((".", ".lock")) for part in reference.split("/"))
+            and ".." not in reference and not reference.startswith("refs/"),
+            "coordinator-ref must be a simple branch name, not a full ref or revision expression")
+    return values
+
+
+def dispatch_source_repository(target):
     repository = os.environ["GITHUB_REPOSITORY"]
-    require(repository.lower() == COORDINATOR_REPOSITORY.lower()
-            and os.environ["GITHUB_EVENT_NAME"] == "push", "Only IssueLens pushes may use this dispatcher")
-    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
-    require(event["repository"]["full_name"].lower() == repository.lower(), "Event repository mismatch")
+    require(os.environ["GITHUB_EVENT_NAME"] == "push", "Only pushes may use this dispatcher")
+    require(target is not None or repository.lower() == COORDINATOR_REPOSITORY.lower(),
+            "Only IssueLens pushes may use the default dispatcher")
+    require(os.environ["GH_TOKEN"].strip(), "source-token must be non-empty")
+    return repository
+
+
+def dispatch_snapshot(repository, event):
+    require(type(event["repository"]["id"]) is int
+            and event["repository"]["full_name"].lower() == repository.lower(), "Event repository mismatch")
     project = validate_workflow(repository, event)
+    require(type(project["id"]) is int and project["id"] > 0 and project["full_name"] == repository,
+            "Source repository must match its canonical authenticated identity")
     require(os.environ["GITHUB_WORKFLOW_REF"] == repository + "/" + DISPATCH_WORKFLOW
             + "@refs/heads/" + project["default_branch"], "Unexpected dispatch workflow")
     before, after, shas = validate_push_event(event, os.environ["GITHUB_REF"], os.environ.get("GITHUB_SHA"))
     require(os.environ["GITHUB_WORKFLOW_SHA"] == after, "Source workflow revision does not match the push")
-    snapshot = {
+    return {
         "metadata": team_memory_metadata(repository, project, event),
         "event": {
             "repository": {"id": project["id"], "full_name": repository}, "ref": event["ref"],
@@ -488,6 +515,13 @@ def prepare_dispatch():
             "commits": [{"id": sha} for sha in shas], "head_commit": {"id": after},
         },
     }
+
+
+def prepare_dispatch():
+    target = dispatch_target()
+    repository = dispatch_source_repository(target)
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
+    snapshot = dispatch_snapshot(repository, event)
     content = json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
     require(len(content) <= MAX_SOURCE_BYTES, "Source event exceeds 64 KiB")
     path = source_event_path()
@@ -498,27 +532,50 @@ def prepare_dispatch():
     print("Prepared identity-only team-memory source event")
 
 
+def validate_dispatch_target(target, token):
+    repository, workflow, reference = target
+    project = github_read(f"/repos/{repository}", token=token)
+    require(isinstance(project.get("full_name"), str)
+            and project["full_name"].lower() == repository.lower()
+            and type(project.get("id")) is int and project["id"] > 0,
+            "Coordinator repository identity mismatch")
+    selected = github_read(f"/repos/{repository}/actions/workflows/{workflow}", token=token)
+    require(type(selected.get("id")) is int and selected["id"] > 0
+            and selected.get("path") == ".github/workflows/" + workflow and selected.get("state") == "active",
+            "Coordinator workflow identity mismatch or workflow is inactive")
+    branch = github_read(f"/repos/{repository}/branches/{urllib.parse.quote(reference, safe='')}", token=token)
+    require(branch.get("name") == reference and isinstance(branch.get("commit"), dict),
+            "Coordinator branch identity mismatch")
+    full_sha(branch["commit"].get("sha"))
+
+
 def dispatch():
-    repository = os.environ["GITHUB_REPOSITORY"]
-    require(repository.lower() == COORDINATOR_REPOSITORY.lower()
-            and os.environ["GITHUB_EVENT_NAME"] == "push", "Only IssueLens pushes may use this dispatcher")
+    target = dispatch_target()
+    repository = dispatch_source_repository(target)
     dispatch_token = os.environ.get("DISPATCH_TOKEN", os.environ["GH_TOKEN"])
     require(dispatch_token.strip(), "dispatch-token must be non-empty")
     snapshot = read_source_event()
-    metadata = snapshot["metadata"]
-    project = validate_workflow(repository, snapshot["event"])
-    require(os.environ["GITHUB_WORKFLOW_REF"] == repository + "/" + DISPATCH_WORKFLOW
-            + "@refs/heads/" + project["default_branch"]
-            and metadata == team_memory_metadata(repository, project, snapshot["event"]),
+    require(isinstance(snapshot["metadata"], dict)
+            and all(type(snapshot["metadata"].get(name)) is int
+                    for name in ("repository_id", "run_id", "run_attempt")),
+            "Invalid source dispatch metadata types")
+    require(snapshot == dispatch_snapshot(repository, snapshot["event"]),
             "Source dispatch metadata changed")
-    validate_push_event(snapshot["event"], os.environ["GITHUB_REF"], os.environ.get("GITHUB_SHA"))
+    metadata = snapshot["metadata"]
     artifact_id = positive(os.environ["SOURCE_ARTIFACT_ID"])
+    inputs = {
+        "source_run_id": str(metadata["run_id"]), "source_run_attempt": str(metadata["run_attempt"]),
+        "source_artifact_id": str(artifact_id),
+    }
+    if target is None:
+        target = (repository, "team-memory-coordinator.yml", metadata["base_ref"])
+    else:
+        validate_dispatch_target(target, dispatch_token)
+        inputs["source_repository"] = repository
+    coordinator, workflow, reference = target
     request = github_request(
-        f"/repos/{repository}/actions/workflows/team-memory-coordinator.yml/dispatches",
-        {"ref": metadata["base_ref"], "inputs": {
-            "source_run_id": str(metadata["run_id"]), "source_run_attempt": str(metadata["run_attempt"]),
-            "source_artifact_id": str(artifact_id),
-        }},
+        f"/repos/{coordinator}/actions/workflows/{workflow}/dispatches",
+        {"ref": reference, "inputs": inputs},
         token=dispatch_token,
     )
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:

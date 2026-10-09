@@ -256,6 +256,16 @@ Java tooling rollout is separate: those repositories share the
 `microsoft/vscode-java-pack` wiki and will need their own central queue and
 authenticated source adapter. The existing direct-action consumers continue
 working unchanged, but are not serialized by this pilot.
+The shared queue action supports explicit `coordinator-repository`,
+`coordinator-workflow` (YAML basename), and `coordinator-ref` (branch) inputs,
+supplied together. It validates target identities using the dispatch token and
+adds `source_repository` to generic dispatches without changing the source
+artifact. The coordinator branch is independent of the source default branch.
+See the [queue action contract](../.github/actions/queue-team-memory/README.md)
+for the exact input and artifact schemas. Receivers still own source allowlists,
+artifact/range revalidation, privacy, wiki scope, and maintenance outcomes;
+this transport interface does not enable other workflows or provide credentials.
+Omitting all target inputs preserves the IssueLens pilot unchanged.
 
 Only PRs merged into the current default branch are accepted. Manual **Run
 workflow** now uses the coordinator, with a positive `pull_request_number`

@@ -139,17 +139,21 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
             "path": "${{ steps.source.outputs.source-event-path }}",
             "if-no-files-found": "error", "retention-days": "7",
         })
-        self.assertEqual(set(self.queue_metadata["inputs"]), {"source-token", "dispatch-token"})
-        for input_metadata in self.queue_metadata["inputs"].values():
-            self.assertEqual(input_metadata["default"], "${{ github.token }}")
+        targets = ("coordinator-repository", "coordinator-workflow", "coordinator-ref")
+        self.assertEqual(set(self.queue_metadata["inputs"]), {"source-token", "dispatch-token", *targets})
+        for name, input_metadata in self.queue_metadata["inputs"].items():
+            self.assertEqual(input_metadata["default"], "" if name in targets else "${{ github.token }}")
             self.assertEqual(input_metadata["required"], "false")
+        target_env = {name.upper().replace("-", "_"): "${{ inputs." + name + " }}" for name in targets}
         self.assertEqual(prepare["env"], {
             "GITHUB_ACTION_PATH": "${{ github.action_path }}", "GH_TOKEN": "${{ inputs.source-token }}",
+            **target_env,
         })
         self.assertEqual(dispatch["env"], {
             "GITHUB_ACTION_PATH": "${{ github.action_path }}", "GH_TOKEN": "${{ inputs.source-token }}",
             "DISPATCH_TOKEN": "${{ inputs.dispatch-token }}",
             "SOURCE_ARTIFACT_ID": "${{ steps.artifact.outputs.artifact-id }}",
+            **target_env,
         })
         for step, command in ((prepare, "prepare-dispatch"), (dispatch, "dispatch")):
             self.assertEqual(step["shell"], "bash")
@@ -240,10 +244,28 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         })
         self.assertNotIn("actions/checkout", example)
         self.assertIn("only `microsoft/IssueLens`", guide)
-        self.assertIn("does not enable Java", guide)
+        self.assertIn("does not enable workflows", guide)
         self.assertIn("executes in the caller", guide)
         self.assertIn("Actions write", guide)
         self.assertIn("does not expand repository access", guide)
+
+    def test_queue_action_generic_example_matches_the_four_input_contract(self):
+        guide = (QUEUE_ACTION_DIR / "README.md").read_text(encoding="utf-8")
+        example = guide.split("```yaml\n")[2].split("```", 1)[0]
+        invocation = yaml.load(example, Loader=yaml.BaseLoader)[0]
+        self.assertEqual(invocation["uses"], "microsoft/IssueLens/.github/actions/queue-team-memory@FULL_COMMIT_SHA")
+        self.assertEqual(invocation["with"], {
+            "source-token": "${{ github.token }}", "dispatch-token": "${{ steps.dispatch-token.outputs.token }}",
+            "coordinator-repository": "microsoft/vscode-java-pack",
+            "coordinator-workflow": "team-memory-coordinator.yml", "coordinator-ref": "main",
+        })
+        self.assertEqual(set(invocation["with"]), set(self.queue_metadata["inputs"]))
+        for field in ("source_repository", "source_run_id", "source_run_attempt", "source_artifact_id"):
+            self.assertIn(f"`{field}`", guide)
+        self.assertIn("develop", guide)
+        self.assertIn("workflow_sha", guide)
+        self.assertIn("SHA-256 digest", guide)
+        self.assertNotIn("actions/checkout", example)
 
     def test_agents_do_not_depend_on_the_workflow_contract(self):
         orchestrator = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8")
@@ -575,7 +597,7 @@ class TeamMemoryActionTests(unittest.TestCase):
                     cwd=caller, env=self.environment, capture_output=True, text=True, timeout=15,
                 )
                 self.assertEqual(result.returncode, 1)
-                self.assertIn("Only IssueLens pushes", result.stderr)
+                self.assertIn("Only pushes", result.stderr)
                 self.assertNotIn("ImportError", result.stderr)
         self.assertEqual(list(caller.iterdir()), [])
         self.assertFalse((self.directory / "output.txt").exists())

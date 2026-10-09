@@ -1,5 +1,5 @@
 name: Queue IssueLens team memory
-description: Preserve a validated IssueLens push and dispatch its centrally queued team-memory workflow.
+description: Preserve a validated default-branch push and dispatch its centrally queued team-memory workflow.
 
 inputs:
   source-token:
@@ -7,9 +7,21 @@ inputs:
     required: false
     default: ${{ github.token }}
   dispatch-token:
-    description: Token with Actions write access to the IssueLens coordinator repository.
+    description: Token for coordinator metadata reads and the single Actions dispatch POST.
     required: false
     default: ${{ github.token }}
+  coordinator-repository:
+    description: Coordinator owner/repository; supply all three coordinator inputs to enable generic dispatch.
+    required: false
+    default: ""
+  coordinator-workflow:
+    description: Coordinator workflow basename (for example team-memory-coordinator.yml); omit all target inputs for the IssueLens pilot.
+    required: false
+    default: ""
+  coordinator-ref:
+    description: Coordinator branch, independent of the source default branch; required with the other target inputs.
+    required: false
+    default: ""
 
 outputs:
   source-artifact-id:
@@ -25,6 +37,9 @@ runs:
       env:
         GITHUB_ACTION_PATH: ${{ github.action_path }}
         GH_TOKEN: ${{ inputs.source-token }}
+        COORDINATOR_REPOSITORY: ${{ inputs.coordinator-repository }}
+        COORDINATOR_WORKFLOW: ${{ inputs.coordinator-workflow }}
+        COORDINATOR_REF: ${{ inputs.coordinator-ref }}
       run: python3 -I "$GITHUB_ACTION_PATH/../issuelens/issuelens_action.py" prepare-dispatch
 
     - name: Preserve source event for the coordinator
@@ -43,4 +58,7 @@ runs:
         GH_TOKEN: ${{ inputs.source-token }}
         DISPATCH_TOKEN: ${{ inputs.dispatch-token }}
         SOURCE_ARTIFACT_ID: ${{ steps.artifact.outputs.artifact-id }}
+        COORDINATOR_REPOSITORY: ${{ inputs.coordinator-repository }}
+        COORDINATOR_WORKFLOW: ${{ inputs.coordinator-workflow }}
+        COORDINATOR_REF: ${{ inputs.coordinator-ref }}
       run: python3 -I "$GITHUB_ACTION_PATH/../issuelens/issuelens_action.py" dispatch
