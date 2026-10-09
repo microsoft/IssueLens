@@ -14,11 +14,23 @@ inputs:
     required: false
     default: ''
   github-token:
-    description: Caller repository read token; issue-loop dispatch needs Issues read, team-memory needs Pull requests read.
+    description: Caller repository read token; issue-loop dispatch needs Issues read, team-memory needs Pull requests read, coordinated requests also need Actions read.
     required: false
     default: ${{ github.token }}
   pull-request-number:
     description: Merged PR number for manually dispatched team-memory requests.
+    required: false
+    default: ''
+  source-run-id:
+    description: Verified source push run for the IssueLens coordinator; do not combine with pull-request-number.
+    required: false
+    default: ''
+  source-run-attempt:
+    description: Source push run attempt; required with source-run-id.
+    required: false
+    default: ''
+  source-artifact-id:
+    description: Immutable identity-only source artifact; required with source-run-id.
     required: false
     default: ''
   azure-client-id:
@@ -81,6 +93,9 @@ runs:
         TASK_INPUT: ${{ inputs.input }}
         ISSUE_NUMBER: ${{ inputs.issue-number }}
         DISPATCH_PR: ${{ inputs.pull-request-number }}
+        SOURCE_RUN_ID: ${{ inputs.source-run-id }}
+        SOURCE_RUN_ATTEMPT: ${{ inputs.source-run-attempt }}
+        SOURCE_ARTIFACT_ID: ${{ inputs.source-artifact-id }}
         OUTPUT_MODE: ${{ inputs.output-mode }}
         SUMMARY_MODE: ${{ inputs.summary-mode }}
       run: python3 -I "$GITHUB_ACTION_PATH/issuelens_action.py" preflight

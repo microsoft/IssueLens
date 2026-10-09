@@ -3,3 +3,7 @@ paths:
     ignore:
       # actionlint v1.7.12 does not yet recognize the billing probe's scope.
       - '^unknown permission scope "copilot-requests"\.'
+  .github/workflows/team-memory-coordinator.yml:
+    ignore:
+      # GitHub's queue contract is checked by test_team_memory_workflow.py.
+      - '^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,9 @@ import yaml
 
 ROOT = pathlib.Path(__file__).parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "team-memory-post-merge.yml"
+COORDINATOR = ROOT / ".github" / "workflows" / "team-memory-coordinator.yml"
 ACTION_DIR = ROOT / ".github" / "actions" / "issuelens"
+QUEUE_ACTION_DIR = ROOT / ".github" / "actions" / "queue-team-memory"
 HELPER = ACTION_DIR / "issuelens_action.py"
 SPEC = importlib.util.spec_from_file_location("issuelens_action", HELPER)
 assert SPEC is not None and SPEC.loader is not None
@@ -29,26 +32,35 @@ SPEC.loader.exec_module(action)
 class TeamMemoryWorkflowTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.source = WORKFLOW.read_text(encoding="utf-8")
+        cls.dispatch_source = WORKFLOW.read_text(encoding="utf-8")
+        cls.dispatch_workflow = yaml.load(cls.dispatch_source, Loader=yaml.BaseLoader)
+        cls.dispatch_job = cls.dispatch_workflow["jobs"]["dispatch"]
+        cls.source = COORDINATOR.read_text(encoding="utf-8")
         cls.workflow = yaml.load(cls.source, Loader=yaml.BaseLoader)
         cls.job = cls.workflow["jobs"]["reconcile"]
         cls.steps = cls.job["steps"]
         cls.action_metadata = yaml.load((ACTION_DIR / "action.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+        cls.queue_source = (QUEUE_ACTION_DIR / "action.yml").read_text(encoding="utf-8")
+        cls.queue_metadata = yaml.load(cls.queue_source, Loader=yaml.BaseLoader)
 
     def test_default_branch_push_and_manual_target(self):
         triggers = self.workflow["on"]
-        self.assertNotIn("pull_request", triggers)
-        self.assertNotIn("pull_request_target", triggers)
-        self.assertEqual(triggers["push"]["branches"], ["main"])
+        self.assertEqual(set(triggers), {"workflow_dispatch"})
+        self.assertEqual(self.dispatch_workflow["on"], {"push": {"branches": ["main"]}})
         target = triggers["workflow_dispatch"]["inputs"]["pull_request_number"]
-        self.assertEqual(target["required"], "true")
+        self.assertEqual(target["required"], "false")
         self.assertEqual(target["type"], "string")
-        self.assertIn("vars.ISSUELENS_TEAM_MEMORY_ENABLED == 'true'", self.job["if"])
-        self.assertIn("github.event.repository.default_branch", self.job["if"])
-        self.assertIn("github.ref", self.job["if"])
-        self.assertEqual(self.workflow["permissions"], {})
+        for workflow, job in ((self.workflow, self.job), (self.dispatch_workflow, self.dispatch_job)):
+            self.assertIn("vars.ISSUELENS_TEAM_MEMORY_ENABLED == 'true'", job["if"])
+            self.assertIn("github.repository == 'microsoft/IssueLens'", job["if"])
+            self.assertIn("github.event.repository.default_branch", job["if"])
+            self.assertIn("github.ref", job["if"])
+            self.assertEqual(workflow["permissions"], {})
         self.assertEqual(self.job["permissions"], {
-            "contents": "read", "pull-requests": "read", "id-token": "write",
+            "contents": "read", "pull-requests": "read", "actions": "read", "id-token": "write",
+        })
+        self.assertEqual(self.dispatch_job["permissions"], {
+            "contents": "read", "actions": "write",
         })
 
     def test_preflight_precedes_pinned_login_and_submission(self):
@@ -75,6 +87,9 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertEqual(preflight["env"]["REQUEST_TYPE"], "${{ inputs.request-type }}")
         self.assertEqual(preflight["env"]["TASK_INPUT"], "${{ inputs.input }}")
         self.assertEqual(preflight["env"]["ISSUE_NUMBER"], "${{ inputs.issue-number }}")
+        for name in ("source-run-id", "source-run-attempt", "source-artifact-id"):
+            self.assertEqual(preflight["env"][name.upper().replace("-", "_")], "${{ inputs." + name + " }}")
+            self.assertEqual(self.action_metadata["inputs"][name]["default"], "")
         self.assertEqual(self.action_metadata["inputs"]["request-type"]["required"], "true")
         for step in (preflight, submit):
             self.assertEqual(step["env"]["OUTPUT_MODE"], "${{ inputs.output-mode }}")
@@ -92,11 +107,79 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
                 self.assertIn("step outcome", description)
                 self.assertNotIn("successful maintenance", description)
 
-    def test_concurrency_does_not_coalesce_different_pushes(self):
-        group = self.workflow["concurrency"]["group"]
-        self.assertIn("github.event.after", group)
-        self.assertIn("inputs.pull_request_number", group)
-        self.assertEqual(self.workflow["concurrency"]["cancel-in-progress"], "false")
+    def test_all_issuelens_requests_share_the_wiki_queue(self):
+        self.assertEqual(self.workflow["concurrency"], {
+            "group": "issuelens-team-memory-wiki-microsoft-IssueLens",
+            "queue": "max", "cancel-in-progress": "false",
+        })
+        self.assertNotIn("concurrency", self.dispatch_workflow)
+        self.assertNotIn("concurrency", self.job)
+        self.assertNotIn("uses", self.job)
+        self.assertNotIn("needs", self.job)
+        self.assertNotIn("microsoft/vscode-java-pack", self.source + self.dispatch_source)
+
+    def test_dispatcher_has_no_agent_credentials_or_invocation(self):
+        self.assertEqual(self.dispatch_job["timeout-minutes"], "10")
+        steps = self.dispatch_job["steps"]
+        self.assertEqual(len(steps), 2)
+        self.assertEqual(steps[1], {
+            "name": "Queue team-memory request", "uses": "./.github/actions/queue-team-memory",
+        })
+        for forbidden in ("secrets.", "id-token", "azure/login", "agent-url", "request-type:", "pull_request"):
+            self.assertNotIn(forbidden, self.dispatch_source + self.queue_source)
+
+    def test_queue_action_owns_preparation_upload_and_single_dispatch(self):
+        self.assertEqual(self.queue_metadata["runs"]["using"], "composite")
+        prepare, upload, dispatch = self.queue_metadata["runs"]["steps"]
+        self.assertEqual(prepare["id"], "source")
+        self.assertEqual(upload["id"], "artifact")
+        self.assertRegex(upload["uses"], r"^actions/upload-artifact@[0-9a-f]{40}$")
+        self.assertEqual(upload["with"], {
+            "name": "issuelens-team-memory-source-${{ github.run_attempt }}",
+            "path": "${{ steps.source.outputs.source-event-path }}",
+            "if-no-files-found": "error", "retention-days": "7",
+        })
+        self.assertEqual(set(self.queue_metadata["inputs"]), {"source-token", "dispatch-token"})
+        for input_metadata in self.queue_metadata["inputs"].values():
+            self.assertEqual(input_metadata["default"], "${{ github.token }}")
+            self.assertEqual(input_metadata["required"], "false")
+        self.assertEqual(prepare["env"], {
+            "GITHUB_ACTION_PATH": "${{ github.action_path }}", "GH_TOKEN": "${{ inputs.source-token }}",
+        })
+        self.assertEqual(dispatch["env"], {
+            "GITHUB_ACTION_PATH": "${{ github.action_path }}", "GH_TOKEN": "${{ inputs.source-token }}",
+            "DISPATCH_TOKEN": "${{ inputs.dispatch-token }}",
+            "SOURCE_ARTIFACT_ID": "${{ steps.artifact.outputs.artifact-id }}",
+        })
+        for step, command in ((prepare, "prepare-dispatch"), (dispatch, "dispatch")):
+            self.assertEqual(step["shell"], "bash")
+            self.assertEqual(step["run"], f'python3 -I "$GITHUB_ACTION_PATH/../issuelens/issuelens_action.py" {command}')
+            self.assertNotIn("${{", step["run"])
+            self.assertNotIn("if", step)
+            self.assertNotIn("continue-on-error", step)
+        output = self.queue_metadata["outputs"]["source-artifact-id"]
+        self.assertEqual(output["value"], "${{ steps.artifact.outputs.artifact-id }}")
+        self.assertIn("does not imply", output["description"])
+        for forbidden in ("concurrency", "permissions", "actions/checkout", "azure/login", "pip install"):
+            self.assertNotIn(forbidden, self.queue_source)
+
+    def test_coordinator_validates_source_before_download_and_agent_login(self):
+        checkout, verify, download, invoke = self.steps
+        self.assertEqual(verify["id"], "source")
+        self.assertEqual(verify["run"], "python3 -I .github/actions/issuelens/issuelens_action.py validate-dispatch")
+        self.assertEqual(verify["env"]["GH_TOKEN"], "${{ github.token }}")
+        self.assertRegex(download["uses"], r"^actions/download-artifact@[0-9a-f]{40}$")
+        self.assertEqual(download["if"], "steps.source.outputs.automatic == 'true'")
+        self.assertEqual(download["with"], {
+            "artifact-ids": "${{ steps.source.outputs.source-artifact-id }}",
+            "run-id": "${{ steps.source.outputs.source-run-id }}",
+            "repository": "${{ github.repository }}", "github-token": "${{ github.token }}",
+            "path": "${{ runner.temp }}/issuelens-team-memory-source", "digest-mismatch": "error",
+        })
+        for name in ("source_run_id", "source_run_attempt", "source_artifact_id"):
+            self.assertEqual(verify["env"][name.upper()], "${{ inputs." + name + " }}")
+            self.assertEqual(invoke["with"][name.replace("_", "-")], "${{ inputs." + name + " }}")
+        self.assertTrue(all("${{" not in step["run"] for step in self.steps if "run" in step))
 
     def test_job_timeout_has_setup_and_receipt_headroom(self):
         token_seconds, connection_seconds, stream_seconds = 60, 60, 15 * 60
@@ -107,28 +190,32 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertIn("30-minute job timeout", (ACTION_DIR / "README.md").read_text(encoding="utf-8"))
 
     def test_local_caller_loads_only_trusted_action_revision(self):
-        checkout, invoke = self.steps
-        self.assertRegex(checkout["uses"], r"^actions/checkout@[0-9a-f]{40}\Z")
-        self.assertEqual(checkout["with"]["ref"], "${{ github.workflow_sha }}")
-        self.assertEqual(checkout["with"]["persist-credentials"], "false")
-        self.assertEqual(checkout["with"]["sparse-checkout"], "/.github/actions/issuelens/")
-        self.assertEqual(checkout["with"]["sparse-checkout-cone-mode"], "false")
+        for checkout in (self.steps[0], self.dispatch_job["steps"][0]):
+            self.assertRegex(checkout["uses"], r"^actions/checkout@[0-9a-f]{40}\Z")
+            self.assertEqual(checkout["with"]["ref"], "${{ github.workflow_sha }}")
+            self.assertEqual(checkout["with"]["persist-credentials"], "false")
+            self.assertEqual(checkout["with"]["sparse-checkout-cone-mode"], "false")
+        self.assertEqual(self.steps[0]["with"]["sparse-checkout"], "/.github/actions/issuelens/")
+        self.assertEqual(self.dispatch_job["steps"][0]["with"]["sparse-checkout"].splitlines(), [
+            "/.github/actions/issuelens/", "/.github/actions/queue-team-memory/",
+        ])
+        invoke = self.steps[-1]
         self.assertEqual(invoke["uses"], "./.github/actions/issuelens")
         self.assertEqual(invoke["with"]["request-type"], "team-memory")
         self.assertEqual(invoke["with"]["agent-url"], "${{ secrets.ISSUELENS_AGENT_URL }}")
         self.assertEqual(invoke["with"]["agent-scope"], "${{ secrets.ISSUELENS_AGENT_SCOPE }}")
         self.assertTrue(set(invoke["with"]).issubset(self.action_metadata["inputs"]))
-        self.assertTrue(all("run" not in step for step in self.steps))
         self.assertNotIn("pull_request.head", self.source)
         self.assertNotIn("actions/checkout", json.dumps(self.action_metadata))
-        self.assertLess(len(self.source.splitlines()), 65)
 
     def test_external_caller_example_is_pinned_and_needs_no_checkout(self):
         guide = (ACTION_DIR / "README.md").read_text(encoding="utf-8")
         example = guide.split("```yaml\n", 1)[1].split("```", 1)[0]
         caller = yaml.load(example, Loader=yaml.BaseLoader)
         job = caller["jobs"]["reconcile"]
-        self.assertEqual(job["permissions"], self.job["permissions"])
+        self.assertEqual(job["permissions"], {
+            key: value for key, value in self.job["permissions"].items() if key != "actions"
+        })
         self.assertEqual(job["timeout-minutes"], self.job["timeout-minutes"])
         self.assertIn("ISSUELENS_TEAM_MEMORY_ENABLED", job["if"])
         self.assertIn("push", caller["on"])
@@ -141,6 +228,22 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertIn("placeholder, not a published version", guide)
         for name in self.action_metadata["inputs"]:
             self.assertIn(f"`{name}`", guide)
+
+    def test_queue_action_remote_example_is_pinned_and_preserves_pilot_scope(self):
+        guide = (QUEUE_ACTION_DIR / "README.md").read_text(encoding="utf-8")
+        example = guide.split("```yaml\n", 1)[1].split("```", 1)[0]
+        invocation = yaml.load(example, Loader=yaml.BaseLoader)[0]
+        self.assertEqual(invocation["uses"], "microsoft/IssueLens/.github/actions/queue-team-memory@FULL_COMMIT_SHA")
+        self.assertEqual(invocation["with"], {
+            "source-token": "${{ github.token }}",
+            "dispatch-token": "${{ steps.dispatch-token.outputs.token }}",
+        })
+        self.assertNotIn("actions/checkout", example)
+        self.assertIn("only `microsoft/IssueLens`", guide)
+        self.assertIn("does not enable Java", guide)
+        self.assertIn("executes in the caller", guide)
+        self.assertIn("Actions write", guide)
+        self.assertIn("does not expand repository access", guide)
 
     def test_agents_do_not_depend_on_the_workflow_contract(self):
         orchestrator = (ROOT / "agents" / "issuelens.md").read_text(encoding="utf-8")
@@ -196,6 +299,20 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
                     "skeleton does not submit", "skeleton is not functional", "orchestration remains incomplete",
                     "trusted postmerge job",
                 )), f"Stale automation limitation in {path}")
+
+    def test_mcp_readme_documents_dispatcher_and_coordinator_roles(self):
+        guide = " ".join((ROOT / "github_app_mcp" / "README.md").read_text(encoding="utf-8").split())
+        for target in (
+            "../.github/workflows/team-memory-post-merge.yml",
+            "../.github/actions/queue-team-memory/README.md",
+            "../.github/workflows/team-memory-coordinator.yml",
+            "../.github/actions/issuelens/README.md",
+        ):
+            self.assertIn(f"]({target})", guide)
+        self.assertIn("dispatcher does not authenticate to Azure or invoke the agent", guide)
+        self.assertIn("Only the coordinator performs Azure OIDC login and agent submission", guide)
+        self.assertIn("Automatic push requests and manual PR requests share the coordinator's queue", guide)
+        self.assertIn("external direct-action consumers remain supported but are not queued by it", guide)
 
 
 class Response(io.BytesIO):
@@ -442,6 +559,25 @@ class TeamMemoryActionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Unsupported event", result.stderr)
         self.assertNotIn("ImportError", result.stderr)
+        self.assertFalse((self.directory / "output.txt").exists())
+
+    def test_queue_helper_runs_from_downloaded_bundle_outside_checkout(self):
+        bundle = self.directory / "downloaded-action" / ".github" / "actions"
+        for source in (ACTION_DIR, QUEUE_ACTION_DIR):
+            shutil.copytree(source, bundle / source.name, ignore=shutil.ignore_patterns("__pycache__"))
+        helper = bundle / "queue-team-memory" / ".." / "issuelens" / "issuelens_action.py"
+        caller = self.directory / "caller"
+        caller.mkdir()
+        for command in ("prepare-dispatch", "dispatch"):
+            with self.subTest(command=command):
+                result = subprocess.run(
+                    [sys.executable, "-I", str(helper), command],
+                    cwd=caller, env=self.environment, capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("Only IssueLens pushes", result.stderr)
+                self.assertNotIn("ImportError", result.stderr)
+        self.assertEqual(list(caller.iterdir()), [])
         self.assertFalse((self.directory / "output.txt").exists())
 
     def test_azure_token_is_required_before_submission(self):

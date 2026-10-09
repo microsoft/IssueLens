@@ -336,13 +336,22 @@ destructive, or unsupported requests need ordinary human interaction. The
 read-only skill never writes or delegates ordinary reads to the writer.
 Git provides knowledge, history, and conflict detection, not a durable job queue,
 reconciliation service, external scheduler, or guaranteed exactly-once delivery.
-The optional [post-merge workflow](../.github/workflows/team-memory-post-merge.yml)
-uses the [shared IssueLens action](../.github/actions/issuelens/README.md) with
-`request-type: team-memory` to submit validated merged-PR jobs using Azure OIDC.
-The same action supports issue-loop and direct tasks without imposing the wiki
-result schema on their answers. It never accesses the wiki
-directly or holds App credentials. Its task constraints and result format are
-supplied in the request, not assumed by the agent or the tools. The agent revalidates source evidence and
+The optional [post-merge dispatcher](../.github/workflows/team-memory-post-merge.yml)
+uses the [queue-team-memory action](../.github/actions/queue-team-memory/README.md)
+to validate the push, upload an identity-only source artifact, and dispatch the
+[queued coordinator](../.github/workflows/team-memory-coordinator.yml). The
+dispatcher does not authenticate to Azure or invoke the agent. Only the
+coordinator performs Azure OIDC login and agent submission through the
+[shared IssueLens action](../.github/actions/issuelens/README.md) with
+`request-type: team-memory`, after verifying source run and artifact provenance.
+Automatic push requests and manual PR requests share the coordinator's queue.
+This pilot accepts only `microsoft/IssueLens` sources and its configured wiki;
+external direct-action consumers remain supported but are not queued by it.
+The shared IssueLens action also supports issue-loop and direct tasks without
+imposing the wiki result schema on their answers. Neither action accesses the
+wiki directly or holds App credentials. Task constraints and result formats
+are supplied in the request, not assumed by the agent or the tools.
+The agent revalidates source evidence and
 uses these same tools, privacy guards, and paired write preconditions. See the
 [setup and retry guidance](../docs/guide.md#post-merge-team-memory-automation).
 

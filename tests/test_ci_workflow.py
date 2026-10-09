@@ -178,7 +178,7 @@ class CIWorkflowTests(unittest.TestCase):
                 if "run" in step:
                     self.assertIn(step["run"], contributing)
 
-    def test_actionlint_exception_is_limited_to_existing_billing_permission(self):
+    def test_actionlint_exceptions_are_limited_to_unsupported_github_features(self):
         config = yaml.load(
             (ROOT / ".github" / "actionlint.yaml").read_text(encoding="utf-8"),
             Loader=yaml.BaseLoader,
@@ -187,6 +187,9 @@ class CIWorkflowTests(unittest.TestCase):
             "paths": {
                 ".github/workflows/copilot-cli-org-billing-test.yml": {
                     "ignore": [r'^unknown permission scope "copilot-requests"\.'],
+                },
+                ".github/workflows/team-memory-coordinator.yml": {
+                    "ignore": [r'^unexpected key "queue" for "concurrency" section\. expected one of "cancel-in-progress", "group"$'],
                 },
             },
         })
