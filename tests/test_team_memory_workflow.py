@@ -300,6 +300,20 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
                     "trusted postmerge job",
                 )), f"Stale automation limitation in {path}")
 
+    def test_mcp_readme_documents_dispatcher_and_coordinator_roles(self):
+        guide = " ".join((ROOT / "github_app_mcp" / "README.md").read_text(encoding="utf-8").split())
+        for target in (
+            "../.github/workflows/team-memory-post-merge.yml",
+            "../.github/actions/queue-team-memory/README.md",
+            "../.github/workflows/team-memory-coordinator.yml",
+            "../.github/actions/issuelens/README.md",
+        ):
+            self.assertIn(f"]({target})", guide)
+        self.assertIn("dispatcher does not authenticate to Azure or invoke the agent", guide)
+        self.assertIn("Only the coordinator performs Azure OIDC login and agent submission", guide)
+        self.assertIn("Automatic push requests and manual PR requests share the coordinator's queue", guide)
+        self.assertIn("external direct-action consumers remain supported but are not queued by it", guide)
+
 
 class Response(io.BytesIO):
     def __init__(self, body, content_type="application/json"):
