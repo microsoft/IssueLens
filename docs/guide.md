@@ -179,8 +179,9 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   that land fork PRs, so the trusted base workflow has endpoint credentials
   without a `pull_request_target` policy exception. Set the `push.branches`
   filter to the source repository's default branch (`main` in this repository).
-  IssueLens's own push dispatcher and coordinator load only the local action
-  directory from `github.workflow_sha`
+  IssueLens's own push dispatcher loads the local `queue-team-memory` action
+  and its sibling `issuelens` helper; the coordinator loads `issuelens`.
+  Both use `github.workflow_sha`
   with credentials not persisted. Neither path checks out or executes PR-head
   code. Protect workflow and action changes as privileged code.
 2. Reuse the issue-loop Actions secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
@@ -219,7 +220,11 @@ across separate pushes, so an ordinary one-PR merge still usually produces one r
 
 **IssueLens coordinator pilot:** the
 [push-triggered workflow](../.github/workflows/team-memory-post-merge.yml) no
-longer calls Foundry. It validates the push, stores a bounded identity-only
+longer calls Foundry. It calls the reusable
+[queue-team-memory action](../.github/actions/queue-team-memory/README.md), which
+encapsulates source validation, artifact upload, and one coordinator dispatch.
+The wrapper separates source-read and dispatch-write token inputs, both defaulting
+to `github.token` for this pilot. It validates the push, stores a bounded identity-only
 source artifact for seven days, and dispatches the
 [coordinator workflow](../.github/workflows/team-memory-coordinator.yml) with
 only the source run, attempt, and immutable artifact IDs. No source code,
@@ -245,6 +250,8 @@ the agent to verify the validated wiki destination matches `microsoft/IssueLens`
 and stop without writing if not; the action rejects receipts naming another
 wiki. The mapping in `.github/issuelens.yml` is unchanged. Other
 source repositories and caller-selected wiki destinations are not accepted.
+The wrapper executes in the source workflow; only the dispatched coordinator
+workflow owns the central concurrency queue.
 Java tooling rollout is separate: those repositories share the
 `microsoft/vscode-java-pack` wiki and will need their own central queue and
 authenticated source adapter. The existing direct-action consumers continue

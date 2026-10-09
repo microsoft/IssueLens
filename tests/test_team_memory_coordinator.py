@@ -143,6 +143,35 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.assertNotIn("completed", self.output.getvalue())
         self.assertFalse((self.directory / "output.txt").exists())
 
+    def test_dispatch_uses_separate_source_read_and_coordinator_write_tokens(self):
+        self.select_dispatcher()
+        self.environment["DISPATCH_TOKEN"] = "fake-dispatch-token"
+        path = self.write_source()
+        ack = Response(b"")
+        ack.status = 204
+        self.execute("dispatch", self.responses(self.project) + [ack])
+        read, write = [call.args[0] for call in self.opener.open.call_args_list]
+        self.assertEqual(read.get_method(), "GET")
+        self.assertEqual(read.get_header("Authorization"), "Bearer fake-repository-token")
+        self.assertEqual(write.get_method(), "POST")
+        self.assertEqual(write.get_header("Authorization"), "Bearer fake-dispatch-token")
+        for token in ("fake-repository-token", "fake-dispatch-token"):
+            self.assertNotIn(token, path.read_text())
+            self.assertNotIn(token, self.output.getvalue())
+            self.assertNotIn(token.encode(), write.data)
+        self.token.assert_not_called()
+
+    def test_explicit_empty_dispatch_token_never_falls_back_to_source_token(self):
+        self.select_dispatcher()
+        self.write_source()
+        for value in ("", " \t"):
+            with self.subTest(value=value):
+                self.environment["DISPATCH_TOKEN"] = value
+                with self.assertRaisesRegex(SystemExit, "dispatch-token must be non-empty"):
+                    self.execute("dispatch", [])
+                self.opener.open.assert_not_called()
+                self.token.assert_not_called()
+
     def test_dispatcher_rejects_other_repositories_workflows_and_unsafe_pushes(self):
         self.select_dispatcher()
         original_environment, original_event = self.environment.copy(), copy.deepcopy(self.event)

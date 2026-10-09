@@ -100,7 +100,13 @@ local-action step to consumer repositories; use the remote reference above.
 ### IssueLens Coordinator Pilot
 
 IssueLens itself now uses two workflows. The
-[push dispatcher](../../workflows/team-memory-post-merge.yml) validates a
+[push dispatcher](../../workflows/team-memory-post-merge.yml) calls the separate
+[queue-team-memory action](../queue-team-memory/README.md), which owns source
+preparation, artifact upload, and dispatch without Azure or agent credentials.
+Its `source-token` and `dispatch-token` inputs separate source reads from the
+coordinator dispatch POST; both default to `github.token` for this same-repository
+pilot. The wrapper reuses this directory's Python helper through an action-relative
+path, so remote references need no caller checkout. The action validates a
 default-branch push and uploads only its repository, source run/attempt,
 workflow revision, before/after SHAs, and commit IDs. It does not upload commit
 messages, source code, issue/PR bodies, agent responses, or credentials. The

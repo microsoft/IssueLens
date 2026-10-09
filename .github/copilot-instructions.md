@@ -318,11 +318,17 @@ trusted event metadata. Per-issue concurrency allows different issues to run
 independently while coalescing bursts for the same issue.
 
 Team-memory postmerge orchestration in this repository uses two opt-in workflows:
-`.github/workflows/team-memory-post-merge.yml` validates default-branch pushes,
+`.github/workflows/team-memory-post-merge.yml` calls the reusable composite
+`.github/actions/queue-team-memory`, which validates default-branch pushes,
 uploads a bounded identity-only source artifact retained for seven days, and
 dispatches `.github/workflows/team-memory-coordinator.yml` with source run,
 attempt, and immutable artifact IDs. The dispatcher needs repository-scoped
-Actions write access, but no Azure credentials or agent invocation. The
+Actions write access, but no Azure credentials or agent invocation. The queue
+action separates `source-token` reads from the `dispatch-token` POST, defaulting
+both to `github.token` for this same-repository pilot. It resolves the existing
+`issuelens` Python helper from the same pinned action bundle, not the caller's
+checkout. Hosting the action centrally does not relocate its execution; the
+actual concurrency queue remains in the dispatched coordinator workflow. The
 coordinator verifies the trusted source workflow/run and artifact provenance
 before download; the pinned downloader rejects digest mismatches. The shared
 action revalidates that evidence before source discovery and OIDC login.

@@ -64,12 +64,12 @@ def full_sha(value):
     return value
 
 
-def github_request(path, payload=None):
+def github_request(path, payload=None, *, token=None):
     return urllib.request.Request(
         "https://api.github.com" + path,
         data=None if payload is None else json.dumps(payload).encode("utf-8"),
         headers={
-            "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+            "Authorization": "Bearer " + (os.environ["GH_TOKEN"] if token is None else token),
             "Accept": "application/vnd.github+json",
             "Content-Type": "application/json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -502,6 +502,8 @@ def dispatch():
     repository = os.environ["GITHUB_REPOSITORY"]
     require(repository.lower() == COORDINATOR_REPOSITORY.lower()
             and os.environ["GITHUB_EVENT_NAME"] == "push", "Only IssueLens pushes may use this dispatcher")
+    dispatch_token = os.environ.get("DISPATCH_TOKEN", os.environ["GH_TOKEN"])
+    require(dispatch_token.strip(), "dispatch-token must be non-empty")
     snapshot = read_source_event()
     metadata = snapshot["metadata"]
     project = validate_workflow(repository, snapshot["event"])
@@ -517,6 +519,7 @@ def dispatch():
             "source_run_id": str(metadata["run_id"]), "source_run_attempt": str(metadata["run_attempt"]),
             "source_artifact_id": str(artifact_id),
         }},
+        token=dispatch_token,
     )
     with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
         require(response.status in {200, 204}, "Coordinator dispatch was not acknowledged; do not retry blindly")
