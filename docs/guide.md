@@ -336,6 +336,14 @@ GitHub readers can reject oversized metadata or patches. For change evidence,
 the agent uses small file pages and targeted source reads instead of repeating
 the same oversized request. Unsupported content and missing evidence remain
 explicit limitations, never unverified maintenance success.
+The batch request identifies complete range/inventory validation as preflight's
+responsibility; it does not require the agent to repeat it with the unpaginated
+`compare_commits` tool. That patch-bearing response can exceed its 128-KiB limit
+even for one merge. The agent revalidates each listed PR and uses small file pages
+and targeted pinned-source reads instead. A `needs-review` receipt from that
+optional bulk call is not an Actions-variable or Azure-login failure. After
+merging a caller-request fix, start a new authorized manual coordinator run for
+the affected PR; rerunning the old run retains its original code revision.
 
 IssueLens's automatic and manual maintenance runs share one queued concurrency
 group. Other repositories using the direct-action example retain independent

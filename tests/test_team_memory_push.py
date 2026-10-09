@@ -112,6 +112,41 @@ class PushBatchTests(unittest.TestCase):
         self.assertNotIn("body", query["query"])
         self.token.assert_not_called()
 
+    def test_batch_request_keeps_range_validation_in_preflight_and_uses_paged_pr_evidence(self):
+        for origin in (None, "authorized-reconciliation"):
+            with self.subTest(origin=origin):
+                metadata = {**self.envelope["metadata"], "commit_count": 2}
+                if origin:
+                    metadata["range_origin"] = origin
+                request = action.build_team_memory_batch_request(metadata)["input"]
+                self.assertIn("Preflight already verified the complete fast-forward commit inventory", request)
+                self.assertIn("Do not repeat that range validation with compare_commits", request)
+                self.assertIn("a bulk comparison is not required", request)
+                self.assertIn("list_pull_request_files", request)
+                self.assertIn("per_page=1", request)
+                self.assertIn("get_file(ref=push_after)", request)
+                self.assertIn("verify the repository", request)
+                self.assertIn("each full merge SHA", request)
+                self.assertIn("Missing evidence is not no-change", request)
+                self.assertIn("snapshot-precondition checks", request)
+                self.assertIn("Return a final JSON object only", request)
+                if origin:
+                    self.assertIn("not an attestation of the original push boundary", request)
+
+    def test_bulk_compare_limit_receipt_still_fails_without_retrying_or_claiming_publication(self):
+        self.result.update(status="needs-review",
+                           reason="Complete range comparison exceeded the tool response limit. Wiki not updated.")
+        for item in self.result["results"]:
+            item.update(status="needs-review", reason="PR source/file reconciliation is incomplete.")
+        self.write_envelope()
+        with self.assertRaisesRegex(SystemExit, "Maintenance batch incomplete"):
+            self.execute("submit", [self.stream()])
+        outputs = self.action_outputs()
+        self.assertEqual(outputs["status"], "needs-review")
+        self.assertEqual(json.loads(pathlib.Path(outputs["response-path"]).read_text()), self.result)
+        self.assertEqual(self.opener.open.call_count, 1)
+        self.assertIn("batch is incomplete", (self.directory / "summary.md").read_text())
+
     def test_empty_eligible_pr_set_skips_before_azure_login(self):
         nodes = [
             self.pull_node(27, "f" * 40),
