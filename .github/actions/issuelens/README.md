@@ -5,8 +5,11 @@ It prepares and validates the request, authenticates to an existing IssueLens
 agent with Azure OIDC, and invokes it through a shared bounded HTTP/SSE client.
 It is a client of the agent, not part of the hosted agent runtime.
 
-The action runs three steps: prepare the request, log in with the pinned
-`azure/login` action, and submit the request. The standard-library Python helper
+The normal path prepares the request, logs in with the pinned `azure/login`
+action, and submits the request. Coordinated team-memory inputs first run
+source verification and pinned artifact download inside this action; all
+verification, download, and complete-range discovery precede Azure login.
+The standard-library Python helper
 owns metadata validation, the caller's task text, bounded HTTP/SSE processing,
 and result validation. No inline Python, pip installation, container build, or
 GitHub App private key is required.
@@ -100,32 +103,59 @@ local-action step to consumer repositories; use the remote reference above.
 ### IssueLens Coordinator Pilot
 
 IssueLens itself now uses two workflows. The
-[push dispatcher](../../workflows/team-memory-post-merge.yml) calls the separate
-[queue-team-memory action](../queue-team-memory/README.md), which owns source
-preparation, artifact upload, and dispatch without Azure or agent credentials.
-Its `source-token` and `dispatch-token` inputs separate source reads from the
-coordinator dispatch POST; both default to `github.token` for this same-repository
-pilot. The wrapper reuses this directory's Python helper through an action-relative
-path, so remote references need no caller checkout. The action validates a
-default-branch push and uploads only its repository, source run/attempt,
-workflow revision, before/after SHAs, and commit IDs. It does not upload commit
+[push workflow](../../workflows/team-memory-post-merge.yml) prepares the source
+with this directory's request-owned `issuelens_action.py prepare-source`
+helper and uploads the artifact with a pinned uploader, then calls the separate
+[standalone dispatch action](../queue-team-memory/README.md).
+The generic dispatcher owns only target validation and one POST with
+caller-supplied workflow inputs. It never calls this action's scripts.
+Source preparation uses the source read token; dispatch uses its independent
+target token. Both are `github.token` for this same-repository pilot.
+The source helper validates the authenticated canonical repository, exact
+`.github/workflows/team-memory-post-merge.yml` on its current default branch,
+and push/workflow SHA, and preserves only repository, source run/attempt,
+workflow revision, before/after SHAs, and all commit IDs. It does not upload commit
 messages, source code, issue/PR bodies, agent responses, or credentials. The
 immutable artifact is named per run attempt and retained for seven days.
-The dispatcher sends one `workflow_dispatch` to the coordinator on the trusted
+The source workflow supplies three string IDs to the standalone dispatcher's
+`workflow-inputs`; it sends one `workflow_dispatch` to the coordinator on the
 default branch, passing only source run, attempt, and artifact IDs. Its
-repository-scoped `GITHUB_TOKEN` needs `actions: write`; it has no Azure secrets,
+repository-scoped `GITHUB_TOKEN` needs Contents read and Actions write; it has no Azure secrets,
 OIDC permission, or agent invocation.
 
-The coordinator accepts either those three identifiers or one manual
-`pull_request_number`, never both. Before download it verifies the source
+The coordinator owns the central queue and calls only this invocation action
+(plus trusted sparse checkout for the local action). It accepts either those
+three identifiers or one manual `pull_request_number`, never both.
+Inside this action, source validation and pinned download precede normal
+preflight and Azure login. Before download, the request-owned helper verifies the source
 repository, exact dispatcher path, push event, default branch, run attempt,
 full head SHA, and the artifact's run identity, name, digest, size, and expiry.
-The pinned downloader rejects digest mismatches. Action preflight independently
+The pinned downloader rejects digest mismatches. Normal preflight independently
 revalidates the source and reads the bounded identity-only artifact, then runs
 the same complete push discovery as direct callers. It preserves the original
 push range and source provenance even if the coordinator starts at a newer
 default-branch revision. Queue admission is not merge verification or proof of
 wiki publication.
+
+The artifact remains
+`${RUNNER_TEMP}/issuelens-team-memory-source/source-event.json`, uploaded as
+`issuelens-team-memory-source-${GITHUB_RUN_ATTEMPT}` with seven-day retention.
+JSON is at most 64 KiB, with exactly `metadata` and `event`:
+
+| Object | Exact fields |
+| --- | --- |
+| `metadata` | `repository`, `repository_id`, `base_ref`, `event_name`, `event_action`, `actor_login`, `triggering_actor`, `workflow_ref`, `workflow_sha`, `run_id`, `run_attempt` |
+| `event` | `repository: {id, full_name}`, `ref`, `before`, `after`, `created`, `deleted`, `forced`, `commits: [{id}, ...]`, `head_commit: {id}` |
+
+Repository/run/attempt IDs are integers; repository names are canonical.
+Event name/action are `push`, flags are exactly `false`, and `ref` names the
+source default branch. `workflow_sha`, `GITHUB_SHA`, `after`, and `head_commit.id`
+match one full nonzero SHA. `before` is distinct. All 1-1000 commit IDs are
+retained in order, unique full nonzero SHAs, including `after` and excluding
+`before`. Actors and workflow identity come from trusted workflow context.
+No target, token, body, message, or code fields are added. The source run API
+does not establish original `before`; the receiver must verify this preserved
+inventory against the complete authoritative fast-forward range before invocation.
 
 Automatic pushes and manual PR requests share the fixed
 `issuelens-team-memory-wiki-microsoft-IssueLens` concurrency group, with
@@ -144,13 +174,13 @@ IssueLens's existing wiki configuration remains unchanged. Java
 tooling repositories are not enabled or modified by this pilot. Their future
 centralized requests will need authenticated cross-repository dispatch,
 source validation, and a separate queue for the shared
-`microsoft/vscode-java-pack` wiki. The shared queue action now accepts explicit
-`coordinator-repository`, `coordinator-workflow`, and `coordinator-ref` inputs
-for that separate transport integration, with a four-input dispatch that adds
-the authenticated `source_repository`. Its artifact schema stays identical;
-its receiver owns source allowlists, provenance, privacy, and wiki scope.
-Omitting the target inputs preserves this pilot's three-ID contract and defaults.
-Reusing a workflow or composite action alone
+`microsoft/vscode-java-pack` wiki. The standalone dispatch action accepts generic
+targets and caller-owned `workflow-inputs`, but does not prepare evidence or
+infer `source_repository`. Java Pack's existing immutable pin remains unchanged;
+its later migration must move preparation/upload into the source request path
+and keep receiving provenance validation. This action's coordinated adapter
+still accepts only the IssueLens pilot; it does not silently generalize wiki
+scope. Reusing a workflow or composite action alone
 does not move its run into the coordinator repository.
 
 Use **Run workflow** on the coordinator with `pull_request_number` for a manual

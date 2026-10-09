@@ -337,13 +337,22 @@ read-only skill never writes or delegates ordinary reads to the writer.
 Git provides knowledge, history, and conflict detection, not a durable job queue,
 reconciliation service, external scheduler, or guaranteed exactly-once delivery.
 The optional [post-merge dispatcher](../.github/workflows/team-memory-post-merge.yml)
-uses the [queue-team-memory action](../.github/actions/queue-team-memory/README.md)
-to validate the push, upload an identity-only source artifact, and dispatch the
+uses request-owned code from the
+[invocation action](../.github/actions/issuelens/README.md) to validate the push
+and a pinned uploader to preserve its identity-only before/after/commit inventory,
+then uses the [standalone dispatch action](../.github/actions/queue-team-memory/README.md)
+only to validate the target and dispatch caller-supplied workflow inputs to the
 [queued coordinator](../.github/workflows/team-memory-coordinator.yml). The
 dispatcher does not authenticate to Azure or invoke the agent. Only the
 coordinator performs Azure OIDC login and agent submission through the
 [shared IssueLens action](../.github/actions/issuelens/README.md) with
-`request-type: team-memory`, after verifying source run and artifact provenance.
+`request-type: team-memory`. The central workflow owns the queue and only calls
+the action (plus trusted local checkout); the invocation action internally
+verifies source run/artifact provenance, performs pinned digest-checked download,
+and revalidates the original complete push inventory before Azure login.
+The generic dispatcher is self-contained and never imports invocation scripts,
+prepares job evidence, or grants job authorization. The artifact's original
+before range cannot be reconstructed from the run API alone.
 Automatic push requests and manual PR requests share the coordinator's queue.
 This pilot accepts only `microsoft/IssueLens` sources and its configured wiki;
 external direct-action consumers remain supported but are not queued by it.

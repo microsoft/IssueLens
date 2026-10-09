@@ -318,29 +318,29 @@ trusted event metadata. Per-issue concurrency allows different issues to run
 independently while coalescing bursts for the same issue.
 
 Team-memory postmerge orchestration in this repository uses two opt-in workflows:
-`.github/workflows/team-memory-post-merge.yml` calls the reusable composite
-`.github/actions/queue-team-memory`, which validates default-branch pushes,
-uploads a bounded identity-only source artifact retained for seven days, and
-dispatches `.github/workflows/team-memory-coordinator.yml` with source run,
-attempt, and immutable artifact IDs. The dispatcher needs repository-scoped
-Actions write access, but no Azure credentials or agent invocation. The queue
-action separates `source-token` reads from the `dispatch-token` POST, defaulting
-both to `github.token` for this same-repository pilot. It resolves the existing
-`issuelens` Python helper from the same pinned action bundle, not the caller's
-checkout. Explicit `coordinator-repository`, `coordinator-workflow` (YAML basename),
-and `coordinator-ref` (branch) inputs activate generic dispatch, supplied all
-together. Generic mode independently validates the target with `dispatch-token`
-and adds authenticated `source_repository` to its dispatch inputs, never to the
-unchanged identity-only artifact. The coordinator branch is independent of the
-source default branch. Omitting all target inputs preserves the IssueLens pilot's
-three-ID payload and defaults. Receiving coordinators own their source/workflow
-allowlists, artifact provenance, privacy/wiki scope, and final outcome validation;
-target inputs and tokens grant no new access or authority.
-Hosting the action centrally does not relocate its execution; the
-actual concurrency queue remains in the dispatched coordinator workflow. The
-coordinator verifies the trusted source workflow/run and artifact provenance
-before download; the pinned downloader rejects digest mismatches. The shared
-action revalidates that evidence before source discovery and OIDC login.
+`.github/workflows/team-memory-post-merge.yml` uses the request-owned
+`issuelens_action.py prepare-source` helper to validate the default-branch push,
+then a pinned uploader preserves its bounded identity-only artifact for seven
+days. Original before/after and all commit IDs remain explicit; the source run
+API alone does not establish the original before range. It then calls the
+standalone generic `.github/actions/queue-team-memory` action to dispatch
+`.github/workflows/team-memory-coordinator.yml` with its unchanged three-ID
+payload in caller-supplied `workflow-inputs` JSON. The dispatcher owns only
+validated target dispatch: its own `dispatch.py`, no sibling action imports,
+source preparation, artifacts, agent calls, wiki policy, or job authorization.
+Its `coordinator-repository` defaults to the caller repository,
+`coordinator-workflow` requires a YAML basename, and `coordinator-ref` defaults
+to the calling branch, independent of any source default branch. Its target
+token requires Contents read and Actions write; source preparation independently
+uses a source read token. Target inputs and credentials grant no new access.
+The central coordinator owns the actual concurrency queue and only calls
+`.github/actions/issuelens` after trusted sparse checkout. The invocation action
+owns source/workflow allowlists, verification before pinned digest-checked
+download, revalidation/discovery before OIDC login, policy/privacy, and final
+outcomes. Its IssueLens coordinated adapter stays pilot-scoped; direct external
+action callers retain their request behavior. Dispatch no longer prepares or
+uploads artifacts or infers source fields. Java Pack's older immutable pin stays
+unchanged and needs a separately authorized consumer migration.
 Explicit single-PR manual requests use the coordinator instead of source IDs.
 The shared composite action in `.github/actions/issuelens`
 owns preflight, pinned Azure OIDC login, and submission through a standalone

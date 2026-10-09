@@ -179,8 +179,9 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   that land fork PRs, so the trusted base workflow has endpoint credentials
   without a `pull_request_target` policy exception. Set the `push.branches`
   filter to the source repository's default branch (`main` in this repository).
-  IssueLens's own push dispatcher loads the local `queue-team-memory` action
-  and its sibling `issuelens` helper; the coordinator loads `issuelens`.
+  IssueLens's own push workflow loads the standalone `queue-team-memory`
+  action and separately the request-owned `issuelens` preparation helper;
+  the coordinator loads and calls only `issuelens`.
   Both use `github.workflow_sha`
   with credentials not persisted. Neither path checks out or executes PR-head
   code. Protect workflow and action changes as privileged code.
@@ -222,14 +223,20 @@ across separate pushes, so an ordinary one-PR merge still usually produces one r
 [push-triggered workflow](../.github/workflows/team-memory-post-merge.yml) no
 longer calls Foundry. It calls the reusable
 [queue-team-memory action](../.github/actions/queue-team-memory/README.md), which
-encapsulates source validation, artifact upload, and one coordinator dispatch.
-The wrapper separates source-read and dispatch-write token inputs, both defaulting
-to `github.token` for this pilot. It validates the push, stores a bounded identity-only
-source artifact for seven days, and dispatches the
+is a standalone generic target dispatcher. The source workflow first calls the
+request-owned `issuelens_action.py prepare-source` helper with its source read
+token and a pinned artifact uploader. It validates the push and stores a bounded
+identity-only source artifact for seven days, retaining original before/after
+and all commit IDs. The run API alone cannot recover original before.
+The separate dispatcher uses only a target token and caller-supplied JSON inputs
+to dispatch the
 [coordinator workflow](../.github/workflows/team-memory-coordinator.yml) with
 only the source run, attempt, and immutable artifact IDs. No source code,
 commit messages, issue/PR bodies, agent output, or credentials are uploaded.
-The coordinator checks the originating dispatcher, source repository/default
+The coordinator keeps the queue but only invokes the shared `issuelens` action
+after trusted sparse checkout. That invocation action verifies and downloads
+the source artifact internally before Azure login. It checks the originating
+dispatcher, source repository/default
 branch, run attempt, head SHA, and artifact provenance before downloading.
 Missing digests, digest mismatches, expired or oversized artifacts, and mismatched source
 identities fail before Azure login. The shared action revalidates the source
@@ -256,16 +263,20 @@ Java tooling rollout is separate: those repositories share the
 `microsoft/vscode-java-pack` wiki and will need their own central queue and
 authenticated source adapter. The existing direct-action consumers continue
 working unchanged, but are not serialized by this pilot.
-The shared queue action supports explicit `coordinator-repository`,
-`coordinator-workflow` (YAML basename), and `coordinator-ref` (branch) inputs,
-supplied together. It validates target identities using the dispatch token and
-adds `source_repository` to generic dispatches without changing the source
-artifact. The coordinator branch is independent of the source default branch.
+The standalone dispatch action supports `coordinator-repository` (default
+calling repository), required `coordinator-workflow` (YAML basename),
+`coordinator-ref` (default calling ref name), and caller-owned `workflow-inputs`
+JSON. It independently validates target identities using `dispatch-token` and
+never prepares artifacts or synthesizes source identity fields.
+The coordinator branch is independent of the source default branch.
 See the [queue action contract](../.github/actions/queue-team-memory/README.md)
 for the exact input and artifact schemas. Receivers still own source allowlists,
 artifact/range revalidation, privacy, wiki scope, and maintenance outcomes;
 this transport interface does not enable other workflows or provide credentials.
-Omitting all target inputs preserves the IssueLens pilot unchanged.
+The IssueLens source workflow explicitly supplies its unchanged three-ID payload.
+This is a deliberate dispatch-action interface change: source preparation/upload
+and payload construction are now caller-owned. Java Pack remains pinned to the
+older revision and needs a separate migration; this refactor does not alter it.
 
 Only PRs merged into the current default branch are accepted. Manual **Run
 workflow** now uses the coordinator, with a positive `pull_request_number`

@@ -55,6 +55,7 @@ separate explicit approval.
 | `github_app_mcp/` | GitHub App MCP server, packaging, and isolated tests |
 | `tests/` | Application, prompt-contract, workflow, and documentation tests |
 | `.github/actions/issuelens/` | Reusable GitHub Actions integration and request helpers |
+| `.github/actions/queue-team-memory/` | Standalone generic coordinator workflow dispatch transport |
 | `.github/workflows/` | CI, deployment, and operational workflows |
 | `examples/` and `schemas/` | Target-repository configuration examples and schema |
 | `docs/` and `observability/` | Setup, operations, and reporting resources |
@@ -114,7 +115,7 @@ python -m unittest discover -s tests -p 'test_issue_triage_workflow.py' -v
 The complete application checks are:
 
 ```bash
-python -m compileall -q *.py .github/actions/issuelens github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
+python -m compileall -q *.py .github/actions/issuelens .github/actions/queue-team-memory github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
@@ -123,7 +124,7 @@ Python files explicitly:
 
 ```powershell
 $rootModules = Get-ChildItem -File -Filter *.py | Select-Object -ExpandProperty Name
-python -m compileall -q $rootModules .github\actions\issuelens github_app_mcp\src github_app_mcp\scripts tests github_app_mcp\tests
+python -m compileall -q $rootModules .github\actions\issuelens .github\actions\queue-team-memory github_app_mcp\src github_app_mcp\scripts tests github_app_mcp\tests
 ```
 
 ### Standalone MCP tests and package checks

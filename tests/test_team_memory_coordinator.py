@@ -2,8 +2,6 @@ import copy
 import json
 import pathlib
 import unittest
-import urllib.error
-from unittest.mock import patch
 
 import test_team_memory_workflow as memory_tests
 
@@ -104,7 +102,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.event["commits"][0]["message"] = "UNTRUSTED_COMMIT_TEXT"
         self.event["head_commit"]["message"] = "UNTRUSTED_HEAD_TEXT"
         self.event["repository"]["description"] = "UNTRUSTED_REPOSITORY_TEXT"
-        self.execute("prepare-dispatch", self.responses(self.project))
+        self.execute("prepare-source", self.responses(self.project))
         path = pathlib.Path(self.action_outputs()["source-event-path"])
         snapshot = json.loads(path.read_bytes())
         self.assertEqual(snapshot, self.snapshot)
@@ -114,67 +112,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.opener.open.call_count, 1)
         self.token.assert_not_called()
 
-    def test_dispatch_is_one_post_to_the_fixed_default_branch_coordinator(self):
-        self.select_dispatcher()
-        self.write_source()
-        ack = Response(b"")
-        ack.status = 204
-        self.execute("dispatch", self.responses(self.project) + [ack])
-        request = self.opener.open.call_args.args[0]
-        self.assertEqual(request.full_url,
-                         "https://api.github.com/repos/microsoft/IssueLens/actions/workflows/team-memory-coordinator.yml/dispatches")
-        self.assertEqual(request.get_method(), "POST")
-        self.assertEqual(json.loads(request.data), {
-            "ref": "main", "inputs": {
-                "source_run_id": "123456", "source_run_attempt": "2", "source_artifact_id": "456",
-            },
-        })
-        self.assertNotIn(b"input", request.data.replace(b'"inputs"', b''))
-        self.assertNotIn(b"wiki", request.data)
-        self.assertNotIn(b"fake-repository-token", request.data)
-        self.token.assert_not_called()
-        self.assertIn("completion is reported by the coordinator", self.output.getvalue())
-
-    def test_dispatch_failure_never_retries_or_claims_maintenance_completion(self):
-        self.select_dispatcher()
-        self.write_source()
-        with self.assertRaisesRegex(SystemExit, "outcome is unknown"):
-            self.execute("dispatch", self.responses(self.project) + [OSError("PRIVATE TRANSPORT DETAIL")])
-        self.assertEqual(self.opener.open.call_count, 2)
-        self.token.assert_not_called()
-        self.assertNotIn("completed", self.output.getvalue())
-        self.assertFalse((self.directory / "output.txt").exists())
-
-    def test_dispatch_uses_separate_source_read_and_coordinator_write_tokens(self):
-        self.select_dispatcher()
-        self.environment["DISPATCH_TOKEN"] = "fake-dispatch-token"
-        path = self.write_source()
-        ack = Response(b"")
-        ack.status = 204
-        self.execute("dispatch", self.responses(self.project) + [ack])
-        read, write = [call.args[0] for call in self.opener.open.call_args_list]
-        self.assertEqual(read.get_method(), "GET")
-        self.assertEqual(read.get_header("Authorization"), "Bearer fake-repository-token")
-        self.assertEqual(write.get_method(), "POST")
-        self.assertEqual(write.get_header("Authorization"), "Bearer fake-dispatch-token")
-        for token in ("fake-repository-token", "fake-dispatch-token"):
-            self.assertNotIn(token, path.read_text())
-            self.assertNotIn(token, self.output.getvalue())
-            self.assertNotIn(token.encode(), write.data)
-        self.token.assert_not_called()
-
-    def test_explicit_empty_dispatch_token_never_falls_back_to_source_token(self):
-        self.select_dispatcher()
-        self.write_source()
-        for value in ("", " \t"):
-            with self.subTest(value=value):
-                self.environment["DISPATCH_TOKEN"] = value
-                with self.assertRaisesRegex(SystemExit, "dispatch-token must be non-empty"):
-                    self.execute("dispatch", [])
-                self.opener.open.assert_not_called()
-                self.token.assert_not_called()
-
-    def test_dispatcher_rejects_other_repositories_workflows_and_unsafe_pushes(self):
+    def test_source_preparation_rejects_mismatched_repositories_workflows_and_unsafe_pushes(self):
         self.select_dispatcher()
         original_environment, original_event = self.environment.copy(), copy.deepcopy(self.event)
         for change in ("repository", "workflow", "branch", "workflow_sha", "forced", "truncated"):
@@ -193,7 +131,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
                 else:
                     self.event["commits"] = []
                 with self.assertRaises(SystemExit):
-                    self.execute("prepare-dispatch", self.responses(self.project))
+                    self.execute("prepare-source", self.responses(self.project))
                 self.assertFalse((self.directory / "output.txt").exists())
                 self.assertFalse((self.directory / "issuelens-team-memory-source").exists())
                 self.token.assert_not_called()
@@ -202,13 +140,73 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.select_dispatcher()
         commits = [{"id": f"{index:040x}"} for index in range(1, action.MAX_PUSH_COMMITS)]
         self.event["commits"] = commits + [{"id": self.after}]
-        self.execute("prepare-dispatch", self.responses(self.project))
+        self.execute("prepare-source", self.responses(self.project))
         content = pathlib.Path(self.action_outputs()["source-event-path"]).read_bytes()
         self.assertLess(len(content), action.MAX_SOURCE_BYTES)
         self.assertEqual(len(json.loads(content)["event"]["commits"]), action.MAX_PUSH_COMMITS)
+        pathlib.Path(self.action_outputs()["source-event-path"]).unlink()
+        (self.directory / "output.txt").unlink()
+        self.event["commits"].append({"id": f"{action.MAX_PUSH_COMMITS:040x}"})
+        with self.assertRaisesRegex(SystemExit, "inventory"):
+            self.execute("prepare-source", self.responses(self.project))
+        self.assertFalse((self.directory / "output.txt").exists())
+
+    def test_request_owned_source_supports_develop_and_exact_unchanged_snapshot(self):
+        self.select_dispatcher()
+        repository = "example/gradle"
+        self.project.update(full_name=repository, default_branch="develop")
+        self.environment.update(
+            GITHUB_REPOSITORY=repository, GITHUB_REF="refs/heads/develop",
+            GITHUB_WORKFLOW_REF=repository + "/" + action.DISPATCH_WORKFLOW + "@refs/heads/develop",
+        )
+        self.event.update(repository={"id": 100, "full_name": repository}, ref="refs/heads/develop")
+        self.snapshot["metadata"].update(repository=repository, base_ref="develop",
+                                         workflow_ref=self.environment["GITHUB_WORKFLOW_REF"])
+        self.snapshot["event"].update(repository={"id": 100, "full_name": repository}, ref="refs/heads/develop")
+        self.execute("prepare-source", self.responses(self.project))
+        path = pathlib.Path(self.action_outputs()["source-event-path"])
+        self.assertEqual(json.loads(path.read_bytes()), self.snapshot)
+        self.assertNotIn("fake-repository-token", path.read_text())
+        self.assertNotIn("coordinator", path.read_text())
+        self.assertEqual([call.args[0].get_method() for call in self.opener.open.call_args_list], ["GET"])
+        self.token.assert_not_called()
+
+    def test_actual_prepared_artifact_round_trips_through_coordinator_validation_and_discovery(self):
+        coordinator_environment = self.environment.copy()
+        self.select_dispatcher()
+        self.execute("prepare-source", self.responses(self.project))
+        actual = pathlib.Path(self.action_outputs()["source-event-path"]).read_bytes()
+        (self.directory / "output.txt").unlink()
+        self.environment = coordinator_environment
+        self.event = {"repository": self.project}
+        self.execute("validate-source", self.source_responses())
+        (self.directory / "output.txt").unlink()
+        self.execute("preflight", self.source_responses() + self.responses(self.comparison, self.associations))
+        metadata = self.prepared_envelope()["metadata"]
+        self.assertEqual(json.loads(actual), self.snapshot)
+        self.assertEqual(metadata["push_before"], self.before)
+        self.assertEqual(metadata["push_after"], self.after)
+        self.assertEqual(metadata["source_tip_sha"], self.tip)
+        self.assertNotEqual(metadata["workflow_sha"], self.environment["GITHUB_SHA"])
+        self.assertEqual(metadata["pull_requests"][0]["merge_commit_sha"], self.merge_sha)
+        self.token.assert_not_called()
+
+    def test_obsolete_dispatch_entrypoints_are_removed(self):
+        for command in ("dispatch", "prepare-dispatch", "validate-dispatch"):
+            with self.subTest(command=command), self.assertRaisesRegex(SystemExit, "Unsupported action command"):
+                self.execute(command, [])
+            self.opener.open.assert_not_called()
+        for name in ("dispatch", "prepare_dispatch", "validate_dispatch", "dispatch_target", "validate_dispatch_target"):
+            self.assertFalse(hasattr(action, name))
+
+    def test_source_download_validation_cannot_be_used_by_other_request_adapters(self):
+        self.environment["REQUEST_TYPE"] = "task"
+        with self.assertRaisesRegex(SystemExit, "Only team-memory"):
+            self.execute("validate-source", [])
+        self.opener.open.assert_not_called()
 
     def test_verifies_run_attempt_and_artifact_before_download(self):
-        self.execute("validate-dispatch", self.source_responses())
+        self.execute("validate-source", self.source_responses())
         self.assertEqual(self.action_outputs(), {
             "automatic": "true", "source-run-id": "123456", "source-artifact-id": "456",
         })
@@ -230,7 +228,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.environment = {**original, **changes}
                 with self.assertRaises(SystemExit):
-                    self.execute("validate-dispatch", [])
+                    self.execute("validate-source", [])
                 self.opener.open.assert_not_called()
                 self.assertFalse((self.directory / "output.txt").exists())
 
@@ -246,7 +244,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.source_run = {**original, **changes}
                 with self.assertRaises(SystemExit):
-                    self.execute("validate-dispatch", self.source_responses())
+                    self.execute("validate-source", self.source_responses())
                 self.assertEqual(self.opener.open.call_count, 2)
                 self.assertFalse((self.directory / "output.txt").exists())
                 self.token.assert_not_called()
@@ -267,7 +265,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
             with self.subTest(changes=changes):
                 self.artifact = {**original, **changes}
                 with self.assertRaises(SystemExit):
-                    self.execute("validate-dispatch", self.source_responses())
+                    self.execute("validate-source", self.source_responses())
                 self.assertFalse((self.directory / "output.txt").exists())
                 self.token.assert_not_called()
 
@@ -361,7 +359,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
 
     def test_manual_pr_selection_uses_the_same_coordinator_without_source_artifacts(self):
         self.environment.update({name: "" for name in action.SOURCE_INPUTS}, DISPATCH_PR="27")
-        self.execute("validate-dispatch", self.responses(self.project))
+        self.execute("validate-source", self.responses(self.project))
         self.assertEqual(self.action_outputs(), {"automatic": "false"})
         (self.directory / "output.txt").unlink()
         self.execute("preflight", self.responses(self.project, self.pull))
@@ -407,7 +405,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
 
     def test_coordinator_preflight_revalidates_after_source_download(self):
         self.write_source()
-        self.execute("validate-dispatch", self.source_responses())
+        self.execute("validate-source", self.source_responses())
         (self.directory / "output.txt").unlink()
         self.artifact["expired"] = True
         with self.assertRaises(SystemExit):
@@ -416,223 +414,6 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.token.assert_not_called()
 
 
-class TeamMemoryGenericDispatchTests(unittest.TestCase):
-    execute = memory_tests.TeamMemoryActionTests.execute
-    action_outputs = memory_tests.TeamMemoryActionTests.action_outputs
-    responses = TeamMemoryCoordinatorTests.responses
-    write_source = TeamMemoryCoordinatorTests.write_source
-
-    def setUp(self):
-        TeamMemoryCoordinatorTests.setUp(self)
-        self.repository = "microsoft/vscode-gradle"
-        self.project.update(full_name=self.repository, default_branch="develop")
-        self.source_metadata.update(
-            repository=self.repository, base_ref="develop",
-            workflow_ref=self.repository + "/" + action.DISPATCH_WORKFLOW + "@refs/heads/develop",
-        )
-        self.push.update(repository={"id": 100, "full_name": self.repository}, ref="refs/heads/develop")
-        TeamMemoryCoordinatorTests.select_dispatcher(self)
-        self.environment.update(
-            GITHUB_REPOSITORY=self.repository, GITHUB_REF="refs/heads/develop",
-            COORDINATOR_REPOSITORY="microsoft/vscode-java-pack",
-            COORDINATOR_WORKFLOW="team-memory-coordinator.yml", COORDINATOR_REF="main",
-            DISPATCH_TOKEN="fake-dispatch-token",
-        )
-        self.target_project = {"id": 200, "full_name": "microsoft/vscode-java-pack", "default_branch": "main"}
-        self.target_workflow = {"id": 300, "path": action.COORDINATOR_WORKFLOW, "state": "active"}
-        self.target_branch = {"name": "main", "commit": {"sha": self.tip}}
-
-    def target_responses(self):
-        return self.responses(self.target_project, self.target_workflow, self.target_branch)
-
-    def acknowledgement(self, status=204):
-        response = Response(b"")
-        response.status = status
-        return response
-
-    def test_generic_artifact_preserves_exact_consumer_schema_and_full_push(self):
-        self.event["commits"][0]["message"] = "UNTRUSTED_COMMIT_TEXT"
-        self.event["repository"]["description"] = "UNTRUSTED_DESCRIPTION"
-        self.execute("prepare-dispatch", self.responses(self.project))
-        path = pathlib.Path(self.action_outputs()["source-event-path"])
-        self.assertEqual(path, self.directory / "issuelens-team-memory-source" / "source-event.json")
-        self.assertEqual(json.loads(path.read_bytes()), self.snapshot)
-        self.assertLessEqual(len(path.read_bytes()), 64 * 1024)
-        self.assertEqual([item["id"] for item in self.snapshot["event"]["commits"]], [self.merge_sha, self.after])
-        for excluded in ("UNTRUSTED", "fake-", "coordinator", "source_repository"):
-            self.assertNotIn(excluded, path.read_text())
-        self.opener.open.assert_called_once()
-        self.token.assert_not_called()
-
-    def test_cross_repo_dispatch_authenticates_target_and_keeps_develop_separate_from_main(self):
-        path = self.write_source()
-        with patch.object(action, "github_request", wraps=action.github_request) as requests:
-            self.execute("dispatch", self.responses(self.project) + self.target_responses() + [self.acknowledgement()])
-        calls = self.opener.open.call_args_list
-        self.assertEqual([call.args[0].full_url for call in calls], [
-            "https://api.github.com/repos/microsoft/vscode-gradle",
-            "https://api.github.com/repos/microsoft/vscode-java-pack",
-            "https://api.github.com/repos/microsoft/vscode-java-pack/actions/workflows/team-memory-coordinator.yml",
-            "https://api.github.com/repos/microsoft/vscode-java-pack/branches/main",
-            "https://api.github.com/repos/microsoft/vscode-java-pack/actions/workflows/team-memory-coordinator.yml/dispatches",
-        ])
-        self.assertEqual([call.kwargs["token"] for call in requests.call_args_list],
-                         [None] + [self.environment["DISPATCH_TOKEN"]] * 4)
-        self.assertEqual([call.args[0].get_method() for call in calls], ["GET"] * 4 + ["POST"])
-        self.assertTrue(all(call.kwargs["timeout"] == 30 for call in calls))
-        request = calls[-1].args[0]
-        self.assertEqual(json.loads(request.data), {
-            "ref": "main", "inputs": {
-                "source_repository": self.repository, "source_run_id": "123456",
-                "source_run_attempt": "2", "source_artifact_id": "456",
-            },
-        })
-        self.assertIsNone(self.builder.call_args.args[0].redirect_request(None, None, None, None, None, None))
-        for token in (self.environment["GH_TOKEN"], self.environment["DISPATCH_TOKEN"]):
-            self.assertNotIn(token.encode(), request.data)
-            self.assertNotIn(token, path.read_text() + self.output.getvalue())
-        self.token.assert_not_called()
-
-    def test_generic_commit_inventory_exact_limit_and_artifact_budget(self):
-        self.event["commits"] = [{"id": f"{index:040x}"} for index in range(1, action.MAX_PUSH_COMMITS)]
-        self.event["commits"].append({"id": self.after})
-        self.execute("prepare-dispatch", self.responses(self.project))
-        path = pathlib.Path(self.action_outputs()["source-event-path"])
-        content = path.read_bytes()
-        self.assertLessEqual(len(content), 64 * 1024)
-        self.assertEqual(len(json.loads(content)["event"]["commits"]), 1000)
-        (self.directory / "output.txt").unlink()
-        path.unlink()
-        self.event["commits"].append({"id": f"{action.MAX_PUSH_COMMITS:040x}"})
-        with self.assertRaisesRegex(SystemExit, "inventory"):
-            self.execute("prepare-dispatch", self.responses(self.project))
-        self.assertFalse(path.exists())
-        self.assertFalse((self.directory / "output.txt").exists())
-        self.token.assert_not_called()
-
-    def test_explicit_same_repository_target_still_uses_generic_four_input_contract(self):
-        self.environment["COORDINATOR_REPOSITORY"] = self.repository
-        self.target_project = self.project
-        self.environment["COORDINATOR_REF"] = "develop"
-        self.target_branch["name"] = "develop"
-        self.write_source()
-        self.execute("dispatch", self.responses(self.project) + self.target_responses() + [self.acknowledgement()])
-        payload = json.loads(self.opener.open.call_args.args[0].data)
-        self.assertEqual(payload["ref"], "develop")
-        self.assertEqual(payload["inputs"]["source_repository"], self.repository)
-
-    def test_target_branch_path_is_url_encoded_and_not_used_as_source_branch(self):
-        self.environment["COORDINATOR_REF"] = "release/1.0"
-        self.target_branch["name"] = "release/1.0"
-        self.write_source()
-        self.execute("dispatch", self.responses(self.project) + self.target_responses() + [self.acknowledgement()])
-        self.assertTrue(self.opener.open.call_args_list[-2].args[0].full_url.endswith("/branches/release%2F1.0"))
-        self.assertEqual(json.loads(self.opener.open.call_args.args[0].data)["ref"], "release/1.0")
-
-    def test_invalid_and_partial_targets_fail_before_reads_upload_or_dispatch(self):
-        original = self.environment.copy()
-        invalid = {
-            "COORDINATOR_REPOSITORY": ("", "https://github.com/a/b", "a/b/c", "../repo", "a/b?x", "a/b\n", "-a/b"),
-            "COORDINATOR_WORKFLOW": ("", ".github/workflows/team.yml", "../team.yml", "team.yml/dispatches",
-                                     "team.json", "team.yml?x", "team.yml\n", "team;echo.yml"),
-            "COORDINATOR_REF": ("", "refs/heads/main", "../main", "main..next", "main.lock", "main\n",
-                                "main?x", "main@{0}", "main;echo", "/main", "main//next", "main/", "x" * 256),
-        }
-        for name, values in invalid.items():
-            for value in values:
-                for command in ("prepare-dispatch", "dispatch"):
-                    with self.subTest(name=name, value=value, command=command):
-                        self.environment = {**original, name: value}
-                        with self.assertRaises(SystemExit):
-                            self.execute(command, [])
-                        self.opener.open.assert_not_called()
-                        self.token.assert_not_called()
-                        self.assertFalse((self.directory / "output.txt").exists())
-                        self.assertFalse((self.directory / "issuelens-team-memory-source").exists())
-
-    def test_target_authentication_and_identity_failures_stop_before_post(self):
-        self.write_source()
-        cases = [
-            ([{**self.target_project, "full_name": "other/repo"}], 2),
-            ([{**self.target_project, "id": True}], 2),
-            ([self.target_project, {**self.target_workflow, "path": ".github/workflows/other.yml"}], 3),
-            ([self.target_project, {**self.target_workflow, "state": "disabled_manually"}], 3),
-            ([self.target_project, self.target_workflow, {**self.target_branch, "name": "develop"}], 4),
-            ([self.target_project, self.target_workflow, {"name": "main", "commit": {"sha": "short"}}], 4),
-        ]
-        for values, count in cases:
-            with self.subTest(values=values):
-                with self.assertRaises(SystemExit):
-                    self.execute("dispatch", self.responses(self.project, *values))
-                self.assertEqual(self.opener.open.call_count, count)
-                self.assertTrue(all(call.args[0].get_method() == "GET" for call in self.opener.open.call_args_list))
-        for status in (302, 403, 404, 500):
-            with self.subTest(status=status):
-                failure = urllib.error.HTTPError("https://api.github.com", status, "PRIVATE DETAIL", {}, None)
-                with self.assertRaises(SystemExit) as raised:
-                    self.execute("dispatch", self.responses(self.project) + [failure])
-                self.assertNotIn("PRIVATE DETAIL", str(raised.exception))
-                self.assertEqual(self.opener.open.call_count, 2)
-                self.token.assert_not_called()
-
-    def test_dispatch_revalidates_source_snapshot_before_target_reads_or_writes(self):
-        original_snapshot, original_environment = copy.deepcopy(self.snapshot), self.environment.copy()
-        for change in ("workflow_sha", "workflow_path", "branch", "repository", "metadata", "body",
-                       "created", "deleted", "forced", "duplicate", "truncated", "inventory_limit", "oversized"):
-            with self.subTest(change=change):
-                self.snapshot, self.environment = copy.deepcopy(original_snapshot), original_environment.copy()
-                if change == "workflow_sha":
-                    self.environment["GITHUB_WORKFLOW_SHA"] = self.tip
-                elif change == "workflow_path":
-                    self.environment["GITHUB_WORKFLOW_REF"] = self.repository + "/.github/workflows/other.yml@refs/heads/develop"
-                elif change == "branch":
-                    self.environment["GITHUB_REF"] = "refs/heads/main"
-                elif change == "repository":
-                    self.snapshot["event"]["repository"]["id"] = 101
-                elif change == "metadata":
-                    self.snapshot["metadata"]["run_attempt"] = True
-                elif change == "body":
-                    self.snapshot["event"]["commits"][0]["message"] = "UNTRUSTED"
-                elif change in ("created", "deleted", "forced"):
-                    self.snapshot["event"][change] = True
-                elif change == "duplicate":
-                    self.snapshot["event"]["commits"].append({"id": self.after})
-                elif change == "truncated":
-                    self.snapshot["event"]["commits"] = []
-                elif change == "inventory_limit":
-                    self.snapshot["event"]["commits"] *= action.MAX_PUSH_COMMITS
-                self.write_source(b"x" * (action.MAX_SOURCE_BYTES + 1) if change == "oversized" else None)
-                with self.assertRaises(SystemExit):
-                    self.execute("dispatch", self.responses(self.project))
-                self.assertLessEqual(self.opener.open.call_count, 1)
-                self.assertTrue(all(call.args[0].get_method() == "GET" for call in self.opener.open.call_args_list))
-                self.token.assert_not_called()
-
-    def test_empty_tokens_and_invalid_artifact_ids_never_dispatch(self):
-        original = self.environment.copy()
-        self.write_source()
-        for changes in ({"GH_TOKEN": ""}, {"DISPATCH_TOKEN": ""}, {"DISPATCH_TOKEN": " \t"},
-                        {"SOURCE_ARTIFACT_ID": "0"}, {"SOURCE_ARTIFACT_ID": "1;echo"}, {"SOURCE_ARTIFACT_ID": "01"}):
-            with self.subTest(changes=changes):
-                self.environment = {**original, **changes}
-                with self.assertRaises(SystemExit):
-                    self.execute("dispatch", self.responses(self.project))
-                self.assertLessEqual(self.opener.open.call_count, 1)
-                self.token.assert_not_called()
-
-    def test_unacknowledged_or_unknown_generic_dispatch_is_not_retried(self):
-        self.write_source()
-        for response in (self.acknowledgement(202), self.acknowledgement(302), OSError("PRIVATE DETAIL"),
-                         urllib.error.HTTPError("https://api.github.com", 403, "PRIVATE DETAIL", {}, None)):
-            with self.subTest(response=response):
-                with self.assertRaises(SystemExit) as raised:
-                    self.execute("dispatch", self.responses(self.project) + self.target_responses() + [response])
-                self.assertNotIn("PRIVATE DETAIL", str(raised.exception))
-                self.assertEqual(self.opener.open.call_count, 5)
-                self.assertEqual(sum(call.args[0].get_method() == "POST"
-                                     for call in self.opener.open.call_args_list), 1)
-                self.assertNotIn("accepted", self.output.getvalue())
-                self.token.assert_not_called()
 
 
 if __name__ == "__main__":

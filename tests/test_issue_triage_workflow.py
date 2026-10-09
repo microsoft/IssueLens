@@ -29,7 +29,9 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertIn("github.event.comment.user.type == 'User'", gate)
         self.assertIn("github.event.repository.default_branch", gate)
         metadata = yaml.load((action_tests.ACTION_DIR / "action.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
-        preflight, login, submit = metadata["runs"]["steps"]
+        verify, download, preflight, login, submit = metadata["runs"]["steps"]
+        self.assertIn("inputs.request-type == 'team-memory'", verify["if"])
+        self.assertEqual(download["if"], "steps.source.outputs.automatic == 'true'")
         self.assertEqual(preflight["id"], "preflight")
         for step in (login, submit):
             self.assertEqual(step["if"], "steps.preflight.outputs.eligible == 'true'")
