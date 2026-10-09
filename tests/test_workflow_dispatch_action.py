@@ -103,9 +103,10 @@ class WorkflowDispatchTests(unittest.TestCase):
 
     def test_same_repo_pilot_and_cross_repo_job_payloads_are_caller_owned(self):
         cases = [
-            ("example/central", {"source_run_id": "123456", "source_run_attempt": "2", "source_artifact_id": "456"}),
+            ("example/central", {"source_run_id": "123456", "source_run_attempt": "2",
+                                 "push_before": "a" * 40, "push_after": "b" * 40}),
             ("example/source", {"source_repository": "example/source", "source_run_id": "123456",
-                                "source_run_attempt": "2", "source_artifact_id": "456"}),
+                                "source_run_attempt": "2", "push_before": "a" * 40, "push_after": "b" * 40}),
             ("unrelated/source", {"pull_request_number": "27"}),
         ]
         for source, inputs in cases:

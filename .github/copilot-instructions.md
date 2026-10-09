@@ -318,29 +318,38 @@ trusted event metadata. Per-issue concurrency allows different issues to run
 independently while coalescing bursts for the same issue.
 
 Team-memory postmerge orchestration in this repository uses two opt-in workflows:
-`.github/workflows/team-memory-post-merge.yml` uses the request-owned
-`issuelens_action.py prepare-source` helper to validate the default-branch push,
-then a pinned uploader preserves its bounded identity-only artifact for seven
-days. Original before/after and all commit IDs remain explicit; the source run
-API alone does not establish the original before range. It then calls the
-standalone generic `.github/actions/queue-team-memory` action to dispatch
-`.github/workflows/team-memory-coordinator.yml` with its unchanged three-ID
-payload in caller-supplied `workflow-inputs` JSON. The dispatcher owns only
+`.github/workflows/team-memory-post-merge.yml` calls the pinned standalone
+generic `.github/actions/queue-team-memory` action with source repository,
+run/attempt, and requested before/after SHAs in `workflow-inputs` JSON.
+It needs no checkout, preparation script, or artifact. The source workflow
+rejects unsafe push flags and mismatched workflow/head SHAs.
+The dispatcher sends `.github/workflows/team-memory-coordinator.yml` one
+bounded reconciliation request and owns only
 validated target dispatch: its own `dispatch.py`, no sibling action imports,
 source preparation, artifacts, agent calls, wiki policy, or job authorization.
 Its `coordinator-repository` defaults to the caller repository,
 `coordinator-workflow` requires a YAML basename, and `coordinator-ref` defaults
 to the calling branch, independent of any source default branch. Its target
-token requires Contents read and Actions write; source preparation independently
-uses a source read token. Target inputs and credentials grant no new access.
+token requires Contents read and Actions write. The invocation action separately
+uses `source-github-token` for source Contents, Actions and Pull requests reads.
+Target inputs and credentials grant no new access.
 The central coordinator owns the actual concurrency queue and only calls
 `.github/actions/issuelens` after trusted sparse checkout. The invocation action
-owns source/workflow allowlists, verification before pinned digest-checked
-download, revalidation/discovery before OIDC login, policy/privacy, and final
-outcomes. Its IssueLens coordinated adapter stays pilot-scoped; direct external
-action callers retain their request behavior. Dispatch no longer prepares or
-uploads artifacts or infers source fields. Java Pack's older immutable pin stays
+owns source/workflow validation, current default-branch ancestry, full paginated
+range/PR discovery before OIDC login, policy/privacy, and final outcomes.
+The trusted coordinator workflow may configure `source-repositories`, a bounded
+canonical-name-to-numeric-ID JSON map; never populate it from dispatch inputs.
+Cross-repository sources and coordinators must both be public.
+The IssueLens workflow leaves that map empty, permitting only its own source.
+Direct external action callers retain their request behavior.
+No action prepares or downloads a source artifact. Java Pack's older immutable pin stays
 unchanged and needs a separately authorized consumer migration.
+The coordinated range is authorized reconciliation, not original-event proof:
+the run API verifies after/head but cannot attest original before or push flags.
+Preserve this explicit limitation in the request. Do not manufacture a push
+event, substitute the coordinator head, or infer no-change from missing pages.
+At most 1,000 complete unique commit IDs are retrieved in pages of 100;
+divergent ranges, incomplete inventories, and ref races fail before login.
 Explicit single-PR manual requests use the coordinator instead of source IDs.
 The shared composite action in `.github/actions/issuelens`
 owns preflight, pinned Azure OIDC login, and submission through a standalone
@@ -377,8 +386,8 @@ retaining its per-PR response and any confirmed wiki publication, never implying
 that no write occurred. The batch schema remains caller-owned.
 Ambiguous agent submissions and workflow dispatches are not retried
 automatically. A timeout or cancellation does not prove the hosted invocation
-stopped; the queue is not a distributed runtime lock. Monitor overflow,
-expired artifacts, and failed/canceled runs. Git provides knowledge, history, and conflict
+stopped; the queue is not a distributed runtime lock. Monitor overflow
+and failed/canceled runs. Git provides knowledge, history, and conflict
 detection, not a durable job queue or guaranteed exactly-once delivery. Local
 tests do not establish live OIDC federation, hosted writer dispatch, or publication.
 

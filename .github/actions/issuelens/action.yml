@@ -14,23 +14,39 @@ inputs:
     required: false
     default: ''
   github-token:
-    description: Caller repository read token; issue-loop dispatch needs Issues read, team-memory needs Pull requests read, coordinated requests also need Actions read.
+    description: Caller repository read token; issue-loop needs Issues read and team-memory needs Contents and Pull requests read.
     required: false
     default: ${{ github.token }}
   pull-request-number:
     description: Merged PR number for manually dispatched team-memory requests.
     required: false
     default: ''
+  source-repository:
+    description: Canonical source owner/repository for coordinated reconciliation; defaults to the caller repository.
+    required: false
+    default: ''
+  source-repositories:
+    description: Trusted coordinator configuration mapping allowed source owner/repository names to numeric repository IDs; never forward dispatched inputs here.
+    required: false
+    default: '{}'
+  source-github-token:
+    description: Independent source read token for coordinated requests (Contents, Actions and Pull requests read); cross-repository callers supply source-scoped access.
+    required: false
+    default: ${{ github.token }}
   source-run-id:
-    description: Verified source push run for the IssueLens coordinator; do not combine with pull-request-number.
+    description: Source default-branch push run for reconciliation; requires attempt and before/after, not pull-request-number.
     required: false
     default: ''
   source-run-attempt:
     description: Source push run attempt; required with source-run-id.
     required: false
     default: ''
-  source-artifact-id:
-    description: Immutable identity-only source artifact; required with source-run-id.
+  push-before:
+    description: Full nonzero ancestor SHA selecting the requested reconciliation range; not an attested original push boundary.
+    required: false
+    default: ''
+  push-after:
+    description: Full nonzero source run head SHA ending the requested reconciliation range.
     required: false
     default: ''
   azure-client-id:
@@ -83,46 +99,23 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Validate coordinated team-memory source
-      id: source
-      if: >-
-        inputs.request-type == 'team-memory' &&
-        (inputs.source-run-id != '' || inputs.source-run-attempt != '' || inputs.source-artifact-id != '')
-      shell: bash
-      env:
-        GITHUB_ACTION_PATH: ${{ github.action_path }}
-        GH_TOKEN: ${{ inputs.github-token }}
-        REQUEST_TYPE: ${{ inputs.request-type }}
-        SOURCE_RUN_ID: ${{ inputs.source-run-id }}
-        SOURCE_RUN_ATTEMPT: ${{ inputs.source-run-attempt }}
-        SOURCE_ARTIFACT_ID: ${{ inputs.source-artifact-id }}
-        DISPATCH_PR: ${{ inputs.pull-request-number }}
-      run: python3 -I "$GITHUB_ACTION_PATH/issuelens_action.py" validate-source
-
-    - name: Download verified team-memory source
-      if: steps.source.outputs.automatic == 'true'
-      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-      with:
-        artifact-ids: ${{ steps.source.outputs.source-artifact-id }}
-        run-id: ${{ steps.source.outputs.source-run-id }}
-        repository: ${{ github.repository }}
-        github-token: ${{ inputs.github-token }}
-        path: ${{ runner.temp }}/issuelens-team-memory-source
-        digest-mismatch: error
-
     - name: Prepare and validate request
       id: preflight
       shell: bash
       env:
         GITHUB_ACTION_PATH: ${{ github.action_path }}
         GH_TOKEN: ${{ inputs.github-token }}
+        SOURCE_GH_TOKEN: ${{ inputs.source-github-token }}
+        SOURCE_REPOSITORY: ${{ inputs.source-repository }}
+        SOURCE_REPOSITORIES: ${{ inputs.source-repositories }}
         REQUEST_TYPE: ${{ inputs.request-type }}
         TASK_INPUT: ${{ inputs.input }}
         ISSUE_NUMBER: ${{ inputs.issue-number }}
         DISPATCH_PR: ${{ inputs.pull-request-number }}
         SOURCE_RUN_ID: ${{ inputs.source-run-id }}
         SOURCE_RUN_ATTEMPT: ${{ inputs.source-run-attempt }}
-        SOURCE_ARTIFACT_ID: ${{ inputs.source-artifact-id }}
+        PUSH_BEFORE: ${{ inputs.push-before }}
+        PUSH_AFTER: ${{ inputs.push-after }}
         OUTPUT_MODE: ${{ inputs.output-mode }}
         SUMMARY_MODE: ${{ inputs.summary-mode }}
       run: python3 -I "$GITHUB_ACTION_PATH/issuelens_action.py" preflight

@@ -38,28 +38,27 @@ permissions, or grant the receiving job authorization.
 
 ## Team-Memory Usage
 
-The source workflow owns request-specific evidence preparation and artifact
-upload **before** this action. In IssueLens,
-[team-memory-post-merge.yml](../../workflows/team-memory-post-merge.yml) loads
-trusted code at `github.workflow_sha` with credentials not persisted, calls the
-request-owned `issuelens_action.py prepare-source` helper with a source read
-token, and uploads its sanitized identity-only push artifact with a pinned
-uploader. The artifact retains original `before`, `after`, and all commit IDs;
-the source run API alone cannot recover the original push range. The
-[invocation action](../issuelens/README.md#issuelens-coordinator-pilot) owns the
-artifact schema and the receiving validation/download contract.
+In IssueLens, [team-memory-post-merge.yml](../../workflows/team-memory-post-merge.yml)
+calls this action with only repository, run/attempt, and requested before/after
+SHAs. No checkout, preparation script, or artifact is needed. The
+[invocation action](../issuelens/README.md#issuelens-coordinator-pilot) validates
+allowed source identity, the authoritative run and current branch ancestry,
+then retrieves the complete requested commit range centrally.
+The request authorizes reconciliation; it does not attest original `before`,
+which the source run API cannot recover.
 
 A pinned remote dispatch action needs no caller checkout. Replace
 `FULL_COMMIT_SHA` with a reviewed full commit SHA; this is not a published version.
-After preparation/upload, the IssueLens pilot supplies its unchanged three-ID
-payload to its same-repository coordinator:
+The IssueLens pilot supplies its five-field reconciliation request to its
+same-repository coordinator:
 
 ```yaml
 - name: Queue team-memory request
   uses: microsoft/IssueLens/.github/actions/queue-team-memory@FULL_COMMIT_SHA
   with:
     coordinator-workflow: team-memory-coordinator.yml
-    workflow-inputs: '{"source_run_id":"${{ github.run_id }}", "source_run_attempt":"${{ github.run_attempt }}", "source_artifact_id":"${{ steps.artifact.outputs.artifact-id }}"}'
+    coordinator-ref: main
+    workflow-inputs: '{"source_repository":"${{ github.repository }}", "source_run_id":"${{ github.run_id }}", "source_run_attempt":"${{ github.run_attempt }}", "push_before":"${{ github.event.before }}", "push_after":"${{ github.sha }}"}'
 ```
 
 For a source using `develop` and a central coordinator using `main`, set the
@@ -73,15 +72,16 @@ target ref independently and supply the receiving coordinator's own payload:
     coordinator-repository: microsoft/vscode-java-pack
     coordinator-workflow: team-memory-coordinator.yml
     coordinator-ref: main
-    workflow-inputs: '{"source_repository":"${{ github.repository }}", "source_run_id":"${{ github.run_id }}", "source_run_attempt":"${{ github.run_attempt }}", "source_artifact_id":"${{ steps.artifact.outputs.artifact-id }}"}'
+    workflow-inputs: '{"source_repository":"${{ github.repository }}", "source_run_id":"${{ github.run_id }}", "source_run_attempt":"${{ github.run_attempt }}", "push_before":"${{ github.event.before }}", "push_after":"${{ github.sha }}"}'
 ```
 
 The second example is a later consumer migration contract, not enablement or
-a change to Java Pack. The caller authenticates/prepares its source separately
-from this target-only action. Receivers own source/workflow allowlists,
-run/attempt/artifact provenance and digest checks, privacy/wiki scope, the
-central queue, and final maintenance validation. Arbitrary dispatch input
-claims are not trusted provenance or write authorization.
+a change to Java Pack. Configure the source workflow to reject created/deleted/
+forced pushes and mismatched workflow/head SHAs. The receiving coordinator owns
+the trusted source-name/ID allowlist, independent source-read credentials,
+run/head and complete-range validation, privacy/wiki scope, queue, and final
+maintenance validation. Never forward dispatch inputs into the source allowlist.
+Arbitrary input claims are not trusted provenance or new write authorization.
 
 ## Transport and Outcomes
 

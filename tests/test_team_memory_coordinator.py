@@ -1,7 +1,9 @@
 import copy
 import json
+import os
 import pathlib
 import unittest
+from unittest.mock import patch
 
 import test_team_memory_workflow as memory_tests
 
@@ -20,47 +22,33 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
     def setUp(self):
         memory_tests.TeamMemoryActionTests.setUp(self)
         self.repository = "microsoft/IssueLens"
-        self.project["full_name"] = self.repository
+        self.project.update(full_name=self.repository, visibility="public")
         self.before, self.after, self.tip = "d" * 40, "e" * 40, "f" * 40
         self.environment.update(
             GITHUB_REPOSITORY=self.repository, GITHUB_EVENT_NAME="workflow_dispatch",
             GITHUB_SHA=self.tip, GITHUB_RUN_ID="999",
             GITHUB_WORKFLOW_REF=self.repository + "/" + action.COORDINATOR_WORKFLOW + "@refs/heads/main",
-            SOURCE_RUN_ID="123456", SOURCE_RUN_ATTEMPT="2", SOURCE_ARTIFACT_ID="456",
-            DISPATCH_PR="",
+            SOURCE_REPOSITORY=self.repository, SOURCE_REPOSITORIES="{}",
+            SOURCE_GH_TOKEN="fake-source-token", SOURCE_RUN_ID="123456", SOURCE_RUN_ATTEMPT="2",
+            PUSH_BEFORE=self.before, PUSH_AFTER=self.after, DISPATCH_PR="",
         )
         self.event = {"repository": self.project}
+        self.source_project = self.project
         self.source_run = {
             "id": 123456, "run_attempt": 2, "event": "push", "path": action.DISPATCH_WORKFLOW,
             "head_branch": "main", "head_sha": self.after,
             "repository": self.project, "head_repository": self.project,
             "actor": {"login": "maintainer"}, "triggering_actor": {"login": "rerunner"},
         }
-        self.artifact = {
-            "id": 456, "name": "issuelens-team-memory-source-2", "expired": False, "size_in_bytes": 2048,
-            "digest": "sha256:" + "1" * 64,
-            "workflow_run": {
-                "id": 123456, "repository_id": 100, "head_repository_id": 100,
-                "head_branch": "main", "head_sha": self.after,
-            },
-        }
-        self.push = {
-            "repository": {"id": 100, "full_name": self.repository}, "ref": "refs/heads/main",
-            "before": self.before, "after": self.after, "created": False, "deleted": False, "forced": False,
-            "commits": [{"id": self.merge_sha}, {"id": self.after}], "head_commit": {"id": self.after},
-        }
-        self.source_metadata = {
-            "repository": self.repository, "repository_id": 100, "base_ref": "main",
-            "event_name": "push", "event_action": "push",
-            "actor_login": "maintainer", "triggering_actor": "rerunner",
-            "workflow_ref": self.repository + "/" + action.DISPATCH_WORKFLOW + "@refs/heads/main",
-            "workflow_sha": self.after, "run_id": 123456, "run_attempt": 2,
-        }
-        self.snapshot = {"metadata": self.source_metadata, "event": self.push}
+        self.branch = {"name": "main", "commit": {"sha": self.tip}}
         self.comparison = {
             "base_commit": {"sha": self.before}, "merge_base_commit": {"sha": self.before},
             "status": "ahead", "ahead_by": 2, "behind_by": 0, "total_commits": 2,
-            "commits": [{"sha": self.after}],
+            "commits": [{"sha": self.merge_sha}, {"sha": self.after}],
+        }
+        self.ancestry = {
+            "base_commit": {"sha": self.after}, "merge_base_commit": {"sha": self.after},
+            "status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
         }
         node = {
             "number": 27, "state": "MERGED", "merged": True, "mergedAt": self.pull["merged_at"],
@@ -80,198 +68,28 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         return [Response(json.dumps(value).encode()) for value in values]
 
     def source_responses(self):
-        return self.responses(self.project, self.source_run, self.artifact)
+        values = [self.project]
+        if self.source_project is not self.project:
+            values.append(self.source_project)
+        return self.responses(*values, self.source_run, self.branch, self.ancestry)
 
-    def write_source(self, content=None):
-        path = self.directory / "issuelens-team-memory-source" / "source-event.json"
-        path.parent.mkdir(exist_ok=True)
-        path.write_bytes(json.dumps(self.snapshot).encode() if content is None else content)
-        return path
+    def preflight_responses(self):
+        return self.source_responses() + self.responses(self.comparison, self.associations)
 
-    def select_dispatcher(self):
-        self.environment.update(
-            GITHUB_EVENT_NAME="push", GITHUB_SHA=self.after, GITHUB_WORKFLOW_SHA=self.after,
-            GITHUB_WORKFLOW_REF=self.source_metadata["workflow_ref"], GITHUB_RUN_ID="123456",
-        )
-        self.environment.pop("SOURCE_RUN_ID")
-        self.environment.pop("SOURCE_RUN_ATTEMPT")
-        self.event = copy.deepcopy(self.push)
+    def select_cross_repository(self):
+        self.source_project = {"id": 200, "full_name": "example/gradle", "default_branch": "develop", "visibility": "public"}
+        self.environment.update(SOURCE_REPOSITORY="example/gradle", SOURCE_REPOSITORIES='{"example/gradle":200}')
+        self.source_run.update(repository=self.source_project, head_repository=self.source_project, head_branch="develop")
+        self.branch["name"] = "develop"
+        target = self.associations["data"]["repository"]
+        target.update(databaseId=200, nameWithOwner="example/gradle")
+        target["defaultBranchRef"]["name"] = "develop"
+        for name in ("c0", "c1"):
+            node = target[name]["associatedPullRequests"]["nodes"][0]
+            node.update(baseRefName="develop", baseRepository={"databaseId": 200, "nameWithOwner": "example/gradle"})
 
-    def test_dispatcher_preserves_only_identities_and_never_invokes_foundry(self):
-        self.select_dispatcher()
-        self.event["commits"][0]["message"] = "UNTRUSTED_COMMIT_TEXT"
-        self.event["head_commit"]["message"] = "UNTRUSTED_HEAD_TEXT"
-        self.event["repository"]["description"] = "UNTRUSTED_REPOSITORY_TEXT"
-        self.execute("prepare-source", self.responses(self.project))
-        path = pathlib.Path(self.action_outputs()["source-event-path"])
-        snapshot = json.loads(path.read_bytes())
-        self.assertEqual(snapshot, self.snapshot)
-        self.assertNotIn("UNTRUSTED", path.read_text())
-        self.assertNotIn("fake-repository-token", path.read_text())
-        self.assertEqual(path.name, "source-event.json")
-        self.assertEqual(self.opener.open.call_count, 1)
-        self.token.assert_not_called()
-
-    def test_source_preparation_rejects_mismatched_repositories_workflows_and_unsafe_pushes(self):
-        self.select_dispatcher()
-        original_environment, original_event = self.environment.copy(), copy.deepcopy(self.event)
-        for change in ("repository", "workflow", "branch", "workflow_sha", "forced", "truncated"):
-            with self.subTest(change=change):
-                self.environment, self.event = original_environment.copy(), copy.deepcopy(original_event)
-                if change == "repository":
-                    self.environment["GITHUB_REPOSITORY"] = "microsoft/vscode-java-pack"
-                elif change == "workflow":
-                    self.environment["GITHUB_WORKFLOW_REF"] = self.repository + "/.github/workflows/untrusted.yml@refs/heads/main"
-                elif change == "branch":
-                    self.environment["GITHUB_REF"] = "refs/heads/untrusted"
-                elif change == "workflow_sha":
-                    self.environment["GITHUB_WORKFLOW_SHA"] = "b" * 40
-                elif change == "forced":
-                    self.event["forced"] = True
-                else:
-                    self.event["commits"] = []
-                with self.assertRaises(SystemExit):
-                    self.execute("prepare-source", self.responses(self.project))
-                self.assertFalse((self.directory / "output.txt").exists())
-                self.assertFalse((self.directory / "issuelens-team-memory-source").exists())
-                self.token.assert_not_called()
-
-    def test_maximum_commit_inventory_fits_the_identity_artifact_budget(self):
-        self.select_dispatcher()
-        commits = [{"id": f"{index:040x}"} for index in range(1, action.MAX_PUSH_COMMITS)]
-        self.event["commits"] = commits + [{"id": self.after}]
-        self.execute("prepare-source", self.responses(self.project))
-        content = pathlib.Path(self.action_outputs()["source-event-path"]).read_bytes()
-        self.assertLess(len(content), action.MAX_SOURCE_BYTES)
-        self.assertEqual(len(json.loads(content)["event"]["commits"]), action.MAX_PUSH_COMMITS)
-        pathlib.Path(self.action_outputs()["source-event-path"]).unlink()
-        (self.directory / "output.txt").unlink()
-        self.event["commits"].append({"id": f"{action.MAX_PUSH_COMMITS:040x}"})
-        with self.assertRaisesRegex(SystemExit, "inventory"):
-            self.execute("prepare-source", self.responses(self.project))
-        self.assertFalse((self.directory / "output.txt").exists())
-
-    def test_request_owned_source_supports_develop_and_exact_unchanged_snapshot(self):
-        self.select_dispatcher()
-        repository = "example/gradle"
-        self.project.update(full_name=repository, default_branch="develop")
-        self.environment.update(
-            GITHUB_REPOSITORY=repository, GITHUB_REF="refs/heads/develop",
-            GITHUB_WORKFLOW_REF=repository + "/" + action.DISPATCH_WORKFLOW + "@refs/heads/develop",
-        )
-        self.event.update(repository={"id": 100, "full_name": repository}, ref="refs/heads/develop")
-        self.snapshot["metadata"].update(repository=repository, base_ref="develop",
-                                         workflow_ref=self.environment["GITHUB_WORKFLOW_REF"])
-        self.snapshot["event"].update(repository={"id": 100, "full_name": repository}, ref="refs/heads/develop")
-        self.execute("prepare-source", self.responses(self.project))
-        path = pathlib.Path(self.action_outputs()["source-event-path"])
-        self.assertEqual(json.loads(path.read_bytes()), self.snapshot)
-        self.assertNotIn("fake-repository-token", path.read_text())
-        self.assertNotIn("coordinator", path.read_text())
-        self.assertEqual([call.args[0].get_method() for call in self.opener.open.call_args_list], ["GET"])
-        self.token.assert_not_called()
-
-    def test_actual_prepared_artifact_round_trips_through_coordinator_validation_and_discovery(self):
-        coordinator_environment = self.environment.copy()
-        self.select_dispatcher()
-        self.execute("prepare-source", self.responses(self.project))
-        actual = pathlib.Path(self.action_outputs()["source-event-path"]).read_bytes()
-        (self.directory / "output.txt").unlink()
-        self.environment = coordinator_environment
-        self.event = {"repository": self.project}
-        self.execute("validate-source", self.source_responses())
-        (self.directory / "output.txt").unlink()
-        self.execute("preflight", self.source_responses() + self.responses(self.comparison, self.associations))
-        metadata = self.prepared_envelope()["metadata"]
-        self.assertEqual(json.loads(actual), self.snapshot)
-        self.assertEqual(metadata["push_before"], self.before)
-        self.assertEqual(metadata["push_after"], self.after)
-        self.assertEqual(metadata["source_tip_sha"], self.tip)
-        self.assertNotEqual(metadata["workflow_sha"], self.environment["GITHUB_SHA"])
-        self.assertEqual(metadata["pull_requests"][0]["merge_commit_sha"], self.merge_sha)
-        self.token.assert_not_called()
-
-    def test_obsolete_dispatch_entrypoints_are_removed(self):
-        for command in ("dispatch", "prepare-dispatch", "validate-dispatch"):
-            with self.subTest(command=command), self.assertRaisesRegex(SystemExit, "Unsupported action command"):
-                self.execute(command, [])
-            self.opener.open.assert_not_called()
-        for name in ("dispatch", "prepare_dispatch", "validate_dispatch", "dispatch_target", "validate_dispatch_target"):
-            self.assertFalse(hasattr(action, name))
-
-    def test_source_download_validation_cannot_be_used_by_other_request_adapters(self):
-        self.environment["REQUEST_TYPE"] = "task"
-        with self.assertRaisesRegex(SystemExit, "Only team-memory"):
-            self.execute("validate-source", [])
-        self.opener.open.assert_not_called()
-
-    def test_verifies_run_attempt_and_artifact_before_download(self):
-        self.execute("validate-source", self.source_responses())
-        self.assertEqual(self.action_outputs(), {
-            "automatic": "true", "source-run-id": "123456", "source-artifact-id": "456",
-        })
-        self.assertEqual([call.args[0].full_url for call in self.opener.open.call_args_list], [
-            "https://api.github.com/repos/microsoft/IssueLens",
-            "https://api.github.com/repos/microsoft/IssueLens/actions/runs/123456/attempts/2",
-            "https://api.github.com/repos/microsoft/IssueLens/actions/artifacts/456",
-        ])
-        self.token.assert_not_called()
-
-    def test_invalid_or_mixed_source_inputs_fail_before_network(self):
-        original = self.environment.copy()
-        cases = [
-            {"SOURCE_RUN_ID": ""}, {"SOURCE_RUN_ATTEMPT": ""}, {"SOURCE_ARTIFACT_ID": ""},
-            {"SOURCE_RUN_ID": "1; echo unsafe"}, {"SOURCE_RUN_ATTEMPT": "0"}, {"SOURCE_ARTIFACT_ID": "01"},
-            {"DISPATCH_PR": "27"}, {name: "" for name in action.SOURCE_INPUTS},
-        ]
-        for changes in cases:
-            with self.subTest(changes=changes):
-                self.environment = {**original, **changes}
-                with self.assertRaises(SystemExit):
-                    self.execute("validate-source", [])
-                self.opener.open.assert_not_called()
-                self.assertFalse((self.directory / "output.txt").exists())
-
-    def test_forged_source_runs_fail_before_artifact_download_or_login(self):
-        original = copy.deepcopy(self.source_run)
-        cases = [
-            {"id": 123457}, {"run_attempt": 1}, {"event": "pull_request"},
-            {"path": ".github/workflows/untrusted.yml"}, {"head_branch": "untrusted"},
-            {"head_sha": "short"}, {"repository": {**self.project, "id": 101}},
-            {"head_repository": {**self.project, "id": 101}}, {"actor": {"login": "unsafe\nactor"}},
-        ]
-        for changes in cases:
-            with self.subTest(changes=changes):
-                self.source_run = {**original, **changes}
-                with self.assertRaises(SystemExit):
-                    self.execute("validate-source", self.source_responses())
-                self.assertEqual(self.opener.open.call_count, 2)
-                self.assertFalse((self.directory / "output.txt").exists())
-                self.token.assert_not_called()
-
-    def test_foreign_expired_or_oversized_artifacts_fail_closed(self):
-        original = copy.deepcopy(self.artifact)
-        cases = [
-            {"id": 457}, {"name": "issuelens-team-memory-source-1"}, {"expired": True},
-            {"digest": None}, {"digest": "short"},
-            {"size_in_bytes": 0}, {"size_in_bytes": True}, {"size_in_bytes": action.MAX_SOURCE_BYTES + 1},
-            {"workflow_run": {**original["workflow_run"], "id": 123457}},
-            {"workflow_run": {**original["workflow_run"], "repository_id": 101}},
-            {"workflow_run": {**original["workflow_run"], "head_repository_id": 101}},
-            {"workflow_run": {**original["workflow_run"], "head_branch": "untrusted"}},
-            {"workflow_run": {**original["workflow_run"], "head_sha": self.tip}},
-        ]
-        for changes in cases:
-            with self.subTest(changes=changes):
-                self.artifact = {**original, **changes}
-                with self.assertRaises(SystemExit):
-                    self.execute("validate-source", self.source_responses())
-                self.assertFalse((self.directory / "output.txt").exists())
-                self.token.assert_not_called()
-
-    def test_queued_push_uses_original_inventory_not_coordinator_head(self):
-        self.write_source()
-        self.execute("preflight", self.source_responses() + self.responses(self.comparison, self.associations))
+    def test_queued_range_preserves_source_identity_not_coordinator_head(self):
+        self.execute("preflight", self.preflight_responses())
         envelope = self.prepared_envelope()
         metadata = envelope["metadata"]
         self.assertEqual(metadata["event_name"], "push")
@@ -284,57 +102,229 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.assertEqual(metadata["required_wiki_repository"], self.repository)
         self.assertEqual(metadata["pull_requests"][0]["merge_commit_sha"], self.merge_sha)
         self.assertEqual(len(metadata["pull_requests"]), 1)
-        self.assertIn("before writing", envelope["request"]["input"])
+        self.assertEqual(metadata["range_origin"], "authorized-reconciliation")
+        self.assertIn("not an attestation of the original push boundary", envelope["request"]["input"])
+        self.assertNotIn("fake-source-token", json.dumps(envelope))
         self.assertNotIn("fake-repository-token", json.dumps(envelope))
+        self.assertFalse((self.directory / "issuelens-team-memory-source").exists())
+        calls = self.opener.open.call_args_list
+        self.assertEqual(calls[0].args[0].get_header("Authorization"), "Bearer fake-repository-token")
+        for call in calls[1:]:
+            self.assertEqual(call.args[0].get_header("Authorization"), "Bearer fake-source-token")
+            self.assertEqual(call.kwargs["timeout"], 30)
+        self.assertIn("/attempts/2", calls[1].args[0].full_url)
+        self.assertIn(f"/compare/{self.before}...{self.after}?per_page=100&page=1", calls[4].args[0].full_url)
         self.token.assert_not_called()
 
-    def test_source_snapshot_mismatch_missing_file_and_size_fail_before_discovery(self):
-        original = copy.deepcopy(self.snapshot)
-        for mutation in ("metadata", "head", "body", "forced", "oversized", "missing"):
-            with self.subTest(mutation=mutation):
-                self.snapshot = copy.deepcopy(original)
-                if mutation == "metadata":
-                    self.snapshot["metadata"]["run_attempt"] = 1
-                elif mutation == "head":
-                    self.snapshot["event"]["after"] = self.tip
-                elif mutation == "body":
-                    self.snapshot["event"]["commits"][0]["message"] = "UNTRUSTED"
-                elif mutation == "forced":
-                    self.snapshot["event"]["forced"] = True
-                path = self.write_source(b"x" * (action.MAX_SOURCE_BYTES + 1) if mutation == "oversized" else None)
-                if mutation == "missing":
-                    path.unlink()
+    def test_cross_repository_source_develop_is_independent_of_coordinator_main(self):
+        self.select_cross_repository()
+        self.execute("preflight", self.preflight_responses())
+        metadata = self.prepared_envelope()["metadata"]
+        self.assertEqual(metadata["repository"], "example/gradle")
+        self.assertEqual(metadata["repository_id"], 200)
+        self.assertEqual(metadata["base_ref"], "develop")
+        self.assertEqual(metadata["workflow_ref"], "example/gradle/" + action.DISPATCH_WORKFLOW + "@refs/heads/develop")
+        self.assertEqual(metadata["coordinator_repository"], self.repository)
+        self.assertEqual(metadata["required_wiki_repository"], self.repository)
+        for call in self.opener.open.call_args_list[1:]:
+            request = call.args[0]
+            self.assertEqual(request.get_header("Authorization"), "Bearer fake-source-token")
+            if request.full_url.endswith("/graphql"):
+                self.assertEqual(json.loads(request.data)["variables"], {"owner": "example", "name": "gradle"})
+            else:
+                self.assertIn("/repos/example/gradle/", request.full_url + "/")
+
+    def test_same_repository_is_default_and_unchanged_tip_needs_no_ancestry_read(self):
+        self.environment["SOURCE_REPOSITORY"] = ""
+        self.branch["commit"]["sha"] = self.after
+        self.associations["data"]["repository"]["defaultBranchRef"]["target"]["oid"] = self.after
+        self.execute("preflight", self.responses(self.project, self.source_run, self.branch, self.comparison, self.associations))
+        self.assertEqual(self.prepared_envelope()["metadata"]["source_tip_sha"], self.after)
+        self.assertEqual(self.opener.open.call_count, 5)
+
+    def test_rebase_rest_identity_lookup_keeps_the_source_token(self):
+        for name in ("c0", "c1"):
+            self.associations["data"]["repository"][name]["associatedPullRequests"]["nodes"][0]["mergeCommit"] = None
+        self.execute("preflight", self.preflight_responses() + self.responses(self.pull))
+        metadata = self.prepared_envelope()["metadata"]
+        self.assertEqual(metadata["pull_requests"][0]["merge_commit_sha"], self.merge_sha)
+        request = self.opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, f"https://api.github.com/repos/{self.repository}/pulls/27")
+        self.assertEqual(request.get_header("Authorization"), "Bearer fake-source-token")
+        self.assertEqual(sum(call.args[0].full_url.endswith("/pulls/27")
+                             for call in self.opener.open.call_args_list), 1)
+
+    def test_invalid_or_mixed_source_inputs_fail_before_network(self):
+        original = self.environment.copy()
+        cases = [
+            {"SOURCE_RUN_ID": ""}, {"SOURCE_RUN_ATTEMPT": ""}, {"PUSH_BEFORE": ""}, {"PUSH_AFTER": ""},
+            {"SOURCE_RUN_ID": "1; echo unsafe"}, {"SOURCE_RUN_ATTEMPT": "0"}, {"PUSH_BEFORE": "0" * 40},
+            {"PUSH_AFTER": "short"}, {"PUSH_AFTER": self.before}, {"DISPATCH_PR": "27"},
+            {"SOURCE_REPOSITORY": "example/private"}, {"SOURCE_GH_TOKEN": " "},
+            {"SOURCE_GH_TOKEN": "fake-source-token\nPRIVATE"}, {"SOURCE_GH_TOKEN": "token\x01private"},
+            {"SOURCE_GH_TOKEN": "t" * 4097},
+            {"SOURCE_REPOSITORY": "example/.."}, {"SOURCE_REPOSITORY": "example/../secret"},
+            {"SOURCE_REPOSITORY": "example/\nsecret"}, {"SOURCE_REPOSITORY": "-example/project"},
+            {"SOURCE_REPOSITORIES": " " * 4097},
+            {"SOURCE_REPOSITORIES": json.dumps({f"example/p{index}": index + 1 for index in range(101)})},
+            {"SOURCE_REPOSITORIES": '{"example/gradle":true}'}, {"SOURCE_REPOSITORIES": "[]"},
+            {"SOURCE_REPOSITORIES": '{"example/gradle":200,"example/gradle":200}'},
+            {"SOURCE_REPOSITORIES": '{"example/gradle":200,"EXAMPLE/gradle":200}'},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.environment = {**original, **changes}
+                with self.assertRaises(SystemExit):
+                    self.execute("preflight", [])
+                self.opener.open.assert_not_called()
+                self.assertFalse((self.directory / "output.txt").exists())
+                self.token.assert_not_called()
+
+    def test_coordinator_inputs_are_not_available_to_other_adapters_or_workflows(self):
+        original = self.environment.copy()
+        for changes in (
+            {"REQUEST_TYPE": "issue-loop"}, {"REQUEST_TYPE": "task", "TASK_INPUT": "Do something"},
+            {"GITHUB_WORKFLOW_REF": self.repository + "/" + action.DISPATCH_WORKFLOW + "@refs/heads/main"},
+            {"GITHUB_REF": "refs/heads/feature"},
+        ):
+            with self.subTest(changes=changes):
+                self.environment = {**original, **changes}
+                with self.assertRaises(SystemExit):
+                    self.execute("preflight", self.responses(self.project))
+                self.assertFalse((self.directory / "output.txt").exists())
+                self.token.assert_not_called()
+
+    def test_forged_source_runs_fail_before_discovery_or_login(self):
+        original = copy.deepcopy(self.source_run)
+        cases = [
+            {"id": 123457}, {"run_attempt": 1}, {"event": "pull_request"},
+            {"path": ".github/workflows/untrusted.yml"}, {"head_branch": "untrusted"},
+            {"head_sha": self.tip}, {"repository": {**self.project, "id": 101}},
+            {"head_repository": {**self.project, "id": 101}}, {"actor": {"login": "unsafe\nactor"}},
+        ]
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.source_run = {**original, **changes}
                 with self.assertRaises(SystemExit):
                     self.execute("preflight", self.source_responses())
-                self.assertEqual(self.opener.open.call_count, 3)
+                self.assertEqual(self.opener.open.call_count, 2)
                 self.assertFalse((self.directory / "output.txt").exists())
                 self.token.assert_not_called()
 
-    def test_truncated_discovery_and_api_errors_do_not_submit_partial_batches(self):
-        self.write_source()
-        for response in ({**self.comparison, "total_commits": 3}, OSError("PRIVATE API DETAIL")):
-            with self.subTest(response=response):
-                responses = self.source_responses()
-                responses += [response] if isinstance(response, Exception) else self.responses(response)
+    def test_cross_repository_policy_identity_and_visibility_fail_closed(self):
+        self.select_cross_repository()
+        original = self.source_project.copy()
+        for changes in ({"id": 201}, {"full_name": "example/renamed"}, {"visibility": "private"}, {"visibility": "internal"}):
+            with self.subTest(changes=changes):
+                self.source_project.update(original)
+                self.source_project.update(changes)
                 with self.assertRaises(SystemExit):
-                    self.execute("preflight", responses)
+                    self.execute("preflight", self.preflight_responses())
+                self.assertEqual(self.opener.open.call_count, 2)
+                self.token.assert_not_called()
+        self.source_project.update(original)
+        self.project["visibility"] = "private"
+        with self.assertRaisesRegex(SystemExit, "public"):
+            self.execute("preflight", self.preflight_responses())
+
+    def test_branch_ancestry_and_ref_races_fail_before_agent_login(self):
+        originals = copy.deepcopy((self.branch, self.ancestry, self.associations))
+        for mutation in ("branch", "sha", "diverged", "merge_base", "ref_race"):
+            with self.subTest(mutation=mutation):
+                self.branch, self.ancestry, self.associations = copy.deepcopy(originals)
+                if mutation == "branch":
+                    self.branch["name"] = "feature"
+                elif mutation == "sha":
+                    self.branch["commit"]["sha"] = "short"
+                elif mutation == "diverged":
+                    self.ancestry["behind_by"] = 1
+                elif mutation == "merge_base":
+                    self.ancestry["merge_base_commit"]["sha"] = self.before
+                else:
+                    self.associations["data"]["repository"]["defaultBranchRef"]["target"]["oid"] = "1" * 40
+                with self.assertRaises(SystemExit):
+                    self.execute("preflight", self.preflight_responses())
                 self.assertFalse((self.directory / "output.txt").exists())
                 self.token.assert_not_called()
 
-    def test_valid_push_without_newly_merged_prs_skips_before_azure_login(self):
-        self.write_source()
+    def test_range_rejects_truncated_duplicate_divergent_or_missing_head_inventory(self):
+        original = copy.deepcopy(self.comparison)
+        for changes in (
+            {"commits": [{"sha": self.after}]},
+            {"commits": [{"sha": self.after}, {"sha": self.after}]},
+            {"commits": [{"sha": self.merge_sha}, {"sha": self.before}]},
+            {"commits": [{"sha": self.merge_sha}, {"sha": self.tip}]},
+            {"commits": [{"sha": self.merge_sha}, {"sha": "short"}]},
+            {"status": "diverged"}, {"ahead_by": 3}, {"total_commits": 1001},
+            {"total_commits": True}, {"total_commits": 0},
+            {"merge_base_commit": {"sha": self.tip}},
+        ):
+            with self.subTest(changes=changes):
+                self.comparison = {**original, **changes}
+                with self.assertRaises(SystemExit):
+                    self.execute("preflight", self.preflight_responses())
+                self.assertFalse((self.directory / "output.txt").exists())
+                self.token.assert_not_called()
+
+    def test_complete_comparison_pagination_covers_1000_and_requires_every_page(self):
+        shas = [f"{index:040x}" for index in range(1, 1000)] + [self.after]
+        pages = [{**self.comparison, "ahead_by": 1000, "total_commits": 1000,
+                  "commits": [{"sha": sha} for sha in shas[start:start + 100]]}
+                 for start in range(0, 1000, 100)]
+        with patch.dict(os.environ, self.environment, clear=True), patch.object(action, "github_read", side_effect=pages) as read:
+            result = action.read_reconciliation_inventory(self.repository, self.before, self.after, float("inf"))
+        self.assertEqual(result, shas)
+        self.assertEqual(read.call_count, 10)
+        self.assertTrue(read.call_args.args[0].endswith("?per_page=100&page=10"))
+        for mutation in ("missing", "duplicate", "count", "base"):
+            with self.subTest(mutation=mutation):
+                changed = copy.deepcopy(pages)
+                if mutation == "missing":
+                    changed[1]["commits"].pop()
+                elif mutation == "duplicate":
+                    changed[1]["commits"][0] = changed[0]["commits"][0]
+                elif mutation == "count":
+                    changed[1]["total_commits"] = 999
+                else:
+                    changed[1]["base_commit"]["sha"] = self.tip
+                with patch.dict(os.environ, self.environment, clear=True), \
+                        patch.object(action, "github_read", side_effect=changed), self.assertRaises(ValueError):
+                    action.read_reconciliation_inventory(self.repository, self.before, self.after, float("inf"))
+
+    def test_partial_final_page_and_discovery_deadline(self):
+        shas = [f"{index:040x}" for index in range(1, 102)] + [self.after]
+        pages = [{**self.comparison, "ahead_by": len(shas), "total_commits": len(shas),
+                  "commits": [{"sha": sha} for sha in shas[start:start + 100]]}
+                 for start in range(0, len(shas), 100)]
+        with patch.dict(os.environ, self.environment, clear=True), patch.object(action, "github_read", side_effect=pages):
+            self.assertEqual(action.read_reconciliation_inventory(self.repository, self.before, self.after, float("inf")), shas)
+        with patch.dict(os.environ, self.environment, clear=True), patch.object(action, "github_read") as read, \
+                self.assertRaisesRegex(ValueError, "time budget"):
+            action.read_reconciliation_inventory(self.repository, self.before, self.after, 0)
+        read.assert_not_called()
+
+    def test_network_errors_do_not_retry_or_expose_credentials(self):
+        responses = self.source_responses() + [OSError("fake-source-token PRIVATE API DETAIL")]
+        with self.assertRaises(SystemExit) as raised:
+            self.execute("preflight", responses)
+        self.assertEqual(self.opener.open.call_count, 5)
+        self.assertNotIn("fake-source-token", str(raised.exception))
+        self.assertNotIn("PRIVATE", str(raised.exception))
+        self.assertFalse((self.directory / "output.txt").exists())
+        self.token.assert_not_called()
+
+    def test_valid_range_without_newly_merged_prs_skips_before_azure_login(self):
         for name in ("c0", "c1"):
             self.associations["data"]["repository"][name]["associatedPullRequests"] = {
                 "totalCount": 0, "pageInfo": {"hasNextPage": False}, "nodes": [],
             }
-        self.execute("preflight", self.source_responses() + self.responses(self.comparison, self.associations))
+        self.execute("preflight", self.preflight_responses())
         self.assertEqual(self.action_outputs()["eligible"], "false")
         self.assertEqual(self.action_outputs()["skip-reason"], "no_merged_pull_requests")
         self.token.assert_not_called()
 
     def test_queued_request_preserves_the_existing_batch_receipt_contract(self):
-        self.write_source()
-        self.execute("preflight", self.source_responses() + self.responses(self.comparison, self.associations))
+        self.execute("preflight", self.preflight_responses())
         prepared = self.prepared_envelope()
         self.environment["REQUEST_PATH"] = self.action_outputs()["request-path"]
         (self.directory / "output.txt").unlink()
@@ -357,11 +347,8 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.opener.open.call_count, 1)
         self.token.assert_called_once()
 
-    def test_manual_pr_selection_uses_the_same_coordinator_without_source_artifacts(self):
+    def test_manual_pr_selection_uses_the_same_coordinator_without_range_inputs(self):
         self.environment.update({name: "" for name in action.SOURCE_INPUTS}, DISPATCH_PR="27")
-        self.execute("validate-source", self.responses(self.project))
-        self.assertEqual(self.action_outputs(), {"automatic": "false"})
-        (self.directory / "output.txt").unlink()
         self.execute("preflight", self.responses(self.project, self.pull))
         metadata = self.prepared_envelope()["metadata"]
         self.assertEqual(metadata["pull_number"], 27)
@@ -370,21 +357,16 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.opener.open.call_count, 2)
         self.token.assert_not_called()
 
-    def test_coordinator_inputs_are_not_available_to_other_adapters_or_repositories(self):
-        original = self.environment.copy()
-        for changes in (
-            {"REQUEST_TYPE": "issue-loop"}, {"REQUEST_TYPE": "task", "TASK_INPUT": "Do something"},
-            {"GITHUB_REPOSITORY": "microsoft/vscode-java-pack"},
-            {"GITHUB_WORKFLOW_REF": self.source_metadata["workflow_ref"]},
-        ):
-            with self.subTest(changes=changes):
-                self.environment = {**original, **changes}
-                if changes.get("GITHUB_REPOSITORY"):
-                    self.event["repository"] = {**self.project, "full_name": changes["GITHUB_REPOSITORY"]}
-                with self.assertRaises(SystemExit):
-                    self.execute("preflight", self.source_responses())
-                self.assertFalse((self.directory / "output.txt").exists())
-                self.token.assert_not_called()
+    def test_manual_cross_source_requires_allowlist_and_uses_source_read_credentials(self):
+        self.select_cross_repository()
+        self.environment.update({name: "" for name in action.SOURCE_INPUTS}, DISPATCH_PR="27")
+        self.pull["base"] = {"ref": "develop", "repo": self.source_project}
+        self.execute("preflight", self.responses(self.project, self.source_project, self.pull))
+        metadata = self.prepared_envelope()["metadata"]
+        self.assertEqual(metadata["repository"], "example/gradle")
+        self.assertEqual(metadata["base_ref"], "develop")
+        self.assertEqual(metadata["coordinator_repository"], self.repository)
+        self.assertEqual(self.opener.open.call_args.args[0].get_header("Authorization"), "Bearer fake-source-token")
 
     def test_coordinator_wiki_identity_is_required_without_overriding_policy(self):
         self.envelope["metadata"].update(repository=self.repository, required_wiki_repository=self.repository)
@@ -394,26 +376,22 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.assertFalse((self.directory / "output.txt").exists())
         self.assertIn("never overrides repository policy", action.build_team_memory_request(self.envelope["metadata"])["input"])
 
-    def test_other_callers_can_still_use_the_same_workflow_filename(self):
-        self.environment.update({name: "" for name in action.SOURCE_INPUTS}, DISPATCH_PR="27")
+    def test_obsolete_artifact_and_dispatch_entrypoints_are_removed(self):
+        for command in ("dispatch", "prepare-dispatch", "validate-dispatch", "prepare-source", "validate-source"):
+            with self.subTest(command=command), self.assertRaisesRegex(SystemExit, "Unsupported action command"):
+                self.execute(command, [])
+            self.opener.open.assert_not_called()
+        for name in ("prepare_source", "validate_source", "source_event_path", "read_source_event", "team_memory_source_snapshot"):
+            self.assertFalse(hasattr(action, name))
+
+    def test_other_direct_callers_can_still_use_the_same_workflow_filename(self):
+        self.environment.update({name: "" for name in (*action.SOURCE_INPUTS, "SOURCE_REPOSITORY")}, DISPATCH_PR="27")
         self.environment["GITHUB_REPOSITORY"] = "example/project"
         self.environment["GITHUB_WORKFLOW_REF"] = "example/project/" + action.COORDINATOR_WORKFLOW + "@refs/heads/main"
         self.project["full_name"] = "example/project"
         self.event = {"repository": self.project}
         self.execute("preflight", self.responses(self.project, self.pull))
         self.assertNotIn("required_wiki_repository", self.prepared_envelope()["metadata"])
-
-    def test_coordinator_preflight_revalidates_after_source_download(self):
-        self.write_source()
-        self.execute("validate-source", self.source_responses())
-        (self.directory / "output.txt").unlink()
-        self.artifact["expired"] = True
-        with self.assertRaises(SystemExit):
-            self.execute("preflight", self.source_responses())
-        self.assertFalse((self.directory / "output.txt").exists())
-        self.token.assert_not_called()
-
-
 
 
 if __name__ == "__main__":

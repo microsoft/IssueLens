@@ -3,6 +3,10 @@ name: Coordinate IssueLens team memory (opt-in)
 on:
   workflow_dispatch:
     inputs:
+      source_repository:
+        description: Source repository (defaults to this repository; other sources require trusted coordinator configuration)
+        required: false
+        type: string
       source_run_id:
         description: Source push workflow run ID (automatic dispatch only)
         required: false
@@ -11,8 +15,12 @@ on:
         description: Source workflow attempt (required with source_run_id)
         required: false
         type: string
-      source_artifact_id:
-        description: Immutable source event artifact ID (required with source_run_id)
+      push_before:
+        description: Requested reconciliation ancestor SHA, not an attested original push boundary
+        required: false
+        type: string
+      push_after:
+        description: Source push run head SHA (required with source_run_id)
         required: false
         type: string
       pull_request_number:
@@ -54,9 +62,11 @@ jobs:
         uses: ./.github/actions/issuelens
         with:
           request-type: team-memory
+          source-repository: ${{ inputs.source_repository }}
           source-run-id: ${{ inputs.source_run_id }}
           source-run-attempt: ${{ inputs.source_run_attempt }}
-          source-artifact-id: ${{ inputs.source_artifact_id }}
+          push-before: ${{ inputs.push_before }}
+          push-after: ${{ inputs.push_after }}
           pull-request-number: ${{ inputs.pull_request_number }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
