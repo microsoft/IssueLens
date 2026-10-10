@@ -524,14 +524,16 @@ and full SHA succeeds. Incomplete batches preserve validated receipts before
 failing; invalid or ambiguous responses never become successful receipts.
 Issue-loop and task results may be plain text, Markdown, or requested JSON.
 
-The submission socket timeout is 60 seconds, the cooperative stream budget is
-15 minutes, and the stream is limited to 8 MiB total and 1 MiB per line. Keep a
-30-minute job timeout for team memory as in the example. The nominal 3-minute
-discovery, 1-minute token acquisition, 1-minute request connection, and 15-minute
-stream budgets already total 20 minutes. The remaining 10 minutes provide
-headroom for checkout, source-repository validation, Azure login, cooperative
-timeout overruns, and saving the receipt and summary. These socket/cooperative
-limits are not hard end-to-end deadlines.
+The submission socket/read inactivity timeout is 5 minutes, the cooperative
+total stream budget remains 15 minutes, and the stream is limited to 8 MiB total
+and 1 MiB per line. The longer inactivity allowance covers model and
+orchestration turns that legitimately emit no SSE bytes for more than a minute.
+Keep a 30-minute job timeout for team memory as in the example. The nominal
+3-minute discovery, 1-minute token acquisition, 5-minute request/read inactivity,
+and 15-minute stream budgets can total 24 minutes. The remaining 6 minutes
+provide headroom for checkout, source-repository validation, Azure login,
+cooperative timeout overruns, and saving the receipt and summary. These
+socket/cooperative limits are not hard end-to-end deadlines.
 
 Direct-action callers using the example's per-push groups may overlap or finish
 out of order; those groups do not coordinate different repositories. The

@@ -505,10 +505,13 @@ class TeamMemoryActionTests(unittest.TestCase):
                 self.assertEqual(request.get_header("Authorization"), "Bearer fake-endpoint-token")
                 self.assertNotIn(b"fake-endpoint-token", request.data)
                 self.assertEqual(self.opener.open.call_count, 1)
+                self.assertEqual(action.AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS, 300)
+                self.assertEqual(self.opener.open.call_args.kwargs["timeout"], 300)
                 self.assertEqual(self.token.call_args.args[0], [
                     "az", "account", "get-access-token", "--scope", "https://ai.azure.com/.default",
                     "--query", "accessToken", "-o", "tsv",
                 ])
+                self.assertEqual(self.token.call_args.kwargs["timeout"], 60)
                 summary = (self.directory / "summary.md").read_text()
                 self.assertIn(self.result["wiki_sha"], summary)
                 self.assertNotIn("fake-endpoint-token", summary)
@@ -591,12 +594,14 @@ class TeamMemoryActionTests(unittest.TestCase):
     def test_stream_total_budget_and_deadline(self):
         self.write_envelope()
         self.execute("submit", [self.stream()])
+        self.assertEqual(action.AGENT_STREAM_READ_BUDGET_SECONDS, 900)
         read_result = action.read_response
         body = (b":" + b"x" * (128 * 1024) + b"\n\n") * 65
         with Response(body, "text/event-stream") as response:
             with self.assertRaisesRegex(ValueError, "stream limits"):
                 read_result(response)
-        with self.stream() as response, patch("time.monotonic", side_effect=[0, 901]):
+        with self.stream() as response, patch(
+                "time.monotonic", side_effect=[0, action.AGENT_STREAM_READ_BUDGET_SECONDS + 1]):
             with self.assertRaisesRegex(ValueError, "read budget"):
                 read_result(response)
 

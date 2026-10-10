@@ -22,6 +22,8 @@ REQUEST_TYPES = {"issue-loop", "team-memory", "task"}
 MAX_PUSH_COMMITS = 1000
 MAX_BATCH_PRS = 100
 DISCOVERY_SECONDS = 180
+AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS = 300
+AGENT_STREAM_READ_BUDGET_SECONDS = 900
 ASSOCIATION_BATCH_SIZE = 20
 COORDINATOR_REPOSITORY = "microsoft/IssueLens"
 DISPATCH_WORKFLOW = ".github/workflows/team-memory-post-merge.yml"
@@ -683,7 +685,8 @@ def read_response(response, renderer=None):
             break
         total += len(raw)
         require(len(raw) <= 1024 * 1024 and total <= 8 * 1024 * 1024, "Agent response exceeds stream limits")
-        require(time.monotonic() - started <= 900, "Agent response exceeded the 15-minute read budget")
+        require(time.monotonic() - started <= AGENT_STREAM_READ_BUDGET_SECONDS,
+                "Agent response exceeded the 15-minute read budget")
         line = raw.decode("utf-8").rstrip("\r\n")
         if renderer is not None:
             renderer.tick()
@@ -823,7 +826,8 @@ def submit():
         method="POST",
     )
     try:
-        with urllib.request.build_opener(NoRedirect()).open(request, timeout=60) as response:
+        with urllib.request.build_opener(NoRedirect()).open(
+                request, timeout=AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS) as response:
             text = read_response(response, renderer)
         result = None
         if request_type == "team-memory":
