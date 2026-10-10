@@ -167,12 +167,14 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertTrue(all("${{" not in step["run"] for step in self.action_metadata["runs"]["steps"] if "run" in step))
 
     def test_job_timeout_has_setup_and_receipt_headroom(self):
-        token_seconds, connection_seconds, stream_seconds = 60, 60, 15 * 60
+        token_seconds = 60
+        connection_seconds = action.AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS
+        stream_seconds = action.AGENT_STREAM_READ_BUDGET_SECONDS
         phase_seconds = action.DISCOVERY_SECONDS + token_seconds + connection_seconds + stream_seconds
         self.assertGreaterEqual(int(self.job["timeout-minutes"]) * 60 - phase_seconds, 5 * 60)
         self.assertEqual(self.job["timeout-minutes"], "30")
         self.assertIn("30-minute timeout", (ROOT / "docs" / "guide.md").read_text(encoding="utf-8"))
-        self.assertIn("30-minute job timeout", (ACTION_DIR / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("30-minute caller job timeout", (ACTION_DIR / "README.md").read_text(encoding="utf-8"))
 
     def test_local_caller_loads_only_trusted_action_revision(self):
         checkout = self.steps[0]
@@ -505,10 +507,13 @@ class TeamMemoryActionTests(unittest.TestCase):
                 self.assertEqual(request.get_header("Authorization"), "Bearer fake-endpoint-token")
                 self.assertNotIn(b"fake-endpoint-token", request.data)
                 self.assertEqual(self.opener.open.call_count, 1)
+                self.assertEqual(action.AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS, 300)
+                self.assertEqual(self.opener.open.call_args.kwargs["timeout"], 300)
                 self.assertEqual(self.token.call_args.args[0], [
                     "az", "account", "get-access-token", "--scope", "https://ai.azure.com/.default",
                     "--query", "accessToken", "-o", "tsv",
                 ])
+                self.assertEqual(self.token.call_args.kwargs["timeout"], 60)
                 summary = (self.directory / "summary.md").read_text()
                 self.assertIn(self.result["wiki_sha"], summary)
                 self.assertNotIn("fake-endpoint-token", summary)
@@ -591,12 +596,14 @@ class TeamMemoryActionTests(unittest.TestCase):
     def test_stream_total_budget_and_deadline(self):
         self.write_envelope()
         self.execute("submit", [self.stream()])
+        self.assertEqual(action.AGENT_STREAM_READ_BUDGET_SECONDS, 900)
         read_result = action.read_response
         body = (b":" + b"x" * (128 * 1024) + b"\n\n") * 65
         with Response(body, "text/event-stream") as response:
             with self.assertRaisesRegex(ValueError, "stream limits"):
                 read_result(response)
-        with self.stream() as response, patch("time.monotonic", side_effect=[0, 901]):
+        with self.stream() as response, patch(
+                "time.monotonic", side_effect=[0, action.AGENT_STREAM_READ_BUDGET_SECONDS + 1]):
             with self.assertRaisesRegex(ValueError, "read budget"):
                 read_result(response)
 
