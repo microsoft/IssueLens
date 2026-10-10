@@ -44,7 +44,7 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertEqual(invoke["with"]["issue-number"], "${{ inputs.issue_number }}")
         self.assertEqual(self.workflow["permissions"], {})
         self.assertEqual(self.job["permissions"], {"contents": "read", "issues": "read", "id-token": "write"})
-        self.assertEqual(self.job["timeout-minutes"], "20")
+        self.assertEqual(self.job["timeout-minutes"], "30")
         self.assertTrue(all("run" not in step for step in self.job["steps"]))
         self.assertNotIn("pull_request.head", self.source)
 

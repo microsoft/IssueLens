@@ -292,7 +292,7 @@ establish live publication.
 
 Use the event filters and per-issue concurrency from the
 [issue workflow](../../workflows/issue-triage.yml). Its job grants
-`contents: read`, `issues: read`, and `id-token: write`, and uses a 20-minute
+`contents: read`, `issues: read`, and `id-token: write`, and uses a 30-minute
 timeout. In an external repository remove its local checkout step and change
 the remaining action call to:
 
@@ -528,7 +528,7 @@ The submission socket/read inactivity timeout is 5 minutes, the cooperative
 total stream budget remains 15 minutes, and the stream is limited to 8 MiB total
 and 1 MiB per line. The longer inactivity allowance covers model and
 orchestration turns that legitimately emit no SSE bytes for more than a minute.
-Keep a 30-minute job timeout for team memory as in the example. The nominal
+Keep a 30-minute caller job timeout as in the examples. The nominal
 3-minute discovery, 1-minute token acquisition, 5-minute request/read inactivity,
 and 15-minute stream budgets can total 24 minutes. The remaining 6 minutes
 provide headroom for checkout, source-repository validation, Azure login,

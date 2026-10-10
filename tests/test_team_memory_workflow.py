@@ -167,12 +167,14 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertTrue(all("${{" not in step["run"] for step in self.action_metadata["runs"]["steps"] if "run" in step))
 
     def test_job_timeout_has_setup_and_receipt_headroom(self):
-        token_seconds, connection_seconds, stream_seconds = 60, 60, 15 * 60
+        token_seconds = 60
+        connection_seconds = action.AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS
+        stream_seconds = action.AGENT_STREAM_READ_BUDGET_SECONDS
         phase_seconds = action.DISCOVERY_SECONDS + token_seconds + connection_seconds + stream_seconds
         self.assertGreaterEqual(int(self.job["timeout-minutes"]) * 60 - phase_seconds, 5 * 60)
         self.assertEqual(self.job["timeout-minutes"], "30")
         self.assertIn("30-minute timeout", (ROOT / "docs" / "guide.md").read_text(encoding="utf-8"))
-        self.assertIn("30-minute job timeout", (ACTION_DIR / "README.md").read_text(encoding="utf-8"))
+        self.assertIn("30-minute caller job timeout", (ACTION_DIR / "README.md").read_text(encoding="utf-8"))
 
     def test_local_caller_loads_only_trusted_action_revision(self):
         checkout = self.steps[0]
