@@ -3,6 +3,7 @@ import json
 import os
 import pathlib
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 import test_team_memory_workflow as memory_tests
@@ -138,13 +139,50 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
             else:
                 self.assertIn("/repos/example/gradle/", request.full_url + "/")
 
+    def test_public_cross_repository_reads_accept_caller_token_or_explicit_override(self):
+        self.select_cross_repository()
+        self.pull["base"] = {"ref": "develop", "repo": self.source_project}
+        for name in ("c0", "c1"):
+            self.associations["data"]["repository"][name]["associatedPullRequests"]["nodes"][0]["mergeCommit"] = None
+        for source_token in (self.environment["GH_TOKEN"], "fake-source-token"):
+            with self.subTest(source_token=source_token):
+                self.environment["SOURCE_GH_TOKEN"] = source_token
+                self.execute("preflight", self.preflight_responses() + self.responses(self.pull))
+                envelope = self.prepared_envelope()
+                self.assertEqual(self.action_outputs()["eligible"], "true")
+                self.assertEqual(envelope["metadata"]["repository"], self.source_project["full_name"])
+                self.assertEqual(envelope["metadata"]["source_tip_sha"], self.tip)
+                self.assertEqual(envelope["metadata"]["pull_requests"][0]["merge_commit_sha"], self.merge_sha)
+                requests = [call.args[0] for call in self.opener.open.call_args_list]
+                self.assertEqual([request.full_url for request in requests], [
+                    f"https://api.github.com/repos/{self.repository}",
+                    "https://api.github.com/repos/example/gradle",
+                    "https://api.github.com/repos/example/gradle/actions/runs/123456/attempts/2",
+                    "https://api.github.com/repos/example/gradle/branches/develop",
+                    f"https://api.github.com/repos/example/gradle/compare/{self.after}...{self.tip}?per_page=1&page=2",
+                    f"https://api.github.com/repos/example/gradle/compare/{self.before}...{self.after}?per_page=100&page=1",
+                    "https://api.github.com/graphql",
+                    "https://api.github.com/repos/example/gradle/pulls/27",
+                ])
+                self.assertEqual(requests[0].get_header("Authorization"), "Bearer " + self.environment["GH_TOKEN"])
+                self.assertTrue(all(request.get_header("Authorization") == "Bearer " + source_token
+                                    for request in requests[1:]))
+                self.assertEqual(json.loads(requests[-2].data)["variables"], {"owner": "example", "name": "gradle"})
+                for credential in (self.environment["GH_TOKEN"], source_token):
+                    self.assertNotIn(credential, json.dumps(envelope))
+                    self.assertNotIn(credential, self.output.getvalue())
+                self.token.assert_not_called()
+
     def test_same_repository_is_default_and_unchanged_tip_needs_no_ancestry_read(self):
         self.environment["SOURCE_REPOSITORY"] = ""
+        self.environment["SOURCE_GH_TOKEN"] = self.environment["GH_TOKEN"]
         self.branch["commit"]["sha"] = self.after
         self.associations["data"]["repository"]["defaultBranchRef"]["target"]["oid"] = self.after
         self.execute("preflight", self.responses(self.project, self.source_run, self.branch, self.comparison, self.associations))
         self.assertEqual(self.prepared_envelope()["metadata"]["source_tip_sha"], self.after)
         self.assertEqual(self.opener.open.call_count, 5)
+        self.assertTrue(all(call.args[0].get_header("Authorization") == "Bearer " + self.environment["GH_TOKEN"]
+                            for call in self.opener.open.call_args_list))
 
     def test_rebase_rest_identity_lookup_keeps_the_source_token(self):
         for name in ("c0", "c1"):
@@ -164,9 +202,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
             {"SOURCE_RUN_ID": ""}, {"SOURCE_RUN_ATTEMPT": ""}, {"PUSH_BEFORE": ""}, {"PUSH_AFTER": ""},
             {"SOURCE_RUN_ID": "1; echo unsafe"}, {"SOURCE_RUN_ATTEMPT": "0"}, {"PUSH_BEFORE": "0" * 40},
             {"PUSH_AFTER": "short"}, {"PUSH_AFTER": self.before}, {"DISPATCH_PR": "27"},
-            {"SOURCE_REPOSITORY": "example/private"}, {"SOURCE_GH_TOKEN": " "},
-            {"SOURCE_GH_TOKEN": "fake-source-token\nPRIVATE"}, {"SOURCE_GH_TOKEN": "token\x01private"},
-            {"SOURCE_GH_TOKEN": "t" * 4097},
+            {"SOURCE_REPOSITORY": "example/private"},
             {"SOURCE_REPOSITORY": "example/.."}, {"SOURCE_REPOSITORY": "example/../secret"},
             {"SOURCE_REPOSITORY": "example/\nsecret"}, {"SOURCE_REPOSITORY": "-example/project"},
             {"SOURCE_REPOSITORIES": " " * 4097},
@@ -184,6 +220,41 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
                 self.assertFalse((self.directory / "output.txt").exists())
                 self.token.assert_not_called()
 
+    def test_missing_or_invalid_source_token_does_not_fall_back_to_caller_token(self):
+        self.select_cross_repository()
+        for source_token in (None, "", " ", "fake-source-token\nPRIVATE", "token\x01private", "t" * 4097):
+            with self.subTest(source_token=source_token):
+                if source_token is None:
+                    self.environment.pop("SOURCE_GH_TOKEN", None)
+                else:
+                    self.environment["SOURCE_GH_TOKEN"] = source_token
+                with self.assertRaisesRegex(SystemExit, "source-github-token must be non-empty printable ASCII"):
+                    self.execute("preflight", [])
+                self.opener.open.assert_not_called()
+                self.token.assert_not_called()
+                self.assertFalse((self.directory / "output.txt").exists())
+                self.assertEqual(list(self.directory.glob("issuelens-request-*.json")), [])
+
+    def test_public_source_auth_failure_never_falls_back_or_retries(self):
+        self.select_cross_repository()
+        for source_token in (self.environment["GH_TOKEN"], "fake-source-token"):
+            for status in (401, 403):
+                for offset in (1, 2, 5, 6):
+                    with self.subTest(source_token=source_token, status=status, offset=offset):
+                        self.environment["SOURCE_GH_TOKEN"] = source_token
+                        failure = urllib.error.HTTPError(
+                            "https://api.github.com", status, source_token + " PRIVATE API DETAIL", {}, None)
+                        with self.assertRaises(SystemExit) as raised:
+                            self.execute("preflight", self.preflight_responses()[:offset] + [failure])
+                        self.assertEqual(self.opener.open.call_count, offset + 1)
+                        self.assertTrue(all(call.args[0].get_header("Authorization") == "Bearer " + source_token
+                                            for call in self.opener.open.call_args_list[1:]))
+                        self.assertNotIn(source_token, str(raised.exception))
+                        self.assertNotIn("PRIVATE", str(raised.exception))
+                        self.assertFalse((self.directory / "output.txt").exists())
+                        self.assertEqual(list(self.directory.glob("issuelens-request-*.json")), [])
+                        self.token.assert_not_called()
+
     def test_coordinator_inputs_are_not_available_to_other_adapters_or_workflows(self):
         original = self.environment.copy()
         for changes in (
@@ -199,24 +270,28 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
                 self.token.assert_not_called()
 
     def test_forged_source_runs_fail_before_discovery_or_login(self):
+        self.select_cross_repository()
+        self.environment["SOURCE_GH_TOKEN"] = self.environment["GH_TOKEN"]
         original = copy.deepcopy(self.source_run)
         cases = [
             {"id": 123457}, {"run_attempt": 1}, {"event": "pull_request"},
             {"path": ".github/workflows/untrusted.yml"}, {"head_branch": "untrusted"},
-            {"head_sha": self.tip}, {"repository": {**self.project, "id": 101}},
-            {"head_repository": {**self.project, "id": 101}}, {"actor": {"login": "unsafe\nactor"}},
+            {"head_sha": self.tip}, {"repository": {**self.source_project, "id": 201}},
+            {"repository": {**self.source_project, "full_name": "example/renamed"}},
+            {"head_repository": {**self.source_project, "id": 201}}, {"actor": {"login": "unsafe\nactor"}},
         ]
         for changes in cases:
             with self.subTest(changes=changes):
                 self.source_run = {**original, **changes}
                 with self.assertRaises(SystemExit):
                     self.execute("preflight", self.source_responses())
-                self.assertEqual(self.opener.open.call_count, 2)
+                self.assertEqual(self.opener.open.call_count, 3)
                 self.assertFalse((self.directory / "output.txt").exists())
                 self.token.assert_not_called()
 
     def test_cross_repository_policy_identity_and_visibility_fail_closed(self):
         self.select_cross_repository()
+        self.environment["SOURCE_GH_TOKEN"] = self.environment["GH_TOKEN"]
         original = self.source_project.copy()
         for changes in ({"id": 201}, {"full_name": "example/renamed"}, {"visibility": "private"}, {"visibility": "internal"}):
             with self.subTest(changes=changes):
@@ -227,11 +302,17 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
                 self.assertEqual(self.opener.open.call_count, 2)
                 self.token.assert_not_called()
         self.source_project.update(original)
-        self.project["visibility"] = "private"
-        with self.assertRaisesRegex(SystemExit, "public"):
-            self.execute("preflight", self.preflight_responses())
+        for visibility in ("private", "internal"):
+            with self.subTest(coordinator_visibility=visibility):
+                self.project["visibility"] = visibility
+                with self.assertRaisesRegex(SystemExit, "public"):
+                    self.execute("preflight", self.preflight_responses())
+                self.assertEqual(self.opener.open.call_count, 2)
+                self.token.assert_not_called()
 
     def test_branch_ancestry_and_ref_races_fail_before_agent_login(self):
+        self.select_cross_repository()
+        self.environment["SOURCE_GH_TOKEN"] = self.environment["GH_TOKEN"]
         originals = copy.deepcopy((self.branch, self.ancestry, self.associations))
         for mutation in ("branch", "sha", "diverged", "merge_base", "ref_race"):
             with self.subTest(mutation=mutation):
@@ -275,11 +356,19 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         pages = [{**self.comparison, "ahead_by": 1000, "total_commits": 1000,
                   "commits": [{"sha": sha} for sha in shas[start:start + 100]]}
                  for start in range(0, 1000, 100)]
-        with patch.dict(os.environ, self.environment, clear=True), patch.object(action, "github_read", side_effect=pages) as read:
-            result = action.read_reconciliation_inventory(self.repository, self.before, self.after, float("inf"))
-        self.assertEqual(result, shas)
-        self.assertEqual(read.call_count, 10)
-        self.assertTrue(read.call_args.args[0].endswith("?per_page=100&page=10"))
+        for source_token in (self.environment["GH_TOKEN"], "fake-source-token"):
+            with self.subTest(source_token=source_token):
+                self.environment["SOURCE_GH_TOKEN"] = source_token
+                with patch.dict(os.environ, self.environment, clear=True), \
+                        patch.object(action, "github_read", side_effect=pages) as read:
+                    result = action.read_reconciliation_inventory(self.repository, self.before, self.after, float("inf"))
+                self.assertEqual(result, shas)
+                self.assertEqual(read.call_count, 10)
+                self.assertEqual([call.args[0] for call in read.call_args_list], [
+                    f"/repos/{self.repository}/compare/{self.before}...{self.after}?per_page=100&page={page}"
+                    for page in range(1, 11)
+                ])
+                self.assertTrue(all(call.kwargs["token"] == source_token for call in read.call_args_list))
         for mutation in ("missing", "duplicate", "count", "base"):
             with self.subTest(mutation=mutation):
                 changed = copy.deepcopy(pages)
