@@ -209,6 +209,16 @@ is supplied as additional context to avoid reinstating superseded changes;
 it does not authorize updates for other PRs. The agent retrieves its own
 bounded evidence.
 
+The request explicitly assigns complete range/inventory validation to preflight,
+not a second agent-side `compare_commits` call. That bundled tool is unpaginated
+and includes patches; its 128-KiB HTTP ceiling can reject even a single large
+merge. The agent still independently revalidates the repository and every PR's
+merge identity, reads small `list_pull_request_files` pages (starting at one file
+per page), rechecks PR metadata after paging, and verifies relevant final source
+at `push_after`. A bulk range diff is neither required source evidence nor a
+prerequisite for those reads. Missing **required** PR/source/wiki evidence remains
+`needs-review`; no limits or publication safeguards are relaxed.
+
 If GraphQL returns an explicit `null` merge commit, preflight re-reads the PR
 through the version-pinned REST API. Its `merge_commit_sha` supplies the final
 rebased commit for rebase merges. The same validation used by manual dispatch
@@ -269,6 +279,14 @@ This is not a rollback or a claim that nothing was published. The complete JSON
 receipt remains in the response file, subject to the same privacy precautions
 as other agent responses. No automatic retry or artifact upload is performed.
 Manual and legacy single-PR callers retain their existing result format.
+
+If a run reports `needs-review` after an oversized `compare_commits` call,
+inspect the per-PR reason rather than changing Actions variables or treating it
+as an OIDC error. Once a request fix is merged, a fresh manual coordinator run
+with `pull_request_number` can reconcile the affected PR. Rerunning an old run
+uses its original workflow/action revision, not the newly merged fix. Starting
+maintenance still requires explicit operator authorization; these checks do not
+establish live publication.
 
 ### Issue Loop: Triage and Planning
 

@@ -350,6 +350,12 @@ Preserve this explicit limitation in the request. Do not manufacture a push
 event, substitute the coordinator head, or infer no-change from missing pages.
 At most 1,000 complete unique commit IDs are retrieved in pages of 100;
 divergent ranges, incomplete inventories, and ref races fail before login.
+Complete range/inventory validation belongs to invocation preflight. Its batch
+request must not require a second unpaginated agent-side `compare_commits` read,
+which can exceed patch response limits even for one merge. The agent still
+revalidates each PR's merge identity, pages its files, and verifies relevant
+final source at pinned SHAs. Missing required evidence remains non-success;
+neither an optional bulk-read limit nor preflight success establishes publication.
 Explicit single-PR manual requests use the coordinator instead of source IDs.
 The shared composite action in `.github/actions/issuelens`
 owns preflight, pinned Azure OIDC login, and submission through a standalone
