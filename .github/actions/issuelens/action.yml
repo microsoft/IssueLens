@@ -30,7 +30,11 @@ inputs:
     required: false
     default: '{}'
   source-github-token:
-    description: Independent source read token for coordinated requests (Contents, Actions and Pull requests read); cross-repository callers supply source-scoped access.
+    description: >-
+      Source read token for coordinated requests (Contents, Actions and Pull requests read).
+      Defaults to the built-in GITHUB_TOKEN for same-repository and supported public
+      cross-repository reads. Explicit overrides remain supported; an empty token fails.
+      Dispatch writes still require target Actions write access.
     required: false
     default: ${{ github.token }}
   source-run-id:

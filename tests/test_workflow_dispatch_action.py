@@ -196,6 +196,18 @@ class WorkflowDispatchTests(unittest.TestCase):
                                      for call in self.opener.open.call_args_list), 1)
                 self.assertNotIn("accepted", self.output.getvalue())
 
+    def test_public_target_reads_do_not_authorize_dispatch_writes(self):
+        failure = urllib.error.HTTPError("https://api.github.com", 403, "PRIVATE ACTIONS WRITE DETAIL", {}, None)
+        with self.assertRaises(SystemExit) as raised:
+            self.execute(self.responses({**self.project, "visibility": "public"}, self.workflow, self.branch) + [failure])
+        requests = [call.args[0] for call in self.opener.open.call_args_list]
+        self.assertEqual([request.get_method() for request in requests], ["GET"] * 3 + ["POST"])
+        self.assertTrue(all(request.get_header("Authorization") == "Bearer " + self.environment["DISPATCH_TOKEN"]
+                            for request in requests))
+        self.assertNotIn("PRIVATE", str(raised.exception))
+        self.assertNotIn("accepted", self.output.getvalue())
+        self.assertNotIn(self.environment["DISPATCH_TOKEN"], str(raised.exception))
+
     def test_output_failure_does_not_deny_an_acknowledged_dispatch(self):
         with patch("builtins.print", side_effect=OSError("PRIVATE OUTPUT DETAIL")):
             with self.assertRaisesRegex(SystemExit, "Dispatch acknowledged but output unavailable") as raised:

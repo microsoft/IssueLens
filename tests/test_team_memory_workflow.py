@@ -101,6 +101,23 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertEqual(self.action_metadata["inputs"]["output-mode"]["default"], "hybrid")
         self.assertEqual(self.action_metadata["inputs"]["summary-mode"]["default"], "full")
 
+    def test_token_defaults_keep_public_reads_and_dispatch_writes_separate(self):
+        for name in ("github-token", "source-github-token"):
+            with self.subTest(input=name):
+                self.assertEqual(self.action_metadata["inputs"][name]["default"], "${{ github.token }}")
+                self.assertEqual(self.action_metadata["inputs"][name]["required"], "false")
+                self.assertNotIn(name, self.steps[-1]["with"])
+        description = self.action_metadata["inputs"]["source-github-token"]["description"]
+        for requirement in ("GITHUB_TOKEN", "public cross-repository reads", "Explicit overrides",
+                            "empty token fails", "target Actions write access"):
+            self.assertIn(requirement, description)
+        self.assertNotIn("Independent", description)
+        self.assertNotIn("source-scoped", description)
+        dispatch, = self.dispatch_job["steps"]
+        self.assertNotIn("dispatch-token", dispatch["with"])
+        self.assertEqual(self.queue_metadata["inputs"]["dispatch-token"]["default"], "${{ github.token }}")
+        self.assertIn("Contents read and Actions write", self.queue_metadata["inputs"]["dispatch-token"]["description"])
+
     def test_wiki_identity_output_descriptions_do_not_imply_success(self):
         for name in ("wiki-repository", "wiki-sha"):
             with self.subTest(output=name):
