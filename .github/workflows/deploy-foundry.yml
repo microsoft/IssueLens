@@ -143,14 +143,14 @@ jobs:
           echo "version=$version" >>"$GITHUB_OUTPUT"
       - name: Smoke-test responses
         id: responses
-        timeout-minutes: 3
+        timeout-minutes: 6
         env:
           AGENT_VERSION: ${{ steps.status.outputs.version }}
         run: |
           ulimit -f 8192
           azd ai agent invoke IssueLens "$AGENT_TEST_PROMPT" --environment "$AZD_ENV_NAME" \
             --protocol responses --version "$AGENT_VERSION" --new-session --new-conversation \
-            --timeout 120 --output raw --no-prompt >"$RUNNER_TEMP/issuelens-responses.txt" 2>"$RUNNER_TEMP/issuelens-smoke-errors.txt" ||
+            --timeout 300 --output raw --no-prompt >"$RUNNER_TEMP/issuelens-responses.txt" 2>"$RUNNER_TEMP/issuelens-smoke-errors.txt" ||
             { echo "::error::Responses invocation failed; inspect Foundry before retrying."; exit 1; }
           sed -n 's/^data: *//p' "$RUNNER_TEMP/issuelens-responses.txt" | grep -v '^\[DONE\]' |
             jq -e -s --arg expected "$EXPECTED_REPLY" '
@@ -165,7 +165,7 @@ jobs:
             { echo "::error::Responses did not complete with the expected smoke reply."; exit 1; }
       - name: Smoke-test invocations
         id: invocations
-        timeout-minutes: 3
+        timeout-minutes: 6
         env:
           AGENT_VERSION: ${{ steps.status.outputs.version }}
         run: |
@@ -173,7 +173,7 @@ jobs:
           jq -n --arg input "$AGENT_TEST_PROMPT" '{input: $input}' >"$RUNNER_TEMP/issuelens-payload.json"
           azd ai agent invoke IssueLens --environment "$AZD_ENV_NAME" --protocol invocations \
             --input-file "$RUNNER_TEMP/issuelens-payload.json" --version "$AGENT_VERSION" --new-session \
-            --timeout 120 --output raw --no-prompt >"$RUNNER_TEMP/issuelens-invocations.txt" 2>"$RUNNER_TEMP/issuelens-smoke-errors.txt" ||
+            --timeout 300 --output raw --no-prompt >"$RUNNER_TEMP/issuelens-invocations.txt" 2>"$RUNNER_TEMP/issuelens-smoke-errors.txt" ||
             { echo "::error::Invocations request failed; inspect Foundry before retrying."; exit 1; }
           sed -n 's/^data: *//p' "$RUNNER_TEMP/issuelens-invocations.txt" |
             jq -e -s --arg expected "$EXPECTED_REPLY" '

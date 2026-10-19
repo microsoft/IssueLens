@@ -1162,9 +1162,13 @@ or null. Its available-tools inventory is not tool execution; tool requests,
 tool events, and all other sub-agent events still fail the smoke check.
 
 The job is limited to 40 minutes, the native deployment wait to 20 minutes, and
-each invocation to 120 seconds within a 3-minute step. The summary records the
-commit, logical GitHub environment, version, readiness, and protocol outcomes,
-not Azure identifiers or endpoints. Azure CLI account output is disabled;
+each invocation to 300 seconds within a 6-minute step. This gives the SDK's
+existing model retries time to complete after transient Foundry capacity or
+throttling errors, with a minute of step headroom for CLI setup and response
+validation. It does not add workflow-level retries or guarantee model capacity;
+timeouts, invocation failures, and invalid replies still fail the job.
+The summary records the commit, logical GitHub environment, version, readiness,
+and protocol outcomes, not Azure identifiers or endpoints. Azure CLI account output is disabled;
 azd configuration/deployment output, readiness details, and raw agent responses
 stay in runner-local files, including on failure. The workflow never prints
 `azd env get-values` or uploads these files. Temporary files and `.azure` are
