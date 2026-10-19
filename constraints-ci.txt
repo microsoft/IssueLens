@@ -1,3 +1,2 @@
-# Preserve the existing MCP protocol-test baseline without changing runtime ranges.
-# Newer SDK error masking needs a separate runtime compatibility change.
-mcp==2.0.1
+# Pin the MCP version exercised by CI within both runtime manifests' ranges.
+mcp==2.2.0

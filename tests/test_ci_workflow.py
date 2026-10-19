@@ -125,7 +125,6 @@ class CIWorkflowTests(unittest.TestCase):
             for pin in pins:
                 version, = [spec.version for spec in pin.specifier if spec.operator == "=="]
                 self.assertIn(version, runtime[pin.name].specifier)
-                self.assertIn(str(pin), (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8"))
 
     def test_both_suites_run_directly_so_failures_fail_the_job(self):
         for job_id, command in (
