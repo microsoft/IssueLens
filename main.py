@@ -232,6 +232,7 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
         "github-search_issues",
         "github-get_file",
         "github-get_pull_request",
+        "github-list_pull_request_file_manifest",
         "github-list_pull_request_files",
         "github-list_pull_request_commits",
         "github-list_pull_request_reviews",

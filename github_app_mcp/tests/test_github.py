@@ -193,6 +193,147 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
             ["2022-11-28"] + ["2026-03-10"] * 5,
         )
 
+    async def test_pull_request_file_manifest_is_compact_numbered_pagination(self):
+        files = [
+            {
+                "sha": f"{index:040x}",
+                "filename": path,
+                "status": "modified",
+                "additions": additions,
+                "deletions": deletions,
+                "changes": additions + deletions,
+                "blob_url": "https://github.example/blob",
+                "raw_url": "https://github.example/raw",
+                "contents_url": "https://api.github.example/contents",
+                "patch": "+source\n" * 100,
+            }
+            for index, (path, additions, deletions) in enumerate([
+                ("src/one.py", 10, 2),
+                ("tests/test_one.py", 20, 0),
+                ("docs/one.md", 4, 1),
+            ], start=1)
+        ]
+
+        def handler(request):
+            self.requests.append(request)
+            self.assertEqual(request.url.path, "/repos/microsoft/IssueLens/pulls/34/files")
+            per_page = int(request.url.params["per_page"])
+            page = int(request.url.params["page"])
+            start = (page - 1) * per_page
+            return httpx.Response(200, json=files[start:start + per_page])
+
+        client = GitHubClient(self.provider, transport=httpx.MockTransport(handler))
+        first = await client.list_pull_request_file_manifest(
+            "microsoft/IssueLens", 34, per_page=2,
+        )
+        second = await client.list_pull_request_file_manifest(
+            "microsoft/IssueLens", 34, per_page=2, page=first["next_page"],
+        )
+
+        self.assertEqual(first, {
+            "files": [
+                {
+                    "sha": f"{1:040x}", "filename": "src/one.py", "status": "modified",
+                    "additions": 10, "deletions": 2, "changes": 12,
+                },
+                {
+                    "sha": f"{2:040x}", "filename": "tests/test_one.py", "status": "modified",
+                    "additions": 20, "deletions": 0, "changes": 20,
+                },
+            ],
+            "next_page": 2,
+        })
+        self.assertEqual(second, {
+            "files": [
+                {
+                    "sha": f"{3:040x}", "filename": "docs/one.md", "status": "modified",
+                    "additions": 4, "deletions": 1, "changes": 5,
+                },
+            ],
+            "next_page": None,
+        })
+        self.assertNotIn("patch", json.dumps(first))
+        self.assertNotIn("_url", json.dumps(first))
+        self.assertEqual(
+            self.provider.calls,
+            [("microsoft/IssueLens", {"pull_requests": "read"})] * 2,
+        )
+
+    async def test_pull_request_file_manifest_validates_controls_and_response(self):
+        client = self.client()
+        cases = [
+            {"per_page": 0},
+            {"per_page": 101},
+            {"per_page": True},
+            {"page": 0},
+            {"page": 3001},
+            {"page": True},
+        ]
+        for arguments in cases:
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(GitHubAppError):
+                    await client.list_pull_request_file_manifest(
+                        "microsoft/IssueLens", 34, **arguments,
+                    )
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.requests, [])
+
+        client = GitHubClient(
+            self.provider,
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+        )
+        with self.assertRaisesRegex(GitHubAppError, "invalid pull request file manifest"):
+            await client.list_pull_request_file_manifest("microsoft/IssueLens", 34)
+
+    async def test_pull_request_file_manifest_projects_large_transport_before_result_limit(self):
+        files = [{
+            "sha": f"{index:040x}",
+            "filename": f"src/file-{index}.py",
+            "status": "modified",
+            "additions": 10000,
+            "deletions": 0,
+            "changes": 10000,
+            "patch": "+source\n" * 10000,
+        } for index in range(5)]
+        self.assertGreater(len(json.dumps(files).encode()), 128 * 1024)
+
+        client = GitHubClient(
+            self.provider,
+            transport=httpx.MockTransport(lambda request: httpx.Response(200, json=files)),
+        )
+        result = await client.list_pull_request_file_manifest("microsoft/IssueLens", 34)
+        self.assertLess(len(json.dumps(result, ensure_ascii=True).encode()), 100_000)
+        self.assertNotIn("+source", json.dumps(result))
+
+    async def test_pull_request_file_manifest_stops_at_page_ceiling(self):
+        payload = [{
+            "sha": "a" * 40,
+            "filename": "src/final.py",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 0,
+            "changes": 1,
+        }]
+
+        def handler(request):
+            self.requests.append(request)
+            return httpx.Response(200, json=payload)
+
+        client = GitHubClient(
+            self.provider,
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = await client.list_pull_request_file_manifest(
+            "microsoft/IssueLens", 34, per_page=1, page=3000,
+        )
+
+        self.assertEqual(result["next_page"], None)
+        self.assertEqual(result["files"], payload)
+        self.assertEqual(dict(self.requests[-1].url.params), {
+            "per_page": "1", "page": "3000",
+        })
+
     def commit_client(self, patch="+new\n", *, file_count=1):
         payload = {
             "sha": "a" * 40,
@@ -580,6 +721,32 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
         result = await client.get_repository("public/repo")
 
         self.assertEqual(result["full_name"], "public/repo")
+        self.assertNotIn("Authorization", requests[0].headers)
+
+    async def test_pull_request_manifest_preserves_anonymous_public_fallback(self):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json=[{
+                "sha": "a" * 40,
+                "filename": "src/public.py",
+                "status": "modified",
+                "additions": 2,
+                "deletions": 1,
+                "changes": 3,
+                "patch": "+public\n",
+            }])
+
+        client = GitHubClient(
+            FailingProvider(),
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = await client.list_pull_request_file_manifest("public/repo", 7)
+
+        self.assertEqual(result["files"][0]["filename"], "src/public.py")
+        self.assertNotIn("patch", result["files"][0])
         self.assertNotIn("Authorization", requests[0].headers)
 
     async def test_anonymous_fallback_reports_inaccessible_repository(self):

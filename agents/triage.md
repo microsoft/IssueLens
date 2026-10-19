@@ -71,9 +71,10 @@ Preserve existing assignees whenever assignment was requested.
 ## Repository evidence
 
 For PR or commit evidence, follow the preloaded `change-analysis` skill. Read
-small file pages through existing GitHub tools, analyze each page, and retain
-verified source references and limitations. Partial evidence cannot prove an
-absent bug or completed fix.
+the compact PR manifest first, make an explicit evidence plan, then inspect
+targeted pinned source and bounded patch groups through existing GitHub tools.
+Capture findings while reading and retain verified source references and
+limitations. Partial evidence cannot prove an absent bug or completed fix.
 
 Use targeted repository source and test inspection whenever a material triage
 conclusion depends on current implementation state. This is required when

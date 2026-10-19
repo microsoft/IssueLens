@@ -101,6 +101,7 @@ access:
 | `list_labels` | Issues: read |
 | `get_file` | Contents: read |
 | `get_pull_request` | Pull requests: read |
+| `list_pull_request_file_manifest` | Pull requests: read |
 | `list_pull_request_files` | Pull requests: read |
 | `list_pull_request_commits` | Pull requests: read |
 | `list_pull_request_reviews` | Pull requests: read |
@@ -165,26 +166,38 @@ upstream tool or response projection. Existing callers needing patches must
 now explicitly request `full_patch`. Aggregate commit stats describe the
 commit, not an individual page; do not add them again for every page.
 
-Commit-detail downloads have a **1 MiB** streamed HTTP ceiling so metadata
-projection can process responses above the ordinary **128 KiB** HTTP limit.
-Projection precedes the unchanged **100,000-byte ASCII JSON result ceiling**.
-Other REST tools retain their existing limits. Oversized input or output
-fails explicitly; no file or patch is silently truncated to fit.
+Commit-detail and PR-manifest downloads have a **1 MiB** streamed HTTP ceiling
+so metadata projection can process responses above the ordinary **128 KiB**
+HTTP limit. Projection precedes the unchanged **100,000-byte ASCII JSON result
+ceiling**. Other REST tools retain their existing limits. Oversized input or
+output fails explicitly; no file or patch is silently truncated to fit.
 
-`list_pull_request_files` keeps its list response and includes available
-patches. Reduce `per_page` after a size error, down to 1. When changing page
+`list_pull_request_file_manifest` projects GitHub's REST changed-file response
+to metadata before applying the model-result limit, removing patches and
+resource URLs. Start with up to 100 files and follow `next_page`; compare the
+unique paths observed with `get_pull_request.changed_files`. This compact
+inventory supports an explicit evidence plan before raw change content enters
+the model context. Its download uses the same bounded 1 MiB allowance as
+commit-detail projection, and public repositories retain anonymous-read
+fallback when no App installation is available.
+
+`list_pull_request_files` keeps its REST list response and includes available
+patches for evidence groups that need the exact diff, rename metadata, or
+deletion context. Start with a bounded page such as 5 rather than one file per
+model turn. Reduce `per_page` after a size error, down to 1. When changing page
 size, restart at page 1 and deduplicate after confirming source identity;
-otherwise the changed offsets can omit files. Both file pagers accept
+otherwise the changed offsets can omit files. REST file pagers accept
 `per_page=1..100` and `page=1..3000`, allowing small pages beyond the ordinary
-100-page limit. Empty or short pages end enumeration, but GitHub still caps
-each inventory at 3,000 files. PR commit lists have a separate 250-commit cap;
-`compare_commits` exposes at most 300 files and has no pagination here.
+100-page limit. Empty or short pages end enumeration. Both PR file APIs remain
+subject to GitHub's 3,000-file ceiling. PR commit lists have a separate
+250-commit cap; `compare_commits` exposes at most 300 files and has no
+pagination here.
 
-PR file pages cannot be pinned to a SHA. The capability skill checks PR
-base/head SHAs and changed-file counts before and after paging, and requires
-re-establishing evidence if they changed. Commit pages and `get_file` context
-reads should use full verified SHAs. Missing patches, binary content,
-oversized individual files, and API caps remain explicit limitations.
+PR file manifests and patch pages cannot be pinned to a SHA. The capability
+skill checks PR base/head SHAs and changed-file counts before and after paging,
+and requires re-establishing evidence if they changed. Commit pages and
+`get_file` context reads should use full verified SHAs. Missing patches, binary
+content, oversized individual files, and API caps remain explicit limitations.
 `get_file` still supports only bounded UTF-8 files up to 64 KiB; no automatic
 resource-link download or arbitrary range-read support is implied.
 

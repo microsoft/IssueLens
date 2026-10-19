@@ -10,8 +10,11 @@ class AgentPromptTests(unittest.TestCase):
     def test_change_analysis_is_read_only_and_preserves_job_ownership(self):
         skill = (ROOT / "skills" / "change-analysis" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("ordinary tool/model turns", skill)
+        self.assertIn("list_pull_request_file_manifest(per_page=100, page=1)", skill)
+        self.assertIn("make an explicit evidence plan", skill)
         self.assertIn("list_pull_request_files", skill)
         self.assertIn('get_commit(detail="full_patch", per_page=1, page=1)', skill)
+        self.assertIn("Do not begin a PR by streaming one patch per model turn", skill)
         self.assertIn("restart at `page=1`", skill)
         self.assertIn("re-read PR metadata", skill)
         self.assertIn("unsupported content", skill)
