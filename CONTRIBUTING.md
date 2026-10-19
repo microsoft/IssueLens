@@ -217,11 +217,11 @@ OIDC/RBAC access, hosted readiness, or wiki publication.
 
 [`requirements-ci.txt`](requirements-ci.txt) pins PyYAML, `packaging`, and PyPA
 `build`. [`constraints-ci.txt`](constraints-ci.txt), loaded by the CI
-requirements and clean wheel installation, fixes the tested MCP baseline at
-`mcp==2.0.1`, within both runtime manifests' supported range. This is not a full
-dependency lock or coverage of every newer MCP release. MCP 2.2.0 masks
-tool-error details asserted by existing wiki protocol tests; review the
-constraint when updating SDK support rather than weakening those assertions.
+requirements and clean wheel installation, records the tested MCP baseline.
+See that file for the current version, which must satisfy both runtime
+manifests' supported ranges. This is not a full dependency lock or coverage of
+every newer MCP release. When updating MCP, rerun the protocol tests and
+review behavior changes rather than weakening their assertions.
 `compileall` checks syntax, not formatting, types, or style.
 
 Actions and actionlint source are pinned to immutable commits. Dependabot
