@@ -240,6 +240,28 @@ def create_server(
         return await github.list_pull_request_files(repository, pull_number, per_page=per_page, page=page)
 
     @server.tool()
+    async def list_pull_request_file_manifest(
+        repository: str,
+        pull_number: int,
+        per_page: _PerPage = 100,
+        page: _FilePage = 1,
+    ) -> Any:
+        """Read a compact page of changed-file paths and line counts without patches.
+
+        Start with this tool to inventory and plan a large PR before requesting
+        patch pages or pinned source files. Follow next_page until null, then
+        compare the unique paths with get_pull_request.changed_files. Re-read PR
+        metadata after pagination because this manifest cannot pin a commit.
+        GitHub's 3,000-file ceiling still applies.
+        """
+        return await github.list_pull_request_file_manifest(
+            repository,
+            pull_number,
+            per_page=per_page,
+            page=page,
+        )
+
+    @server.tool()
     async def list_pull_request_commits(repository: str, pull_number: int, per_page: int = 30, page: int = 1) -> Any:
         """List bounded PR commit metadata (GitHub's 250-commit endpoint ceiling applies)."""
         return await github.list_pull_request_commits(repository, pull_number, per_page=per_page, page=page)

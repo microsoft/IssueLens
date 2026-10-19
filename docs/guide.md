@@ -353,15 +353,17 @@ is configurable through `output-mode` and `summary-mode`; use activity/status
 or quiet/none when the log audience should not see agent text.
 `needs-review`, failures, invalid results, and incomplete streams fail the job.
 GitHub readers can reject oversized metadata or patches. For change evidence,
-the agent uses small file pages and targeted source reads instead of repeating
-the same oversized request. Unsupported content and missing evidence remain
-explicit limitations, never unverified maintenance success.
+the agent first inventories paths without patches, plans the material evidence,
+and then uses targeted source reads or bounded patch groups instead of
+repeating the same oversized request. Unsupported content and missing evidence
+remain explicit limitations, never unverified maintenance success.
 The batch request identifies complete range/inventory validation as preflight's
 responsibility; it does not require the agent to repeat it with the unpaginated
 `compare_commits` tool. That patch-bearing response can exceed its 128-KiB limit
-even for one merge. The agent revalidates each listed PR and uses small file pages
-and targeted pinned-source reads instead. A `needs-review` receipt from that
-optional bulk call is not an Actions-variable or Azure-login failure. After
+even for one merge. The agent revalidates each listed PR, builds a compact
+changed-file manifest and evidence plan, and uses targeted pinned-source reads
+plus bounded patch groups instead. A `needs-review` receipt from that optional
+bulk call is not an Actions-variable or Azure-login failure. After
 merging a caller-request fix, start a new authorized manual coordinator run for
 the affected PR; rerunning the old run retains its original code revision.
 
@@ -416,9 +418,12 @@ are not proof of publication. Sensitive/conflicting changes require human review
 
 The `triage`, `plan`, and `team-memory` agents preload the `change-analysis`
 skill. It guides normal Copilot tool/model turns using existing GitHub reads:
-PR metadata, small `list_pull_request_files` pages, and targeted `get_file`
-reads at verified commit SHAs. A size error prompts smaller pages, down to one
-file per call, with pagination restarted when the page size changes.
+PR metadata, a patch-free `list_pull_request_file_manifest`, an explicit
+component/evidence plan, targeted `get_file` reads at verified commit SHAs,
+and bounded patch pages only where the exact diff is material. Findings are
+captured while each group is read instead of retaining raw patches as working
+memory. A patch size error prompts smaller pages, down to one file per call,
+with pagination restarted when the page size changes.
 
 `get_commit` now supports upstream-style `detail="none" | "stats" | "full_patch"`
 and file pagination. **The default is `stats`, without patches**; callers that
@@ -430,11 +435,12 @@ additional SDK runtime is involved.
 
 | Boundary | Default limit |
 | --- | --- |
-| REST HTTP response | 128 KiB; commit detail only: 1 MiB before projection |
+| REST HTTP response | 128 KiB; commit detail and PR manifest projection: 1 MiB before projection |
 | REST JSON result | 100,000 serialized bytes |
 | SDK output-file threshold | 128 KiB, above the PR/commit result budget to avoid requiring local file access |
 | `get_file` text | 64 KiB |
-| PR/commit file pagination | 1-100 files per page, at most 3,000 pages; GitHub's 3,000-file ceiling still applies |
+| PR manifest pagination | 1-100 patch-free files per numbered page; GitHub's 3,000-file ceiling still applies |
+| PR/commit patch pagination | 1-100 files per page, at most 3,000 pages; GitHub's 3,000-file ceiling still applies |
 
 Pages remain in the ordinary SDK conversation; this is not a hard total-context
 bound or a guarantee of exhaustive analysis. PR metadata is revalidated around

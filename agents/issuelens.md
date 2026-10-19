@@ -85,10 +85,11 @@ changes or authorize additional writes. Preserve routing and parent-facing
 output contracts, including the critical-issue JSON report. Missing wiki tools
 or invalid memory customization must be reported, not replaced by shell access.
 
-The `change-analysis` skill guides paged PR/commit retrieval within the owning
-triage, planning, or maintenance job; it is not a new job owner. Route normally.
-The responsible agent uses the existing bundled GitHub MCP reads over ordinary
-tool/model turns. Partial evidence does not grant writes or establish no-change.
+The `change-analysis` skill guides compact PR inventory, explicit evidence
+planning, and bounded PR/commit retrieval within the owning triage, planning,
+or maintenance job; it is not a new job owner. Route normally. The responsible
+agent uses the existing bundled GitHub MCP reads over ordinary tool/model
+turns. Partial evidence does not grant writes or establish no-change.
 
 For maintenance jobs spanning multiple sources, preserve the complete source
 list, revision constraints, requested response format, and any explicit partial

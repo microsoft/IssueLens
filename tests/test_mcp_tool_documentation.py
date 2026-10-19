@@ -16,6 +16,7 @@ REST_READ_PERMISSIONS = {
     "list_labels": "issues",
     "get_file": "contents",
     "get_pull_request": "pull_requests",
+    "list_pull_request_file_manifest": "pull_requests",
     "list_pull_request_files": "pull_requests",
     "list_pull_request_commits": "pull_requests",
     "list_pull_request_reviews": "pull_requests",

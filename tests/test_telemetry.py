@@ -447,6 +447,56 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(next(f for f in facts if f["repository"] == "org/repo")["operations"], 2)
         self.assertEqual(next(f for f in facts if f["repository"] == "pr/repo")["target_kind"], "pull_request")
 
+    def test_pull_request_manifest_has_read_target_and_static_error_telemetry(self):
+        self.run.observe(event("tool.execution_start", {
+            "toolCallId": "manifest",
+            "toolName": "github-list_pull_request_file_manifest",
+            "arguments": {
+                "repository": "Manifest/Repo",
+                "pull_number": 58,
+                "per_page": 100,
+                "page": 1,
+            },
+        }))
+        self.run.observe(event("tool.execution_complete", {
+            "toolCallId": "manifest",
+            "success": False,
+            "result": {
+                "structuredContent": {
+                    "success": False,
+                    "outcome": "not_applied",
+                    "result": None,
+                    "error": {
+                        "type": "limit_exceeded",
+                        "message": "PRIVATE-CANARY",
+                        "telemetry_message": "Tool operation exceeded a configured limit.",
+                        "http_status": None,
+                    },
+                },
+            },
+        }))
+        result = self.complete()
+
+        target, = self.backend.facts("issuelens.run.target")
+        self.assertEqual(
+            (
+                target["repository"],
+                target["target_kind"],
+                target["number"],
+                target["relationship"],
+            ),
+            ("manifest/repo", "pull_request", 58, "attempted"),
+        )
+        error, = self.backend.facts("issuelens.run.error")
+        self.assertEqual(error["tool"], "github-list_pull_request_file_manifest")
+        self.assertEqual(error["error_type"], "limit_exceeded")
+        self.assertEqual(
+            error["error_message"],
+            "Tool operation exceeded a configured limit.",
+        )
+        self.assertEqual(result["tools_failed"], 1)
+        self.assertNotIn("PRIVATE-CANARY", json.dumps(self.backend.events))
+
     def test_reaction_targets_use_issue_and_pull_request_numbers(self):
         expected = set()
         for kind, number in (("issue", 42), ("pull_request", 43)):
