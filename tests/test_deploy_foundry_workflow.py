@@ -34,6 +34,7 @@ class FoundryDeploymentWorkflowTests(unittest.TestCase):
         cls.gate = cls.steps[1]
         cls.extensions = next(step for step in cls.steps
                               if step["name"] == "Install and verify the Foundry extension")
+        cls.responses = next(step for step in cls.steps if step.get("id") == "responses")
         cls.invocations = next(step for step in cls.steps if step.get("id") == "invocations")
 
     def run_workflow_step(self, step, stub, env):
@@ -107,6 +108,71 @@ azd() {
             "LIST_EXIT": str(list_exit),
         })
 
+    def responses_sse(self, reply="ISSUELENS_DEPLOYMENT_OK"):
+        event = {
+            "type": "response.completed",
+            "response": {
+                "status": "completed", "error": None, "incomplete_details": None,
+                "output": [{
+                    "type": "message", "role": "assistant", "status": "completed",
+                    "content": [{"type": "output_text", "text": reply}],
+                }],
+            },
+        }
+        return f"event: response.completed\ndata: {json.dumps(event)}\n\ndata: [DONE]\n\n"
+
+    def run_responses_smoke(self, stream, *, invocation_exit=0):
+        stub = """
+azd() {
+  if [[ "$*" != "ai agent invoke IssueLens $AGENT_TEST_PROMPT --environment $AZD_ENV_NAME --protocol responses --version $AGENT_VERSION --new-session --new-conversation --timeout 300 --output raw --no-prompt" ]]; then
+    return 99
+  fi
+  printf '%s' "$RESPONSES_SSE"
+  return "$RESPONSES_EXIT"
+}
+"""
+        if os.name == "nt":
+            # Git Bash cannot set RLIMIT_FSIZE; Linux CI exercises the real limit.
+            stub += '\nulimit() { [[ "$*" == "-f 8192" ]]; }\n'
+        with tempfile.TemporaryDirectory() as directory:
+            return self.run_workflow_step(self.responses, stub, self.workflow["env"] | {
+                "RUNNER_TEMP": pathlib.Path(directory).as_posix(),
+                "AGENT_VERSION": "40",
+                "RESPONSES_SSE": stream,
+                "RESPONSES_EXIT": str(invocation_exit),
+            })
+
+    def test_responses_accept_exact_completed_reply(self):
+        result = self.run_responses_smoke(self.responses_sse())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "")
+
+    def test_responses_reject_invalid_streams_with_extended_timeout(self):
+        valid = self.responses_sse()
+        cases = {
+            "empty": "",
+            "CLI heading only": "Invoking agent IssueLens\n",
+            "wrong reply": self.responses_sse("wrong"),
+            "extra whitespace": self.responses_sse("ISSUELENS_DEPLOYMENT_OK\n"),
+            "cancelled": valid.replace('"status": "completed"', '"status": "cancelled"'),
+            "missing completion": "event: response.in_progress\ndata: {}\n\n",
+            "duplicate completion": valid + valid,
+            "malformed JSON": valid + "data: not JSON\n\n",
+            "error after reply": valid + 'data: {"type":"error","message":"synthetic-error"}\n\n',
+        }
+        for name, stream in cases.items():
+            with self.subTest(case=name):
+                result = self.run_responses_smoke(stream)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::Responses did not complete", result.stdout)
+                self.assertNotIn("synthetic-error", result.stdout + result.stderr)
+
+    def test_responses_reject_nonzero_azd_exit_even_with_valid_output(self):
+        result = self.run_responses_smoke(self.responses_sse(), invocation_exit=9)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("::error::Responses invocation failed", result.stdout)
+        self.assertNotIn("::error::Responses did not complete", result.stdout)
+
     def invocation_events(self):
         return [
             {
@@ -129,7 +195,7 @@ azd() {
     def run_invocations_smoke(self, stream, *, invocation_exit=0):
         stub = """
 azd() {
-  if [[ "$*" != "ai agent invoke IssueLens --environment $AZD_ENV_NAME --protocol invocations --input-file $RUNNER_TEMP/issuelens-payload.json --version $AGENT_VERSION --new-session --timeout 120 --output raw --no-prompt" ]]; then
+  if [[ "$*" != "ai agent invoke IssueLens --environment $AZD_ENV_NAME --protocol invocations --input-file $RUNNER_TEMP/issuelens-payload.json --version $AGENT_VERSION --new-session --timeout 300 --output raw --no-prompt" ]]; then
     return 99
   fi
   jq -e --arg input "$AGENT_TEST_PROMPT" '. == {input: $input}' "$RUNNER_TEMP/issuelens-payload.json" >/dev/null || return 98
@@ -529,14 +595,15 @@ azd() {
         self.assertIn('.version == $version and .status == "active"', status["run"])
         for protocol in ("responses", "invocations"):
             step = next(step for step in self.steps if step.get("id") == protocol)
-            self.assertEqual(step["timeout-minutes"], "3")
+            self.assertEqual(step["timeout-minutes"], "6")
             self.assertEqual(step["env"], {"AGENT_VERSION": "${{ steps.status.outputs.version }}"})
             for text in (
                 f"--protocol {protocol}", '--version "$AGENT_VERSION"', "--new-session",
-                "--timeout 120", "--output raw", "ulimit -f 8192",
+                "--timeout 300", "--output raw", "ulimit -f 8192",
                 'jq -e -s --arg expected "$EXPECTED_REPLY"', "exit 1",
             ):
                 self.assertIn(text, step["run"])
+            self.assertEqual(step["run"].count("azd ai agent invoke"), 1)
         self.assertIn('--arg input "$AGENT_TEST_PROMPT" \'{input: $input}\'', self.commands)
         self.assertIn("--new-conversation", self.commands)
         self.assertIn('select(.type == "response.completed")', self.commands)
@@ -583,6 +650,8 @@ azd() {
             "1.34.2", "1.0.0-beta.2",
             "No automatic retry or rollback", "No live deployment",
             "installedVersion", "--no-dependencies", "Bash and jq",
+            "each invocation to 300 seconds within a 6-minute step",
+            "does not add workflow-level retries",
         ):
             self.assertIn(text, guide)
         for name, version in FOUNDRY_EXTENSIONS.items():
