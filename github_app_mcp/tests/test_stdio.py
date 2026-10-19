@@ -20,6 +20,7 @@ READ_TOOLS = {
     "list_labels",
     "get_file",
     "get_pull_request",
+    "list_pull_request_file_manifest",
     "list_pull_request_files",
     "list_pull_request_commits",
     "list_pull_request_reviews",

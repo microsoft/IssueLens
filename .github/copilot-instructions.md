@@ -85,13 +85,16 @@ protocol for chat.
     process loads the private key lazily, resolves installations, and caches
     short-lived tokens only in memory for its process/session lifetime. A token
     is restricted to one repository and the minimum tool permission set.
-  - **Paged change analysis** — the `change-analysis` skill guides existing
-    agents through small PR/commit file pages and targeted pinned-source reads
-    using the bundled GitHub MCP and normal Copilot tool/model turns. There is
-    no separate analysis runtime or custom diff reader. `get_commit` supports
-    upstream-style `none`/`stats`/`full_patch` detail and file pagination, with
-    separate bounded transport and model-result sizes. Missing evidence remains
-    explicit and cannot establish no-change or successful publication.
+  - **Planned change analysis** — the `change-analysis` skill first inventories
+    PR paths through a compact patch-free manifest, then guides existing agents
+    through an explicit evidence plan, targeted pinned-source reads, and bounded
+    patch pages only where the exact diff is material. Commit evidence remains
+    paged. All analysis uses the bundled GitHub MCP and normal Copilot
+    tool/model turns; there is no separate analysis runtime or custom diff
+    reader. `get_commit` supports upstream-style
+    `none`/`stats`/`full_patch` detail and file pagination, with separate bounded
+    transport and model-result sizes. Missing evidence remains explicit and
+    cannot establish no-change or successful publication.
   - **Issue-body images** — before the model turn, the trusted host loader
     resolves explicit issue URLs or `owner/repository#number` references using
     the protocol's GitHub identity, accepts only allowlisted GitHub-hosted image

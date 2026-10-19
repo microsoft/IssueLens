@@ -357,6 +357,28 @@ class GitHubClient:
             params=_pagination(per_page, page, max_page=3000),
         )
 
+    async def list_pull_request_file_manifest(
+        self,
+        repository: str,
+        pull_number: int,
+        *,
+        per_page: int = 100,
+        page: int = 1,
+    ) -> Any:
+        """Read compact changed-file metadata without returning patches."""
+        files = await self._request(
+            "GET",
+            repository,
+            f"/pulls/{_positive(pull_number, 'pull_number')}/files",
+            permissions={"pull_requests": "read"},
+            params=_pagination(per_page, page, max_page=3000),
+            _pull_request_file_manifest=True,
+        )
+        return {
+            "files": files,
+            "next_page": page + 1 if len(files) == per_page else None,
+        }
+
     async def list_pull_request_commits(
         self, repository: str, pull_number: int, *, per_page: int = 30, page: int = 1
     ) -> Any:
@@ -1116,6 +1138,7 @@ class GitHubClient:
         content_read_auth: _ContentReadAuth | None = None,
         _client: httpx.AsyncClient | None = None,
         _commit_detail: CommitDetail | None = None,
+        _pull_request_file_manifest: bool = False,
         _api_version: str = _API_VERSION,
     ) -> Any:
         repository = self._authorize(repository, write=write)
@@ -1179,7 +1202,8 @@ class GitHubClient:
                     content = bytearray()
                     limit = (
                         _MAX_COMMIT_HTTP_RESPONSE_BYTES
-                        if _commit_detail is not None else _MAX_HTTP_RESPONSE_BYTES
+                        if _commit_detail is not None or _pull_request_file_manifest
+                        else _MAX_HTTP_RESPONSE_BYTES
                     )
                     async for chunk in response.aiter_bytes():
                         content.extend(chunk)
@@ -1234,6 +1258,20 @@ class GitHubClient:
                     {key: value for key, value in item.items() if key != "patch"}
                     for item in files
                 ]
+        if _pull_request_file_manifest:
+            if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+                raise GitHubAppError(
+                    "GitHub returned an invalid pull request file manifest",
+                    error_type="invalid_response",
+                )
+            payload = [
+                {
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"patch", "blob_url", "raw_url", "contents_url"}
+                }
+                for item in payload
+            ]
         if len(json.dumps(payload, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
             raise GitHubAppError(
                 "GitHub response is too large; narrow the request", error_type="limit_exceeded",

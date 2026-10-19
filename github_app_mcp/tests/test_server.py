@@ -35,6 +35,7 @@ READ_TOOLS = {
     "list_labels",
     "get_file",
     "get_pull_request",
+    "list_pull_request_file_manifest",
     "list_pull_request_files",
     "list_pull_request_commits",
     "list_pull_request_reviews",
@@ -264,11 +265,15 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             )
         ])
 
-    async def test_commit_detail_and_pagination_are_discoverable_and_forwarded(self):
+    async def test_change_inventory_controls_are_discoverable_and_forwarded(self):
         github = FakeGitHubClient()
         server = create_server(cast(GitHubClient, github))
         async with Client(server) as client:
             tools = await client.list_tools()
+            manifest = await client.call_tool("list_pull_request_file_manifest", {
+                "repository": "microsoft/IssueLens", "pull_number": 34,
+                "page": 101,
+            })
             default = await client.call_tool("get_commit", {
                 "repository": "microsoft/IssueLens", "sha": "a" * 40,
             })
@@ -276,15 +281,27 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
                 "repository": "microsoft/IssueLens", "sha": "a" * 40,
                 "detail": "full_patch", "per_page": 1, "page": 101,
             })
+        self.assertFalse(manifest.is_error)
         self.assertFalse(default.is_error)
         self.assertFalse(full.is_error)
-        tool = next(tool for tool in tools.tools if tool.name == "get_commit")
-        properties = tool.input_schema["properties"]
-        self.assertEqual(properties["detail"]["default"], "stats")
-        self.assertEqual(set(properties["detail"]["enum"]), {"none", "stats", "full_patch"})
-        self.assertEqual(properties["per_page"]["maximum"], 100)
-        self.assertEqual(properties["page"]["maximum"], 3000)
+        manifest_tool = next(
+            tool for tool in tools.tools
+            if tool.name == "list_pull_request_file_manifest"
+        )
+        manifest_properties = manifest_tool.input_schema["properties"]
+        self.assertEqual(manifest_properties["per_page"]["default"], 100)
+        self.assertEqual(manifest_properties["per_page"]["maximum"], 100)
+        self.assertEqual(manifest_properties["page"]["maximum"], 3000)
+        commit_tool = next(tool for tool in tools.tools if tool.name == "get_commit")
+        commit_properties = commit_tool.input_schema["properties"]
+        self.assertEqual(commit_properties["detail"]["default"], "stats")
+        self.assertEqual(set(commit_properties["detail"]["enum"]), {"none", "stats", "full_patch"})
+        self.assertEqual(commit_properties["per_page"]["maximum"], 100)
+        self.assertEqual(commit_properties["page"]["maximum"], 3000)
         self.assertEqual(github.calls, [
+            ("list_pull_request_file_manifest", ("microsoft/IssueLens", 34), {
+                "per_page": 100, "page": 101,
+            }),
             ("get_commit", ("microsoft/IssueLens", "a" * 40), {
                 "detail": "stats", "per_page": 30, "page": 1,
             }),

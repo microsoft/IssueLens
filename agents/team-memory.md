@@ -69,13 +69,16 @@ supported, subject to job authorization and destination App access.
 ## Maintain project knowledge
 
 For PR/commit evidence, follow the preloaded `change-analysis` skill. Verify
-the supplied source constraints, then read small PR/commit file pages through
-the existing GitHub MCP tools and analyze them across ordinary model turns.
-Verify post-merge claims against source at the authoritative merged SHA. The
-final commit of a multi-commit rebase merge does not cover the whole PR.
-Keep concise source references and findings rather than reproducing patches.
-Missing evidence needed for publication is `needs-review`, never no-change or
-permission to write. Analysis itself authorizes no write.
+the supplied source constraints, build a compact changed-file manifest, and
+make an explicit evidence plan before reading patches or source. Inspect
+material implementation, interfaces, configuration, documentation, and tests
+in bounded groups; prefer pinned source reads and request patch pages only when
+the exact diff is needed. Capture concise findings while reading so raw diffs
+do not become the job's long-term memory. Verify post-merge claims against
+source at the authoritative merged SHA. The final commit of a multi-commit
+rebase merge does not cover the whole PR. Missing evidence needed for
+publication is `needs-review`, never no-change or permission to write.
+Analysis itself authorizes no write.
 
 When a job covers multiple source changes, retain each source's identity and
 outcome. Analyze dependencies, reversals, and superseded changes before proposing

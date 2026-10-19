@@ -109,8 +109,9 @@ define expected behavior. Prefer current executable behavior and tests over
 issue prose or historical assumptions.
 
 For PR or commit evidence, follow the preloaded `change-analysis` skill:
-retrieve small file pages, analyze them across ordinary tool/model turns, and
-use verified commit SHAs for targeted source reads. Retain concise evidence
+inventory PR paths without patches, make an explicit evidence plan, analyze
+targeted source and bounded patch groups across ordinary tool/model turns, and
+use verified commit SHAs for pinned source reads. Retain concise evidence
 references and report uninspected files or unresolved cross-file questions as
 explicit planning limitations.
 
