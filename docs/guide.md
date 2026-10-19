@@ -254,7 +254,7 @@ run through invocation and result validation, plus at most 100 pending runs.
 An accepted dispatch is not a completed maintenance job; inspect the
 coordinator's outcome. Monitor queue overflow and failed/canceled runs rather
 than assuming guaranteed delivery. The queue wait happens before an agent
-invocation, outside its 15-minute response-read budget.
+invocation, outside its 30-minute response-read budget.
 
 This rollout accepts only `microsoft/IssueLens` sources. Its request requires
 the agent to verify the validated wiki destination matches `microsoft/IssueLens`
@@ -316,7 +316,7 @@ Teams conversation, or other delivery surface. Changes to those shared
 instructions require normal deployment approval; changing caller metadata or
 formatting does not introduce a new agent protocol.
 
-The job has a 30-minute timeout, providing setup and discovery headroom around
+The job has a 45-minute timeout, providing setup and discovery headroom around
 the bounded streamed response. It submits once
 without following redirects or automatically retrying a write-capable request.
 It requires an SSE completion event and a final structured result matching the
