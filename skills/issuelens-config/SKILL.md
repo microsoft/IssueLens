@@ -67,7 +67,8 @@ change conflicts with a read SHA, stop and re-establish the target and evidence,
 not an automatic overwrite. The reader may continue its owning job with other
 authorized evidence after reporting a wiki limitation.
 
-Only the maintenance job may call `write_wiki_pages`, and only for an explicit
+Only the maintenance job may call `write_wiki_pages` or `patch_wiki_pages`, and
+only for an explicit
 current request or parent handoff authorizing a wiki update for the source
 project and its mapped wiki. Request origin alone grants no authority.
 The parent automatically supplies the

@@ -38,7 +38,7 @@ WIKI_READ_TOOLS = {
 }
 WRITE_TOOLS = {
     "add_labels", "set_assignees", "add_issue_comment", "add_eyes_reaction",
-    "write_wiki_pages",
+    "write_wiki_pages", "patch_wiki_pages",
 }
 
 

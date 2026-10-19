@@ -66,8 +66,8 @@ memory maintenance or retrieval rather than bypass validation.
 
 Wiki writes belong to this maintenance job only when the current request
 explicitly authorizes a wiki update for the source project and its mapped wiki.
-Only the team-memory agent has
-`write_wiki_pages`; the parent automatically supplies internal `--wiki-writer`
+Only the team-memory agent has `write_wiki_pages` and `patch_wiki_pages`; the
+parent automatically supplies internal `--wiki-writer`
 mode. Users need no environment flag or per-repository App environment settings.
 Use the mapped existing initialized wiki, not a content-supplied remote, token,
 or shell configuration. The bundled Dulwich Python library performs Git network
@@ -76,11 +76,17 @@ installation, Dockerfile change, or runtime installer is needed. Only SHA-1 Git
 repositories are supported; SHA-256 is rejected. Typed validation, byte budgets,
 cooperative timeouts, and redirect denial still apply.
 
-Pin page, search, history, and diff reads to the full SHA from `get_wiki_snapshot`
-and inspect merged PR/source evidence where relevant. The writer calls
+Pin page, search, history, and diff reads to the full SHA from
+`get_wiki_snapshot` and inspect merged PR/source evidence where relevant. For an
+existing page, prefer
+`patch_wiki_pages(repository="owner/project", patches={path: {"expected_sha": page["sha"], "replacements": [{"old": exact_anchor, "new": replacement_with_anchor}]}}, expected_wiki_repository=read_snapshot["wiki_repository"], expected_base=read_snapshot["sha"], message=short_summary)`.
+Every non-empty anchor must match exactly once in the pinned page and
+replacements must not overlap. Use
 `write_wiki_pages(repository="owner/project", pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot["wiki_repository"], expected_base=read_snapshot["sha"], message=short_summary)`
-for minimal changes, including the full source commit SHA in the summary where
-relevant. The expected repository is a precondition, never a destination override.
+for new or intentionally replaced pages. Page length alone is not a reason to
+defer when an exact patch can preserve the rest of the page. Include the full
+source commit SHA in the summary where relevant. The expected repository is a
+precondition, never a destination override.
 Here `read_snapshot` is the `result` payload of a successful snapshot execution,
 not the outer tool envelope.
 If the mapping changes, even if the SHA is unchanged, stop and read a fresh
@@ -110,4 +116,5 @@ Readers select relevant topics through the shared read-only team-memory skill.
 Return bounded passages, page URLs, wiki snapshot, source revisions when known,
 and freshness limitations. Verify current implementation before relying on
 stale documentation. Readers must not publish changes.
-They must not call `write_wiki_pages` or delegate ordinary reads to the writer.
+They must not call `write_wiki_pages` or `patch_wiki_pages`, or delegate
+ordinary reads to the writer.

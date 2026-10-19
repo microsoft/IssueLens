@@ -515,8 +515,8 @@ class TelemetryTests(unittest.TestCase):
         self.assertEqual(issues[0]["operations"], 2)
 
     def test_wiki_destination_is_separate_from_source(self):
-        self.tool_start("wiki", "wiki-writer-write_wiki_pages", issue_number=None)
-        self.tool_end("wiki", source_repository="org/repo", wiki_repository="org/memory", status="no-change")
+        self.tool_start("wiki", "wiki-writer-patch_wiki_pages", issue_number=None)
+        self.tool_end("wiki", source_repository="org/repo", wiki_repository="org/memory", status="updated")
         result = self.complete()
         facts = self.backend.facts("issuelens.run.target")
         self.assertFalse(any(f["repository"] == "org/repo" and f["relationship"] == "write_succeeded" for f in facts))

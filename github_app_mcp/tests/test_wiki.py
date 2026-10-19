@@ -112,6 +112,195 @@ class WikiTests(WikiFixture, unittest.TestCase):
             self.assertEqual(self.remote_repo.object_store[updated["sha"].encode("ascii")].author,
                              b"IssueLens App <123+issuelens[bot]@users.noreply.github.com>")
 
+    def test_exact_patch_preserves_unrelated_page_bytes_and_assets(self) -> None:
+        base = self.seed_entries({
+            "Home.md": ("100644", b"# Home\r\nWelcome\r\n\r\n## Existing\r\nKeep me\r\n"),
+        })
+        with self.local_wiki("example/repository") as wiki:
+            page = wiki.page("Home.md", base)
+            asset = self.object_id(base, "images/logo.bin")
+            result = self.patch_pages(wiki, {
+                "Home.md": {
+                    "expected_sha": page["sha"],
+                    "replacements": [{
+                        "old": "## Existing\r\n",
+                        "new": "## Added\r\nNew knowledge\r\n\r\n## Existing\r\n",
+                    }],
+                },
+            }, base)
+            self.assertEqual(result["status"], "updated")
+            self.assertEqual(result["pages"], ["Home.md"])
+            self.assertEqual(
+                wiki.page("Home.md")["content"],
+                "# Home\r\nWelcome\r\n\r\n## Added\r\nNew knowledge\r\n\r\n"
+                "## Existing\r\nKeep me\r\n",
+            )
+            self.assertEqual(self.object_id(result["sha"], "images/logo.bin"), asset)
+            self.assertEqual(
+                self.remote_repo.object_store[result["sha"].encode("ascii")].parents,
+                [base.encode("ascii")],
+            )
+
+    def test_patch_rejects_changed_missing_repeated_and_overlapping_anchors(self) -> None:
+        base = self.seed_entries({
+            "Repeated.md": ("100644", b"same\nsame\n"),
+            "Overlap.md": ("100644", b"abcdef\n"),
+            "link.md": ("120000", b"Home.md"),
+        })
+        cases = (
+            ("changed page", {
+                "Home.md": {
+                    "expected_sha": "0" * 40,
+                    "replacements": [{"old": "Welcome", "new": "Updated"}],
+                },
+            }, "conflict"),
+            ("missing page", {
+                "Missing.md": {
+                    "expected_sha": "0" * 40,
+                    "replacements": [{"old": "Missing", "new": "Updated"}],
+                },
+            }, "not_found"),
+            ("symlink", {
+                "link.md": {
+                    "expected_sha": self.object_id(base, "link.md"),
+                    "replacements": [{"old": "Home.md", "new": "Other.md"}],
+                },
+            }, "conflict"),
+            ("missing anchor", {
+                "Home.md": {
+                    "expected_sha": self.object_id(base, "Home.md"),
+                    "replacements": [{"old": "Missing", "new": "Updated"}],
+                },
+            }, "conflict"),
+            ("repeated anchor", {
+                "Repeated.md": {
+                    "expected_sha": self.object_id(base, "Repeated.md"),
+                    "replacements": [{"old": "same", "new": "updated"}],
+                },
+            }, "conflict"),
+            ("overlap", {
+                "Overlap.md": {
+                    "expected_sha": self.object_id(base, "Overlap.md"),
+                    "replacements": [
+                        {"old": "abcd", "new": "first"},
+                        {"old": "cdef", "new": "second"},
+                    ],
+                },
+            }, "conflict"),
+        )
+        for name, patches, error_type in cases:
+            with self.subTest(name=name), self.local_wiki("example/repository") as wiki:
+                with patch.object(wiki._transport, "send_pack", wraps=wiki._transport.send_pack) as send:
+                    with self.assertRaises(WikiError) as raised:
+                        self.patch_pages(wiki, patches, base)
+                self.assertEqual(raised.exception.error_type, error_type)
+                self.assertEqual(raised.exception.outcome, "not_applied")
+                send.assert_not_called()
+                self.assertEqual(self.tip(), base)
+
+    def test_patch_validates_every_replacement_before_reading_pages(self) -> None:
+        invalid = (
+            {},
+            {"Home.md": {"expected_sha": self.object_id(self.base, "Home.md"), "replacements": []}},
+            {"Home.md": {"expected_sha": "invalid", "replacements": [{"old": "a", "new": "b"}]}},
+            {"Home.md": {
+                "expected_sha": self.object_id(self.base, "Home.md"),
+                "replacements": [{"old": "", "new": "b"}],
+            }},
+            {"Home.md": {
+                "expected_sha": self.object_id(self.base, "Home.md"),
+                "replacements": [{"old": "a", "new": "a"}],
+            }},
+        )
+        with self.local_wiki("example/repository") as wiki, patch.object(
+            wiki, "_inventory", wraps=wiki._inventory,
+        ) as inventory:
+            for patches in invalid:
+                with self.subTest(patches=patches), self.assertRaises(WikiError) as raised:
+                    self.patch_pages(wiki, patches)
+                self.assertEqual(raised.exception.error_type, "invalid_input")
+            inventory.assert_not_called()
+
+    def test_patch_enforces_resulting_page_limit_before_publication(self) -> None:
+        with self.local_wiki("example/repository") as wiki:
+            page = wiki.page("Home.md")
+            with patch.object(wiki._transport, "send_pack", wraps=wiki._transport.send_pack) as send:
+                with self.assertRaisesRegex(WikiError, "page byte limit") as raised:
+                    self.patch_pages(wiki, {
+                        "Home.md": {
+                            "expected_sha": page["sha"],
+                            "replacements": [{
+                                "old": "Welcome",
+                                "new": "a" * (64 * 1024),
+                            }],
+                        },
+                    })
+            self.assertEqual(raised.exception.outcome, "not_applied")
+            send.assert_not_called()
+            self.assertEqual(self.tip(), self.base)
+
+    def test_patch_enforces_replacement_count_and_input_byte_limits(self) -> None:
+        content = "".join(f"token-{index:02d}\n" for index in range(40))
+        base = self.seed_entries({"Limits.md": ("100644", content.encode("utf-8"))})
+        replacements = [
+            {"old": f"token-{index:02d}", "new": f"value-{index:02d}"}
+            for index in range(40)
+        ]
+        with self.local_wiki("example/repository") as wiki:
+            page = wiki.page("Limits.md", base)
+            updated = self.patch_pages(wiki, {
+                "Limits.md": {
+                    "expected_sha": page["sha"],
+                    "replacements": replacements,
+                },
+            }, base)
+            self.assertEqual(updated["status"], "updated")
+            updated_page = wiki.page("Limits.md", updated["sha"])
+            self.assertNotIn("token-", updated_page["content"])
+            self.assertEqual(updated_page["content"].count("value-"), 40)
+
+            over_count = {
+                "Limits.md": {
+                    "expected_sha": updated_page["sha"],
+                    "replacements": [
+                        {"old": f"value-{index:02d}", "new": f"again-{index:02d}"}
+                        for index in range(41)
+                    ],
+                },
+            }
+            with self.assertRaisesRegex(WikiError, "replacement limit") as raised:
+                self.patch_pages(wiki, over_count, updated["sha"])
+            self.assertEqual(raised.exception.error_type, "limit_exceeded")
+
+            over_bytes = {
+                "Limits.md": {
+                    "expected_sha": updated_page["sha"],
+                    "replacements": [{
+                        "old": "a" * (WikiRepository.MAX_PATCH_BYTES + 1),
+                        "new": "",
+                    }],
+                },
+            }
+            with self.assertRaisesRegex(WikiError, "patch byte limit") as raised:
+                self.patch_pages(wiki, over_bytes, updated["sha"])
+            self.assertEqual(raised.exception.error_type, "limit_exceeded")
+            self.assertEqual(self.tip(), updated["sha"])
+
+    def test_stale_patch_requires_caller_reconciliation(self) -> None:
+        with self.local_wiki("example/repository") as first, self.local_wiki("example/repository") as second:
+            stale_page = second.page("Home.md")
+            updated = self.write(first, {"Other.md": "Concurrent\n"})
+            with self.assertRaisesRegex(WikiError, "base conflict") as raised:
+                self.patch_pages(second, {
+                    "Home.md": {
+                        "expected_sha": stale_page["sha"],
+                        "replacements": [{"old": "Welcome", "new": "Updated"}],
+                    },
+                })
+            self.assertEqual(raised.exception.error_type, "conflict")
+            self.assertEqual(self.tip(), updated["sha"])
+            self.assertEqual(second.page("Home.md", self.base)["content"], "# Home\nWelcome\n")
+
     def test_noop_and_stale_retry(self) -> None:
         with self.local_wiki("example/repository") as wiki:
             initial = self.write(wiki, {"Home.md": "# Home\nWelcome\n"})

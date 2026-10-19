@@ -44,7 +44,7 @@ READ_TOOLS = frozenset({
 })
 WRITE_TOOLS = frozenset({
     "add_labels", "set_assignees", "add_issue_comment", "add_eyes_reaction",
-    "write_wiki_pages",
+    "write_wiki_pages", "patch_wiki_pages",
 })
 LOCAL_TOOLS = frozenset({"task", "issuelens-config", "send-email", "send-teams-notification"})
 MESSAGE_TOOLS = READ_TOOLS | WRITE_TOOLS | (LOCAL_TOOLS - {"task"})
@@ -744,7 +744,7 @@ class RunTelemetry:
             if destination and source == repo:
                 self._target(repo, "repository", 0, "source")
                 relationship = "read"
-                if tool.operation == "write_wiki_pages":
+                if tool.operation in {"write_wiki_pages", "patch_wiki_pages"}:
                     if metadata.get("status") not in {"updated", "no-change"}:
                         self._lost("unconfirmed_wiki_write")
                         return

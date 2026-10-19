@@ -52,7 +52,8 @@ protocol for chat.
   direction before revising or advancing the proposal.
 - **Team memory** - every agent reads relevant wiki knowledge through the
   read-only `team-memory` skill. Only the `team-memory` sub-agent owns separately
-  authorized direct wiki maintenance through `write_wiki_pages`.
+  authorized direct wiki maintenance through `patch_wiki_pages` or
+  `write_wiki_pages`.
 - **Built-in commands** — immutable `@issuelens triage`, `retriage`, `plan`,
   and `replan` commands work across Responses chat and validated GitHub
   maintainer comments. `@issuelens go` is reserved for a future coding loop and
@@ -134,9 +135,10 @@ protocol for chat.
     configured readiness signals rather than autonomously revising.
   - **`team-memory`** - maintains wiki knowledge from cited evidence and full
     source commit SHAs. Its prompt is `agents/team-memory.md`. Only its local
-    MCP server exposes `write_wiki_pages`; the parent automatically supplies
-    internal `--wiki-writer` mode. Users need no environment flag. The existing
-    `GITHUB_MCP_ENABLE_WRITES` remains for triage, not wiki writes.
+    MCP server exposes `patch_wiki_pages` and `write_wiki_pages`; the parent
+    automatically supplies internal `--wiki-writer` mode. Users need no
+    environment flag. The existing `GITHUB_MCP_ENABLE_WRITES` remains for
+    triage, not wiki writes.
 - **Skills** (`skills/`): `issuelens-config` (validated repository policy),
   `find-duplicates`, `label-issue`, `assign-issue`, `notify`, `change-analysis`, and `team-memory`
   (read-only retrieval preloaded on all agents, including the orchestrator).
