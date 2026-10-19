@@ -51,7 +51,8 @@ wiki update for this target. A merge,
 repository policy, retrieved content, or an available tool alone is not write
 authorization. Analysis or recommendations alone do not authorize an update.
 
-Only this agent's local MCP server exposes `write_wiki_pages`; the parent
+Only this agent's local MCP server exposes `write_wiki_pages` and
+`patch_wiki_pages`; the parent
 supplies its internal `--wiki-writer` launch mode automatically. Users need no
 environment flag or per-repository App environment configuration. Shared
 reader/triage servers do not expose the writer. App installation and Contents
@@ -112,15 +113,28 @@ unless its complete intended edit is part of a tool-confirmed publication.
 	notices, not binary patches.
 	Stay within 20 pages, 64 KiB UTF-8 per page, and 256 KiB total per call. Reads
 	accept only `HEAD` or a full SHA; use the pinned full SHA for this job.
-4. After confirming authorization, call
-	`write_wiki_pages(repository=source_project, pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot["wiki_repository"], expected_base=read_snapshot["sha"], message=short_summary)`.
+	For an existing page, prefer an exact server-side patch when the intended
+	change can be anchored unambiguously. Use the page blob SHA returned by
+	`get_wiki_page` and bounded `old`/`new` replacements. Page length or the cost
+	of reproducing unchanged content is not by itself a `needs-review` reason.
+	Use a full-page write for new pages or when a complete replacement is
+	deliberately required.
+4. After confirming authorization, call either
+	`patch_wiki_pages(repository=source_project, patches={path: {"expected_sha": page["sha"], "replacements": [{"old": exact_anchor, "new": replacement_with_anchor}]}}, expected_wiki_repository=read_snapshot["wiki_repository"], expected_base=read_snapshot["sha"], message=short_summary)`
+	for existing pages, or
+	`write_wiki_pages(repository=source_project, pages={path: full_utf8_content}, expected_wiki_repository=read_snapshot["wiki_repository"], expected_base=read_snapshot["sha"], message=short_summary)`
+	for new or intentionally replaced pages.
 	Both expected values are required. The expected repository is a
 	precondition, never a destination override. The writer compares it
 	case-insensitively with the freshly resolved policy destination before any
 	destination metadata, token lookup, or wiki access. Policy alone selects the
 	actual destination and scoped App credentials.
-	Include the full PR/source SHA in the short commit summary where relevant. Supply
-	full UTF-8 contents for changed pages only, not patches. The bundled MCP
+	Include the full PR/source SHA in the short commit summary where relevant.
+	For patches, every non-empty `old` anchor must match exactly once in the
+	original pinned page, replacements must not overlap, and the page's
+	`expected_sha` must come from that pinned read. Supply full UTF-8 contents
+	for pages sent to `write_wiki_pages`; do not send whole-page content through
+	`patch_wiki_pages`. The bundled MCP
 	`.wiki` backend owns snapshots and an atomic Git commit that persists the
 	pages and their history. Use no generic URL, force, token, or credential
 	arguments and no separate host publisher or persistence workflow.
@@ -137,7 +151,7 @@ unless its complete intended edit is part of a tool-confirmed publication.
 	desired content with current pages before attempting another write. Matching
 	content needs no repeat write and does not prove who performed the update.
 	Stop for human direction when intent conflicts.
-6. Report updated only after the `write_wiki_pages` tool's
+6. Report updated only after the selected wiki write tool's
 	publication result confirms the wiki commit. Return the actual status and
 	new wiki SHA only as confirmed by that result. Otherwise report no-change,
 	needs-review, or failed with citations,

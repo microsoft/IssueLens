@@ -2,8 +2,9 @@
 
 This subproject is the stdio MCP server for the GitHub operations that IssueLens
 currently needs. The host starts session-owned shared servers and a separate
-team-memory agent-local server exposing only `write_wiki_pages` through the
-parent-supplied internal `--wiki-writer` mode.
+team-memory agent-local server exposing only the `write_wiki_pages` and
+`patch_wiki_pages` tools through the parent-supplied internal `--wiki-writer`
+mode.
 This mode is automatic; users need no environment flag.
 
 Wiki Git network and object operations use the Dulwich Python library (1.2.14),
@@ -30,8 +31,9 @@ SSH, or credential helpers.
 - Issue write tools are absent from MCP discovery unless the trusted host sets
   `GITHUB_MCP_ENABLE_WRITES=true`. The GitHub client enforces the same gate.
 - Only the team-memory agent-local server exposes wiki writes. Shared
-  reader/triage servers do not expose `write_wiki_pages`. Tool availability and
-  repository policy do not authorize a maintenance job to write.
+  reader/triage servers do not expose `write_wiki_pages` or
+  `patch_wiki_pages`. Tool availability and repository policy do not authorize
+  a maintenance job to write.
 - The server exposes fixed GitHub REST routes. It has no generic HTTP, REST, or
   GraphQL tool. Wiki operations use the bundled `.wiki` Git backend for only
   the validated wiki destination's `.wiki.git`, with no caller-selected remote.
@@ -262,9 +264,9 @@ acknowledgement remains after processing finishes.
 
 ### Direct wiki maintenance
 
-`write_wiki_pages` is available only to the team-memory agent and requires an App
-token scoped to the mapped destination with **Contents: write**. It writes only
-an existing initialized wiki. For source
+`write_wiki_pages` and `patch_wiki_pages` are available only to the team-memory
+agent and require an App token scoped to the mapped destination with
+**Contents: write**. They write only an existing initialized wiki. For source
 `microsoft/project` configured with `wiki_repository: microsoft/team-knowledge`,
 the tool still accepts the source project, not the destination:
 
@@ -282,6 +284,36 @@ write_response = write_wiki_pages(
 )
 ```
 
+For an existing page, prefer an exact patch so the model does not reproduce
+unrelated content:
+
+```python
+page_response = get_wiki_page(
+  repository="microsoft/project",
+  path="Architecture.md",
+  ref=read_snapshot["sha"],
+)
+page = page_response["result"]
+patch_response = patch_wiki_pages(
+  repository="microsoft/project",
+  patches={
+    "Architecture.md": {
+      "expected_sha": page["sha"],
+      "replacements": [{"old": exact_anchor, "new": replacement_with_anchor}],
+    },
+  },
+  expected_wiki_repository=read_snapshot["wiki_repository"],
+  expected_base=read_snapshot["sha"],
+  message=short_summary,
+)
+```
+
+Every non-empty `old` anchor must match exactly once in the original pinned
+page. Replacements are evaluated against that original content and cannot
+overlap. The backend rejects changed page SHAs, missing or repeated anchors,
+overlaps, and resulting limit violations before publishing. All untouched
+content is preserved byte-for-byte.
+
 Both expected values are required and come from the same snapshot read.
 `expected_wiki_repository` is a precondition, never a destination override.
 It must be a valid GitHub `owner/repository` identifier and match the freshly
@@ -289,12 +321,15 @@ resolved policy destination case-insensitively before any destination metadata,
 token lookup, or wiki access. Policy still selects the actual destination and
 scoped App credentials. A mismatch is rejected even if the SHA is unchanged.
 
-`read_snapshot["sha"]` is the full SHA returned by the snapshot read. Supply complete UTF-8
-contents for changed `.md` pages, not patches: at most 20 pages, 64 KiB per page,
-and 256 KiB total. Create/update only; deletion and rename are unsupported. The
-pages cite evidence and include the full source commit SHA, not an abbreviation,
-where relevant; the short commit message also includes that full SHA. No generic URL,
-force, token, credential, or approval arguments are accepted.
+`read_snapshot["sha"]` is the full SHA returned by the snapshot read.
+`write_wiki_pages` accepts complete UTF-8 contents for changed `.md` pages.
+`patch_wiki_pages` accepts 1-20 existing pages, at most 40 exact replacements,
+and 256 KiB of replacement input. Resulting pages share the normal limits of
+64 KiB per page and 256 KiB per batch. Create/update only; deletion and rename
+are unsupported. Pages cite evidence and include the full source commit SHA,
+not an abbreviation, where relevant; the short commit message also includes
+that full SHA. No generic URL, force, token, credential, or approval arguments
+are accepted.
 
 Typed validation, byte and cooperative time budgets, and redirect denial bound
 the internal HTTPS `x-access-token` transport. Only SHA-1 Git repositories
@@ -380,7 +415,8 @@ Wiki destination configuration belongs only in the source project's structured
 `instructions.team_memory.wiki_repository`; there is no per-repository App
 environment configuration. The parent supplies `--wiki-writer` automatically
 only for the team-memory agent-local MCP server with
-`tools: ["write_wiki_pages"]`. Users need no environment flag. The existing
+`tools: ["write_wiki_pages", "patch_wiki_pages"]`. Users need no environment
+flag. The existing
 `GITHUB_MCP_ENABLE_WRITES` gate remains for triage issue writes and does not
 enable wiki writes or require a new user setting. Explicit job authorization
 and destination App installation access are both still required.

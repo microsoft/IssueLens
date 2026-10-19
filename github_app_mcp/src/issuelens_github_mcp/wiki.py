@@ -79,6 +79,16 @@ class _WikiWriteResult(TypedDict):
     repository: str
 
 
+class WikiReplacement(TypedDict):
+    old: str
+    new: str
+
+
+class WikiPagePatch(TypedDict):
+    expected_sha: str
+    replacements: list[WikiReplacement]
+
+
 class _PackStream(Protocol):
     def read(self, size: int = -1, /) -> bytes:
         ...
@@ -101,7 +111,7 @@ def _safe(function: Callable[Parameters, Result]) -> Callable[Parameters, Result
             raise WikiError(
                 "wiki operation failed or exceeded its budget",
                 error_type="internal_error",
-                outcome="unknown" if function.__name__ == "write" else "not_applied",
+                outcome="unknown" if function.__name__ in {"write", "patch"} else "not_applied",
             ) from None
     return guarded
 
@@ -348,6 +358,8 @@ class WikiRepository:
     MAX_READ_BYTES = 256 * 1024
     MAX_BATCH_PAGES = 20
     MAX_BATCH_BYTES = 256 * 1024
+    MAX_PATCH_REPLACEMENTS = 40
+    MAX_PATCH_BYTES = 256 * 1024
 
     def __init__(self, repository: str, *, token: str | None = None, timeout: int = 30) -> None:
         try:
@@ -961,8 +973,10 @@ class WikiRepository:
         total = 0
         for path, content in pages.items():
             _path(path)
-            if not isinstance(content, str) or len(content) > self.MAX_PAGE_BYTES:
+            if not isinstance(content, str):
                 raise WikiError("wiki page content must be UTF-8 text")
+            if len(content) > self.MAX_PAGE_BYTES:
+                raise WikiError("wiki page byte limit exceeded")
             try:
                 encoded = content.encode("utf-8")
             except UnicodeError:
@@ -975,6 +989,112 @@ class WikiRepository:
             result[path] = encoded
         _compatible_paths(list(result))
         return result
+
+    def _patch_batch(self, patches: dict[str, WikiPagePatch]) -> dict[str, WikiPagePatch]:
+        if not isinstance(patches, dict) or not 1 <= len(patches) <= self.MAX_BATCH_PAGES:
+            raise WikiError(
+                "wiki patch requires between 1 and 20 pages",
+                error_type="invalid_input",
+            )
+        result: dict[str, WikiPagePatch] = {}
+        total_bytes = 0
+        total_replacements = 0
+        for path, page_patch in patches.items():
+            path = _path(path)
+            if not isinstance(page_patch, dict) or set(page_patch) != {
+                "expected_sha", "replacements",
+            }:
+                raise WikiError("invalid wiki page patch", error_type="invalid_input")
+            expected_sha = page_patch["expected_sha"]
+            replacements = page_patch["replacements"]
+            if (
+                not isinstance(expected_sha, str)
+                or not re.fullmatch(r"[0-9a-fA-F]{40}", expected_sha)
+                or not isinstance(replacements, list)
+                or not replacements
+            ):
+                raise WikiError("invalid wiki page patch", error_type="invalid_input")
+            normalized: list[WikiReplacement] = []
+            for replacement in replacements:
+                if not isinstance(replacement, dict) or set(replacement) != {"old", "new"}:
+                    raise WikiError("invalid wiki patch replacements", error_type="invalid_input")
+                total_replacements += 1
+                if total_replacements > self.MAX_PATCH_REPLACEMENTS:
+                    raise WikiError(
+                        "wiki patch replacement limit exceeded",
+                        error_type="limit_exceeded",
+                    )
+                old = replacement["old"]
+                new = replacement["new"]
+                if not isinstance(old, str) or not isinstance(new, str) or not old or old == new:
+                    raise WikiError("invalid wiki patch replacement", error_type="invalid_input")
+                if len(old) > self.MAX_PATCH_BYTES or len(new) > self.MAX_PATCH_BYTES:
+                    raise WikiError("wiki patch byte limit exceeded", error_type="limit_exceeded")
+                try:
+                    total_bytes += len(old.encode("utf-8")) + len(new.encode("utf-8"))
+                except UnicodeError:
+                    raise WikiError(
+                        "wiki patch replacements must be UTF-8 text",
+                        error_type="invalid_input",
+                    ) from None
+                if total_bytes > self.MAX_PATCH_BYTES:
+                    raise WikiError("wiki patch byte limit exceeded", error_type="limit_exceeded")
+                normalized.append({"old": old, "new": new})
+            result[path] = {
+                "expected_sha": expected_sha.lower(),
+                "replacements": normalized,
+            }
+        _compatible_paths(list(result))
+        return result
+
+    def _patched_pages(
+        self, patches: dict[str, WikiPagePatch], expected_base: str,
+    ) -> dict[str, str]:
+        if _ref(expected_base) == "HEAD":
+            raise WikiError("expected_base must be a full commit SHA", error_type="invalid_input")
+        expected_base = expected_base.lower()
+        patches = self._patch_batch(patches)
+        inventory = self._inventory(self._resolve(expected_base))
+        pages: dict[str, str] = {}
+        for path, page_patch in patches.items():
+            entry = inventory.get(path)
+            if entry is None:
+                raise WikiError("wiki patch page is missing", error_type="not_found")
+            if entry[0] not in _REGULAR_MODES:
+                raise WikiError(
+                    "wiki patch cannot modify a symlink or submodule",
+                    error_type="conflict",
+                )
+            if entry[1] != page_patch["expected_sha"]:
+                raise WikiError(
+                    "wiki patch page changed; re-read the page before writing",
+                    error_type="conflict",
+                )
+            if entry[2] > self.MAX_PAGE_BYTES:
+                raise WikiError("wiki page byte limit exceeded", error_type="limit_exceeded")
+            content = _text(
+                self._get_object(_object_id(entry[1].encode("ascii")), Blob).data
+            )
+            edits: list[tuple[int, int, str]] = []
+            for replacement in page_patch["replacements"]:
+                old = replacement["old"]
+                start = content.find(old)
+                if start < 0 or content.find(old, start + 1) >= 0:
+                    raise WikiError(
+                        "wiki patch anchor must match exactly once",
+                        error_type="conflict",
+                    )
+                edits.append((start, start + len(old), replacement["new"]))
+            edits.sort()
+            if any(left[1] > right[0] for left, right in zip(edits, edits[1:])):
+                raise WikiError(
+                    "wiki patch replacements overlap",
+                    error_type="conflict",
+                )
+            for start, end, replacement in reversed(edits):
+                content = content[:start] + replacement + content[end:]
+            pages[path] = content
+        return pages
 
     def _refresh(self) -> str:
         if self._sha is None:
@@ -1139,3 +1259,24 @@ class WikiRepository:
         result["sha"] = self._sha
         result["pages"] = sorted(changed)
         return result
+
+    @_safe
+    def patch(
+        self,
+        patches: dict[str, WikiPagePatch],
+        expected_base: str,
+        message: str,
+        *,
+        author_name: str,
+        author_email: str,
+    ) -> _WikiWriteResult:
+        """Apply exact, non-overlapping page replacements and publish atomically."""
+        self._publication_started = False
+        pages = self._patched_pages(patches, expected_base)
+        return self.write(
+            pages,
+            expected_base,
+            message,
+            author_name=author_name,
+            author_email=author_email,
+        )

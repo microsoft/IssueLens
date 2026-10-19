@@ -57,6 +57,12 @@ NON_DICT_READ_CASES = (
     ("get_wiki_diff", (BASE,), "diff", "diff --git a/Home.md b/Home.md\n"),
 )
 WRITE_ARGUMENTS = ({"Home.md": "text"}, BASE, "Update")
+PATCH_ARGUMENTS = ({
+    "Home.md": {
+        "expected_sha": "c" * 40,
+        "replacements": [{"old": "before", "new": "after"}],
+    },
+}, BASE, "Patch")
 
 
 class WikiClientTests(unittest.IsolatedAsyncioTestCase):
@@ -130,12 +136,17 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_wiki_writes_fail_closed_independently_of_issue_writes(self):
         for issue_writes in (False, True):
-            client = GitHubClient(self.provider, writes_enabled=issue_writes)
-            self.assertFalse(client.wiki_writes_enabled)
-            with self.assertRaisesRegex(GitHubAppError, "not enabled"):
-                await client.write_wiki_pages(
-                    REPOSITORY, *WRITE_ARGUMENTS, expected_wiki_repository=REPOSITORY,
-                )
+            for method, arguments in (
+                ("write_wiki_pages", WRITE_ARGUMENTS),
+                ("patch_wiki_pages", PATCH_ARGUMENTS),
+            ):
+                with self.subTest(issue_writes=issue_writes, method=method):
+                    client = GitHubClient(self.provider, writes_enabled=issue_writes)
+                    self.assertFalse(client.wiki_writes_enabled)
+                    with self.assertRaisesRegex(GitHubAppError, "not enabled"):
+                        await getattr(client, method)(
+                            REPOSITORY, *arguments, expected_wiki_repository=REPOSITORY,
+                        )
         self.provider.get_token.assert_not_awaited()
         self.provider.get_bot_identity.assert_not_awaited()
         self.get_file.assert_not_awaited()
@@ -242,6 +253,27 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
             *WRITE_ARGUMENTS, author_name=IDENTITY[0], author_email=IDENTITY[1],
         )
 
+    async def test_mapped_patch_uses_destination_contents_token_and_verified_bot(self):
+        self.configure_memory()
+        with patch("issuelens_github_mcp.github.WikiRepository") as backend:
+            wiki = backend.return_value.__enter__.return_value
+            wiki.patch.return_value = {
+                "repository": WIKI_REPOSITORY, "sha": HEAD, "status": "updated",
+            }
+            result = await self.writer().patch_wiki_pages(
+                REPOSITORY, *PATCH_ARGUMENTS, expected_wiki_repository=WIKI_REPOSITORY,
+            )
+        self.assertEqual(result, {
+            "repository": WIKI_REPOSITORY, "sha": HEAD, "status": "updated",
+            "source_repository": REPOSITORY, "wiki_repository": WIKI_REPOSITORY,
+        })
+        self.provider.get_token.assert_awaited_once_with(WIKI_REPOSITORY, {"contents": "write"})
+        self.provider.get_bot_identity.assert_awaited_once_with()
+        backend.assert_called_once_with(WIKI_REPOSITORY, token=TOKEN)
+        wiki.patch.assert_called_once_with(
+            *PATCH_ARGUMENTS, author_name=IDENTITY[0], author_email=IDENTITY[1],
+        )
+
     async def test_expected_destination_case_does_not_change_policy_authentication_target(self):
         self.configure_memory()
         for expected in (WIKI_REPOSITORY.lower(), WIKI_REPOSITORY.upper()):
@@ -323,6 +355,7 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
     async def test_separate_non_public_audiences_block_every_wiki_tool(self):
         operations = [(method, arguments) for method, arguments, _, _ in READ_CASES]
         operations.append(("write_wiki_pages", WRITE_ARGUMENTS))
+        operations.append(("patch_wiki_pages", PATCH_ARGUMENTS))
         for source in ("private", "internal"):
             for destination in ("private", "internal"):
                 for method, arguments in operations:
@@ -336,7 +369,7 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
                             with self.assertRaisesRegex(GitHubAppError, "verified audience relationship"):
                                 kwargs = (
                                     {"expected_wiki_repository": WIKI_REPOSITORY}
-                                    if method == "write_wiki_pages" else {}
+                                    if method in {"write_wiki_pages", "patch_wiki_pages"} else {}
                                 )
                                 await getattr(self.writer(), method)(REPOSITORY, *arguments, **kwargs)
                             backend.assert_not_called()
@@ -471,13 +504,17 @@ class WikiClientTests(unittest.IsolatedAsyncioTestCase):
         ))
         operations = [(method, arguments) for method, arguments, _, _ in READ_CASES]
         operations.append(("write_wiki_pages", WRITE_ARGUMENTS))
+        operations.append(("patch_wiki_pages", PATCH_ARGUMENTS))
         for index, changes in enumerate(invalid):
             for method, arguments in operations:
                 with self.subTest(case=index, method=method):
                     self.configure_memory().update(changes)
                     with patch("issuelens_github_mcp.github.WikiRepository") as backend:
                         with self.assertRaises(GitHubAppError) as caught:
-                            kwargs = {"expected_wiki_repository": WIKI_REPOSITORY} if method == "write_wiki_pages" else {}
+                            kwargs = (
+                                {"expected_wiki_repository": WIKI_REPOSITORY}
+                                if method in {"write_wiki_pages", "patch_wiki_pages"} else {}
+                            )
                             await getattr(self.writer(), method)(REPOSITORY, *arguments, **kwargs)
                         backend.assert_not_called()
                     self.assertEqual(str(caught.exception), "Team memory customization could not be loaded")

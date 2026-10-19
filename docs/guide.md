@@ -29,9 +29,10 @@ parent-configured MCP server local to the maintenance agent.
 ### Team memory
 
 The `team-memory` agent makes minimal, evidence-backed Markdown wiki updates
-through `write_wiki_pages`. The shared `team-memory` skill remains read-only and
-is preloaded on every agent, including the orchestrator. Agents retrieve relevant
-knowledge directly without delegating ordinary reads to the maintenance agent.
+through `patch_wiki_pages` or `write_wiki_pages`. The shared `team-memory` skill
+remains read-only and is preloaded on every agent, including the orchestrator.
+Agents retrieve relevant knowledge directly without delegating ordinary reads
+to the maintenance agent.
 
 Both paths first call `issuelens-config` with the explicit source project and
 `domain="team_memory"`. Read its returned `wiki_repository` for the validated
@@ -81,7 +82,8 @@ update for the source project and its mapped wiki, regardless of origin.
 Existing issue-loop commands and repository policy alone do not authorize them. Sensitive, conflicting,
 destructive, or unsupported changes need ordinary human interaction.
 
-Only the team-memory agent-local server exposes `write_wiki_pages`; the parent
+Only the team-memory agent-local server exposes `write_wiki_pages` and
+`patch_wiki_pages`; the parent
 supplies its internal `--wiki-writer` launch mode automatically. Users need no
 environment flag or per-repository App environment configuration. Shared
 reader/triage servers do not expose the writer. The existing
@@ -100,22 +102,40 @@ or runtime installer is needed in either mode. IssueLens still launches its
 stdio MCP server as a Python subprocess; the wiki backend never spawns Git,
 SSH, or credential helpers.
 
-Maintenance pins reads to one full wiki SHA and sends full UTF-8 page contents
-with both required preconditions from the same snapshot:
+Maintenance pins reads to one full wiki SHA and sends both required
+preconditions from the same snapshot. Existing pages should use exact
+server-side replacements:
 
 ```python
 snapshot_response = get_wiki_snapshot(repository="microsoft/project")
 if not snapshot_response["success"]:
   raise RuntimeError(snapshot_response["error"]["message"])
 read_snapshot = snapshot_response["result"]
-write_response = write_wiki_pages(
+page_response = get_wiki_page(
   repository="microsoft/project",
-  pages={"Architecture.md": full_utf8_content},
+  path="Architecture.md",
+  ref=read_snapshot["sha"],
+)
+page = page_response["result"]
+write_response = patch_wiki_pages(
+  repository="microsoft/project",
+  patches={
+    "Architecture.md": {
+      "expected_sha": page["sha"],
+      "replacements": [{"old": exact_anchor, "new": replacement_with_anchor}],
+    },
+  },
   expected_wiki_repository=read_snapshot["wiki_repository"],
   expected_base=read_snapshot["sha"],
   message=short_summary,
 )
 ```
+
+Every non-empty anchor must match exactly once in the original pinned page and
+replacements cannot overlap. The backend preserves all untouched page content
+byte-for-byte. `write_wiki_pages` remains available for new pages and deliberate
+whole-page replacements. Page length alone is not a reason to defer when an
+exact patch can be prepared.
 
 `expected_wiki_repository` is a precondition, never a destination override.
 The writer validates the identifier and compares it case-insensitively with the

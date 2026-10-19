@@ -107,6 +107,10 @@ class WikiFixture:
         return wiki.write(pages, base or self.base, "Update team notes", author_name="IssueLens App",
                           author_email="123+issuelens[bot]@users.noreply.github.com")
 
+    def patch_pages(self, wiki, patches, base=None):
+        return wiki.patch(patches, base or self.base, "Patch team notes", author_name="IssueLens App",
+                          author_email="123+issuelens[bot]@users.noreply.github.com")
+
 
 class InProcessTests(WikiFixture, unittest.TestCase):
     def test_snapshot_without_any_git_executable(self) -> None:

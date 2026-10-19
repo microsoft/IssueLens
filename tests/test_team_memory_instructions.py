@@ -146,6 +146,7 @@ class TeamMemoryInstructionTests(unittest.TestCase):
         self.assertIn("returned\n`content`", prompt)
         self.assertIn("returned `wiki_repository`", prompt)
         self.assertIn("must not call `write_wiki_pages`", prompt)
+        self.assertIn("or `patch_wiki_pages`", prompt)
         self.assertIn("same snapshot", prompt)
         self.assertIn("Do not delegate ordinary retrieval", prompt)
 
@@ -220,7 +221,7 @@ class TeamMemoryAccessTests(unittest.TestCase):
             "github-search_repository_content", "github-list_merged_pull_requests",
             "github-get_wiki_snapshot", "github-list_wiki_pages", "github-get_wiki_page",
             "github-search_wiki", "github-list_wiki_history", "github-get_wiki_diff",
-            "wiki-writer-write_wiki_pages",
+            "wiki-writer-write_wiki_pages", "wiki-writer-patch_wiki_pages",
         }
         client = CopilotClient.__new__(CopilotClient)
         for servers in (self.servers, {}):
@@ -246,7 +247,11 @@ class TeamMemoryAccessTests(unittest.TestCase):
             if name.startswith("github-"):
                 self.assertIn(name.removeprefix("github-"), reads)
             else:
-                self.assertIn(name, {"issuelens-config", "wiki-writer-write_wiki_pages"})
+                self.assertIn(name, {
+                    "issuelens-config",
+                    "wiki-writer-write_wiki_pages",
+                    "wiki-writer-patch_wiki_pages",
+                })
         self.assertTrue(set(allowed).isdisjoint({
             "*", "github-*", "wiki-writer-*", "send-email", "send-teams-notification",
             "github-add_labels", "github-set_assignees", "github-add_issue_comment",
@@ -258,7 +263,7 @@ class TeamMemoryAccessTests(unittest.TestCase):
         for agent in options["custom_agents"]:
             if agent["name"] == "team-memory":
                 writer = agent["mcp_servers"]["wiki-writer"]
-                self.assertEqual(writer["tools"], ["write_wiki_pages"])
+                self.assertEqual(writer["tools"], ["write_wiki_pages", "patch_wiki_pages"])
                 self.assertEqual(writer["env"]["GITHUB_MCP_ENABLE_WRITES"], "false")
                 self.assertEqual(writer["args"], ["-m", "issuelens_github_mcp.server", "--wiki-writer"])
             else:

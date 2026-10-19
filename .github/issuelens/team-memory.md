@@ -74,14 +74,20 @@ Use `get_wiki_snapshot`, then page, search, history, and diff tools at that full
 SHA, plus merged PR/source evidence where relevant. Prefer minimal changes to
 existing Markdown pages. No knowledge change means no write.
 
-Only the authorized maintenance job calls `write_wiki_pages` with the explicit
-source project as `repository`, changed pages mapped to full UTF-8 content, the
-snapshot destination as `expected_wiki_repository=read_snapshot["wiki_repository"]`,
-the full wiki SHA as `expected_base=read_snapshot["sha"]`, and a short summary
-including the full source commit SHA where relevant. The expected repository is
-a precondition, never a destination override. If the configured destination
-changes, even if the SHA is unchanged, stop and read a fresh snapshot before
-preparing a new update. No force option is exposed.
+Only the authorized maintenance job calls `patch_wiki_pages` or
+`write_wiki_pages` with the explicit source project as `repository`, the
+snapshot destination as
+`expected_wiki_repository=read_snapshot["wiki_repository"]`, the full wiki SHA
+as `expected_base=read_snapshot["sha"]`, and a short summary including the full
+source commit SHA where relevant. Prefer an exact patch for an existing page:
+pass its pinned blob SHA as `expected_sha` and bounded `old`/`new` replacements
+whose non-empty anchors each match exactly once and do not overlap. Use
+`write_wiki_pages` with full UTF-8 content for new or intentionally replaced
+pages. Page length or avoiding a whole-page model-generated replacement is not
+by itself a reason to defer when an exact patch can be prepared. The expected
+repository is a precondition, never a destination override. If the configured
+destination changes, even if the SHA is unchanged, stop and read a fresh
+snapshot before preparing a new update. No force option is exposed.
 Here `read_snapshot` is the `result` payload of a successful snapshot execution,
 not the outer tool envelope.
 The bundled MCP `.wiki` backend persists knowledge and history in an atomic Git
@@ -120,5 +126,5 @@ links and snapshot/source revisions, and verify implementation-sensitive
 conclusions against current source when wiki provenance is stale or missing.
 Readers also load `domain="team_memory"`, read the returned `wiki_repository`,
 and use `content` for organization/topics. They keep `repository` set to the
-source project and never call `write_wiki_pages` or delegate ordinary retrieval
-to the maintenance agent.
+source project and never call `write_wiki_pages` or `patch_wiki_pages`, or
+delegate ordinary retrieval to the maintenance agent.

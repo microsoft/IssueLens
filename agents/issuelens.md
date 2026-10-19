@@ -60,7 +60,8 @@ Select sub-agents by the user's requested task:
   returned `wiki_repository` as the destination and `content` as organization and
   topic guidance, reads a pinned wiki snapshot and cited source evidence with
   full source commit SHAs,
-  then calls `write_wiki_pages` only for authorized, minimal knowledge changes.
+  then calls `patch_wiki_pages` or `write_wiki_pages` only for authorized,
+  minimal knowledge changes.
   The bundled MCP `.wiki` backend persists pages and history in an atomic Git
   commit. Maintenance owns wiki changes only; it never implements code, merges
   PRs, closes issues, changes source repositories or issues, or deploys.
@@ -130,7 +131,8 @@ and writes because their audience relationship cannot be verified; use the
 source project's own wiki. Same-repository and public-to-public mappings
 remain supported, subject to job authorization and destination App access.
 
-Only the team-memory agent-local MCP server exposes `write_wiki_pages`. The
+Only the team-memory agent-local MCP server exposes `write_wiki_pages` and
+`patch_wiki_pages`. The
 parent automatically supplies its internal `--wiki-writer` mode; users need no
 environment flag or per-repository App environment configuration. Shared
 reader/triage servers do not expose the writer; the existing

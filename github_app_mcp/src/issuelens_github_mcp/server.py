@@ -19,6 +19,7 @@ from .auth import GitHubAppError, GitHubAppTokenProvider
 from .config import ConfigurationError, GitHubAppConfig
 from .github import CommitDetail, GitHubClient, ReactionTarget, _MAX_RESULT_BYTES, _MAX_WIKI_RESULT_BYTES
 from .outcomes import WRITE_TOOLS, ToolFailure, ToolOutcome, failure_result, success_result
+from .wiki import WikiPagePatch
 
 
 _ENABLE_WRITES_ENV = "GITHUB_MCP_ENABLE_WRITES"
@@ -398,6 +399,36 @@ def create_server(
             """
             return await github.write_wiki_pages(
                 repository, pages, expected_base, message,
+                expected_wiki_repository=expected_wiki_repository,
+            )
+
+        @server.tool()
+        async def patch_wiki_pages(
+            repository: str,
+            patches: dict[str, WikiPagePatch],
+            expected_base: str,
+            message: str,
+            expected_wiki_repository: str,
+        ) -> Any:
+            """Patch existing pages in the source project's configured wiki.
+
+            repository is the source project, never a raw wiki destination or
+            remote. Read each page at expected_base and pass its blob SHA as
+            expected_sha. Each replacement contains non-empty old text and new
+            text. Every old anchor must match exactly once in the original page,
+            and replacements cannot overlap. The backend applies all replacements
+            server-side, preserving untouched content byte-for-byte, then makes
+            one atomic publication attempt against expected_base.
+
+            Patches cover 1-20 existing Markdown pages, at most 40 replacements
+            and 256 KiB of replacement input. Resulting pages retain the normal
+            64 KiB per-page and 256 KiB batch limits. Missing, repeated, changed,
+            or overlapping anchors are rejected without publishing. The expected
+            wiki repository is a precondition, never a destination override.
+            Inspect the returned error and outcome before deciding how to recover.
+            """
+            return await github.patch_wiki_pages(
+                repository, patches, expected_base, message,
                 expected_wiki_repository=expected_wiki_repository,
             )
 

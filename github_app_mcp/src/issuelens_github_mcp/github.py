@@ -22,7 +22,7 @@ import httpx
 from .auth import GitHubAppError, GitHubAppTokenProvider, InstallationCredential, Permissions, validate_repository
 from .policy import IssueLensConfigError, resolve_wiki_repository, validate_wiki_repository
 from .outcomes import ToolFailure, http_error_type
-from .wiki import WikiError, WikiRepository
+from .wiki import WikiError, WikiPagePatch, WikiRepository
 
 
 _API_ROOT = "https://api.github.com"
@@ -677,6 +677,46 @@ class GitHubClient:
         *, expected_wiki_repository: str,
     ) -> Any:
         """Publish source-project memory to its configured wiki as the App Bot."""
+        return await self._wiki_write(
+            repository,
+            expected_wiki_repository,
+            lambda wiki, author_name, author_email: wiki.write(
+                pages,
+                expected_base,
+                message,
+                author_name=author_name,
+                author_email=author_email,
+            ),
+        )
+
+    async def patch_wiki_pages(
+        self,
+        repository: str,
+        patches: dict[str, WikiPagePatch],
+        expected_base: str,
+        message: str,
+        *,
+        expected_wiki_repository: str,
+    ) -> Any:
+        """Patch existing source-project memory pages as the App Bot."""
+        return await self._wiki_write(
+            repository,
+            expected_wiki_repository,
+            lambda wiki, author_name, author_email: wiki.patch(
+                patches,
+                expected_base,
+                message,
+                author_name=author_name,
+                author_email=author_email,
+            ),
+        )
+
+    async def _wiki_write(
+        self,
+        repository: str,
+        expected_wiki_repository: str,
+        operation: Callable[[WikiRepository, str, str], Any],
+    ) -> Any:
         repository = validate_repository(repository)
         if not self.wiki_writes_enabled:
             raise GitHubAppError("Wiki writes are not enabled", error_type="permission_denied")
@@ -708,10 +748,7 @@ class GitHubClient:
             raise GitHubAppError("Wiki write authentication failed", error_type="authentication_error") from None
         return await asyncio.to_thread(
             self._wiki_operation, repository, wiki_repository, credential.token,
-            lambda wiki: wiki.write(
-                pages, expected_base, message,
-                author_name=author_name, author_email=author_email,
-            ),
+            lambda wiki: operation(wiki, author_name, author_email),
             write=True,
         )
 

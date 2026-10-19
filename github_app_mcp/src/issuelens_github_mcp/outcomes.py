@@ -38,7 +38,7 @@ _TELEMETRY_MESSAGES = {
 }
 WRITE_TOOLS = frozenset({
     "add_labels", "set_assignees", "add_issue_comment", "add_eyes_reaction",
-    "write_wiki_pages", "send-email", "send-teams-notification",
+    "write_wiki_pages", "patch_wiki_pages", "send-email", "send-teams-notification",
 })
 
 

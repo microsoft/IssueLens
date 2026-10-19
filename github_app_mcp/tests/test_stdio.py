@@ -99,7 +99,7 @@ class StdioServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_wiki_writer_stdio_discovery_excludes_triage_writes(self):
         await self.assert_discovery(
             {"GITHUB_MCP_ENABLE_WRITES": "true"},
-            READ_TOOLS | {"write_wiki_pages"},
+            READ_TOOLS | {"write_wiki_pages", "patch_wiki_pages"},
             wiki_writer=True,
         )
 

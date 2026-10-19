@@ -57,6 +57,7 @@ WRITE_TOOLS = {
     "add_issue_comment",
     "add_eyes_reaction",
 }
+WIKI_WRITE_TOOLS = {"write_wiki_pages", "patch_wiki_pages"}
 
 
 class FakeGitHubClient:
@@ -95,6 +96,12 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             "ref": "a" * 40, "base": "a" * 40, "head": "b" * 40,
             "expected_base": "a" * 40, "expected_wiki_repository": "microsoft/IssueLens",
             "pages": {"Home.md": "Memory"}, "message": "Update memory",
+            "patches": {
+                "Home.md": {
+                    "expected_sha": "b" * 40,
+                    "replacements": [{"old": "Before", "new": "After"}],
+                },
+            },
             "labels": ["bug"], "assignees": ["octocat"], "body": "Comment",
             "target_kind": "issue", "target_id": 7,
         }
@@ -157,10 +164,12 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_write_is_not_applied_without_calling_the_backend(self):
         github = FakeGitHubClient()
         async with Client(create_server(cast(GitHubClient, github))) as client:
-            response = await client.call_tool("write_wiki_pages", {})
-        self.assertTrue(response.is_error)
-        self.assertEqual(response.structured_content["outcome"], "not_applied")
-        self.assertEqual(response.structured_content["error"]["type"], "permission_denied")
+            for tool in WIKI_WRITE_TOOLS:
+                with self.subTest(tool=tool):
+                    response = await client.call_tool(tool, {})
+                    self.assertTrue(response.is_error)
+                    self.assertEqual(response.structured_content["outcome"], "not_applied")
+                    self.assertEqual(response.structured_content["error"]["type"], "permission_denied")
         self.assertEqual(github.calls, [])
 
     async def test_unhandled_write_errors_are_unknown_safe_and_not_retried(self):
@@ -314,7 +323,7 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             result = await client.call_tool("write_wiki_pages", parameters)
 
         self.assertEqual(
-            {tool.name for tool in tools.tools}, READ_TOOLS | {"write_wiki_pages"}
+            {tool.name for tool in tools.tools}, READ_TOOLS | WIKI_WRITE_TOOLS
         )
         tool = next(tool for tool in tools.tools if tool.name == "write_wiki_pages")
         self.assertEqual(set(tool.input_schema["properties"]), set(parameters))
@@ -326,6 +335,38 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(github.calls, [(
             "write_wiki_pages",
             (parameters["repository"], parameters["pages"], parameters["expected_base"], parameters["message"]),
+            {"expected_wiki_repository": parameters["expected_wiki_repository"]},
+        )])
+
+    async def test_wiki_patch_has_exact_replacement_schema_and_round_trips(self):
+        github = FakeGitHubClient(wiki_writes_enabled=True)
+        parameters = {
+            "repository": "microsoft/IssueLens",
+            "patches": {
+                "Home.md": {
+                    "expected_sha": "b" * 40,
+                    "replacements": [{"old": "Before", "new": "After"}],
+                },
+            },
+            "expected_base": "a" * 40,
+            "message": "Patch memory",
+            "expected_wiki_repository": "microsoft/TeamMemory",
+        }
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            tools = await client.list_tools()
+            result = await client.call_tool("patch_wiki_pages", parameters)
+        tool = next(tool for tool in tools.tools if tool.name == "patch_wiki_pages")
+        self.assertEqual(set(tool.input_schema["properties"]), set(parameters))
+        self.assertEqual(set(tool.input_schema["required"]), set(parameters))
+        self.assertIn("match exactly once", tool.description)
+        self.assertIn("preserving untouched content byte-for-byte", tool.description)
+        self.assertFalse(result.is_error)
+        self.assertEqual(github.calls, [(
+            "patch_wiki_pages",
+            (
+                parameters["repository"], parameters["patches"],
+                parameters["expected_base"], parameters["message"],
+            ),
             {"expected_wiki_repository": parameters["expected_wiki_repository"]},
         )])
 
@@ -458,9 +499,9 @@ class EnvironmentDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         for settings, wiki_writer, expected in (
             ({}, False, READ_TOOLS),
             ({"GITHUB_MCP_ENABLE_WRITES": "true"}, False, READ_TOOLS | WRITE_TOOLS),
-            ({}, True, READ_TOOLS | {"write_wiki_pages"}),
-            ({"GITHUB_MCP_ENABLE_WRITES": "true"}, True, READ_TOOLS | {"write_wiki_pages"}),
-            ({"GITHUB_MCP_ENABLE_WRITES": "not-a-triage-process"}, True, READ_TOOLS | {"write_wiki_pages"}),
+            ({}, True, READ_TOOLS | WIKI_WRITE_TOOLS),
+            ({"GITHUB_MCP_ENABLE_WRITES": "true"}, True, READ_TOOLS | WIKI_WRITE_TOOLS),
+            ({"GITHUB_MCP_ENABLE_WRITES": "not-a-triage-process"}, True, READ_TOOLS | WIKI_WRITE_TOOLS),
         ):
             with self.subTest(settings=settings, wiki_writer=wiki_writer):
                 with patch("issuelens_github_mcp.server.GitHubAppTokenProvider") as provider:

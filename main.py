@@ -248,6 +248,7 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
         "github-list_wiki_history",
         "github-get_wiki_diff",
         "wiki-writer-write_wiki_pages",
+        "wiki-writer-patch_wiki_pages",
     ],
     "infer": True,
 }
@@ -421,7 +422,7 @@ def _configured_team_memory_agent(mcp_servers: dict) -> CustomAgentConfig:
                     **server.get("env", {}),
                     "GITHUB_MCP_ENABLE_WRITES": "false",
                 },
-                "tools": ["write_wiki_pages"],
+                "tools": ["write_wiki_pages", "patch_wiki_pages"],
             },
         }
     return agent
