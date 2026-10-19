@@ -305,6 +305,35 @@ class GitHubClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(len(json.dumps(result, ensure_ascii=True).encode()), 100_000)
         self.assertNotIn("+source", json.dumps(result))
 
+    async def test_pull_request_file_manifest_stops_at_page_ceiling(self):
+        payload = [{
+            "sha": "a" * 40,
+            "filename": "src/final.py",
+            "status": "modified",
+            "additions": 1,
+            "deletions": 0,
+            "changes": 1,
+        }]
+
+        def handler(request):
+            self.requests.append(request)
+            return httpx.Response(200, json=payload)
+
+        client = GitHubClient(
+            self.provider,
+            transport=httpx.MockTransport(handler),
+        )
+
+        result = await client.list_pull_request_file_manifest(
+            "microsoft/IssueLens", 34, per_page=1, page=3000,
+        )
+
+        self.assertEqual(result["next_page"], None)
+        self.assertEqual(result["files"], payload)
+        self.assertEqual(dict(self.requests[-1].url.params), {
+            "per_page": "1", "page": "3000",
+        })
+
     def commit_client(self, patch="+new\n", *, file_count=1):
         payload = {
             "sha": "a" * 40,

@@ -376,7 +376,11 @@ class GitHubClient:
         )
         return {
             "files": files,
-            "next_page": page + 1 if len(files) == per_page else None,
+            "next_page": (
+                page + 1
+                if len(files) == per_page and page < 3000
+                else None
+            ),
         }
 
     async def list_pull_request_commits(
