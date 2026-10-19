@@ -23,7 +23,7 @@ MAX_PUSH_COMMITS = 1000
 MAX_BATCH_PRS = 100
 DISCOVERY_SECONDS = 180
 AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS = 300
-AGENT_STREAM_READ_BUDGET_SECONDS = 900
+AGENT_STREAM_READ_BUDGET_SECONDS = 1800
 ASSOCIATION_BATCH_SIZE = 20
 COORDINATOR_REPOSITORY = "microsoft/IssueLens"
 DISPATCH_WORKFLOW = ".github/workflows/team-memory-post-merge.yml"
@@ -686,7 +686,7 @@ def read_response(response, renderer=None):
         total += len(raw)
         require(len(raw) <= 1024 * 1024 and total <= 8 * 1024 * 1024, "Agent response exceeds stream limits")
         require(time.monotonic() - started <= AGENT_STREAM_READ_BUDGET_SECONDS,
-                "Agent response exceeded the 15-minute read budget")
+                "Agent response exceeded the 30-minute read budget")
         line = raw.decode("utf-8").rstrip("\r\n")
         if renderer is not None:
             renderer.tick()

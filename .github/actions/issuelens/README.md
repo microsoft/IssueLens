@@ -61,7 +61,7 @@ jobs:
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
       pull-requests: read
@@ -292,7 +292,7 @@ establish live publication.
 
 Use the event filters and per-issue concurrency from the
 [issue workflow](../../workflows/issue-triage.yml). Its job grants
-`contents: read`, `issues: read`, and `id-token: write`, and uses a 30-minute
+`contents: read`, `issues: read`, and `id-token: write`, and uses a 45-minute
 timeout. In an external repository remove its local checkout step and change
 the remaining action call to:
 
@@ -525,12 +525,12 @@ failing; invalid or ambiguous responses never become successful receipts.
 Issue-loop and task results may be plain text, Markdown, or requested JSON.
 
 The submission socket/read inactivity timeout is 5 minutes, the cooperative
-total stream budget remains 15 minutes, and the stream is limited to 8 MiB total
+total stream budget is 30 minutes, and the stream is limited to 8 MiB total
 and 1 MiB per line. The longer inactivity allowance covers model and
 orchestration turns that legitimately emit no SSE bytes for more than a minute.
-Keep a 30-minute caller job timeout as in the examples. The nominal
+Keep a 45-minute caller job timeout as in the examples. The nominal
 3-minute discovery, 1-minute token acquisition, 5-minute request/read inactivity,
-and 15-minute stream budgets can total 24 minutes. The remaining 6 minutes
+and 30-minute stream budgets can total 39 minutes. The remaining 6 minutes
 provide headroom for checkout, source-repository validation, Azure login,
 cooperative timeout overruns, and saving the receipt and summary. These
 socket/cooperative limits are not hard end-to-end deadlines.
