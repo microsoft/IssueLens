@@ -11,7 +11,7 @@ azure-keyvault-secrets>=4.9.0
 python-dotenv==1.2.2
 PyJWT[crypto]>=2.9.0
 PyYAML==6.0.3
-mcp>=2.0.0,<3
+mcp>=2.2.0,<3
 dulwich==1.2.14
 urllib3>=2.2.2
 opentelemetry-api>=1.44.0,<2
