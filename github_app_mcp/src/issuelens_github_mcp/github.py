@@ -1301,6 +1301,11 @@ class GitHubClient:
                             )
                 payload = json.loads(content)
         except httpx.HTTPStatusError as error:
+            if (
+                self._public_only and not _visibility_probe and not metadata_read
+                and error.response.status_code == 404
+            ):
+                await self._require_public_repository(repository)
             if anonymous_fallback:
                 if (
                     error.response.status_code == 403

@@ -55,7 +55,9 @@ Install the App on every target repository and any private related repository
 IssueLens is authorized to access. Public related repositories can be searched
 through bounded anonymous reads without an installation.
 
-Public-mode asset downloads omit App credentials. Denied policy access is an
+Public-mode asset downloads omit App credentials. Public-mode content 404s
+recheck repository visibility before allowing missing-policy fallback.
+Denied policy access is an
 error, not a missing configuration, and backend wiki failures return static
 messages instead of content-bearing diagnostics. A failed post-write visibility
 check retains an unknown outcome. Pre/post checks are not an atomic lock on

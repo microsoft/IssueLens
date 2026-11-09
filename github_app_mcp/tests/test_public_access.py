@@ -47,7 +47,7 @@ class PublicAccessTests(unittest.IsolatedAsyncioTestCase):
         self.requests = []
         self.provider = TokenProvider()
 
-    def client(self, metadata, *, writes=False, wiki_writes=False, material=None, provider=None):
+    def client(self, metadata, *, writes=False, wiki_writes=False, material=None, provider=None, public_only=True):
         def handler(request):
             self.requests.append(request)
             if request.url.path == f"/repos/{REPOSITORY}":
@@ -56,7 +56,7 @@ class PublicAccessTests(unittest.IsolatedAsyncioTestCase):
             return material(request) if material else httpx.Response(200, json={"body": CANARY})
 
         return GitHubClient(
-            provider or self.provider, public_only=True, writes_enabled=writes,
+            provider or self.provider, public_only=public_only, writes_enabled=writes,
             wiki_writes_enabled=wiki_writes, transport=httpx.MockTransport(handler),
         )
 
@@ -163,6 +163,59 @@ class PublicAccessTests(unittest.IsolatedAsyncioTestCase):
                     await load_instruction(self.client(metadata), REPOSITORY, "duplicate_detection")
                 self.assertNotIn(CANARY, str(caught.exception))
                 self.assertEqual(len(self.requests), 1)
+
+    async def test_content_404_after_visibility_change_cannot_select_builtin_policy(self):
+        for anonymous in (False, True):
+            for metadata in (
+                {**PUBLIC, "visibility": "private", "private": True},
+                httpx.Response(404, json={"message": CANARY}),
+                httpx.Response(403, json={"message": CANARY}),
+            ):
+                with self.subTest(anonymous=anonymous, metadata=metadata):
+                    self.requests.clear()
+                    checks = iter((PUBLIC, metadata))
+                    client = self.client(
+                        lambda: next(checks),
+                        provider=TokenProvider(anonymous=anonymous),
+                        material=lambda request: httpx.Response(404, json={"message": CANARY}),
+                    )
+                    with self.assertRaises(IssueLensConfigError) as caught:
+                        await load_instruction(client, REPOSITORY, "duplicate_detection")
+                    self.assertEqual(caught.exception.error_type, "permission_denied")
+                    self.assertEqual(caught.exception.outcome, "not_applied")
+                    self.assertNotIn(CANARY, str(caught.exception))
+                    self.assertEqual([request.url.path for request in self.requests], [
+                        f"/repos/{REPOSITORY}",
+                        f"/repos/{REPOSITORY}/contents/.github",
+                        f"/repos/{REPOSITORY}",
+                    ])
+
+    async def test_missing_policy_404_preserves_fallback_within_each_access_profile(self):
+        for public_only in (False, True):
+            for anonymous in (False, True):
+                with self.subTest(public_only=public_only, anonymous=anonymous):
+                    self.requests.clear()
+                    client = self.client(
+                        PUBLIC, public_only=public_only,
+                        provider=TokenProvider(anonymous=anonymous),
+                        material=lambda request: httpx.Response(404, json={"message": "Not Found"}),
+                    )
+                    result = await load_instruction(client, REPOSITORY, "duplicate_detection")
+                    self.assertEqual(result, {
+                        "repository": REPOSITORY,
+                        "domain": "duplicate_detection",
+                        "configStatus": "absent",
+                        "configPath": None,
+                        "source": "built-in",
+                        "path": None,
+                        "content": None,
+                    })
+                    expected_paths = [f"/repos/{REPOSITORY}/contents/.github"]
+                    if public_only:
+                        expected_paths = [
+                            f"/repos/{REPOSITORY}", *expected_paths, f"/repos/{REPOSITORY}",
+                        ]
+                    self.assertEqual([request.url.path for request in self.requests], expected_paths)
 
     async def test_visibility_is_rechecked_before_read_results_or_write_acknowledgements_are_released(self):
         for write in (False, True):
