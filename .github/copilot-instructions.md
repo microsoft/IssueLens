@@ -79,7 +79,22 @@ protocol for chat.
     `{ "input": "<free-form task>", "attachments": [] }`. `input` is the task;
     `attachments` contains validated inline Copilot `blob` attachments.
   - **`POST /responses`** — chat (playground, Teams, any Responses client).
-    The conversation's Copilot session is resumed each turn.
+    Sessions resume only for the same platform user, confidentiality profile,
+    and conversation. Stored response references and imported non-user history
+    are rejected.
+  - **Confidentiality profiles** — invocations and ordinary chat are public-only.
+    MCP, policy, source, image, and wiki loaders check canonical public repository
+    visibility before access and before result release, without a visibility
+    cache. App-authenticated rate limits remain available. Private-inclusive
+    duplicate analysis requires explicit `issuelens_access=internal-analysis`
+    Responses metadata in a separate authenticated maintainer conversation.
+    Its host/MCP tools are read-only, with no notifications, delegation, or
+    public handoff. Identity headers must come from trusted Foundry ingress
+    restricted to maintainers. Explicit SDK tools/agent allowlists and permission
+    callbacks deny local execution/files, arbitrary toolbox tools, and ambient
+    configuration, memory, or session-store discovery. User/policy text cannot
+    change profiles. These are not atomic GitHub visibility locks, nor a way to
+    classify arbitrary caller-supplied text or attachments.
   - **Session-owned GitHub MCP** — every Copilot session starts the bundled
     `github_app_mcp` stdio process with the App ID and Key Vault secret URI. The
     process loads the private key lazily, resolves installations, and caches
@@ -116,6 +131,9 @@ protocol for chat.
     deployer's client ID into the runtime. Local execution can use existing
     Azure Identity service-principal/workload or developer credentials.
 - **Custom agents** (registered in `main.py`):
+  - **`internal-analysis`** — a separately selected, read-only duplicate-analysis
+    identity for authenticated internal chat. Its prompt is
+    `agents/internal-analysis.md`; it is never registered in public sessions.
   - **`issuelens`** — the global agent identity. Its system prompt lives in
     `agents/issuelens.md`. It routes issue-level analysis to `triage` and
     critical-issue scans to `find-criticals`. It also owns built-in command parsing, channel

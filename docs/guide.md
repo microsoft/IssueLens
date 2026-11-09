@@ -397,6 +397,13 @@ are not proof of publication. Sensitive/conflicting changes require human review
 3. The preselected `issuelens` agent gets its global identity and orchestration rules from `agents/issuelens.md`. It routes issue-level work to `triage`, critical-issue scans to `find-criticals`, and planning work to `plan`. For trusted issue-loop events it re-reads current issue context and chooses initial triage, re-triage, initial planning, re-planning, or no action. The `triage` sub-agent runs the `find-duplicates`, `label-issue`, `assign-issue`, and `notify` skills for requested follow-up actions. The `plan` sub-agent investigates a triaged issue, returns an action plan followed by a design specification, reports readiness, and waits for human direction.
 4. Each Copilot `SessionEvent` is streamed back as an SSE `data:` event; a final `event: done` marks the end. Critical-issue scans end with a JSON report.
 
+**All invocations are public-only**, including direct tasks and team-memory
+jobs. Private/internal repository targets or wiki destinations are rejected;
+prompt text, attachments, or payload metadata cannot enable private reads.
+Existing public-to-public duplicate detection and authorized public writes
+remain available. Public duplicate reports mean "no public duplicate found,"
+not that no private duplicate exists.
+
 ### Chat — `POST /responses`
 
 1. Receives an OpenAI Responses request (Foundry playground, Teams, or any Responses client), including inline `input_image` and `input_file` content.
@@ -406,13 +413,70 @@ are not proof of publication. Sensitive/conflicting changes require human review
   credentials to the model.
 3. Uses a request-local read-only App client for issue-body images and the
   constrained `issuelens-config` tool.
-4. Attaches the Foundry toolbox for non-GitHub capabilities such as notifications. The toolbox must not contain a GitHub MCP connection.
+4. Uses an explicit tool catalog. Arbitrary Foundry toolbox connections are not
+   attached; public notifications use only the configured in-process tools.
 5. Performs only the bundled issue-triage operations: repository/file reads,
    issue and comment reads/searches, fixed-eyes activity acknowledgements, label
    reads/additions, assignee updates, and explicitly requested issue comments.
   Wiki retrieval is read-only; separately authorized maintenance uses only the
   `team-memory` agent-local writer.
-6. Resumes the conversation's Copilot session each turn and streams the reply as Responses SSE events.
+6. Resumes only the matching **platform user, confidentiality profile, and
+   conversation** and streams the reply as Responses SSE events. Send inline
+   current-user messages: assistant/system/tool history, item references, and
+   `previous_response_id` are rejected rather than resolved. After eviction or
+   host restart, a fresh session starts without importing platform-stored history.
+
+### Separate internal duplicate analysis
+
+Default chat is public-only. For private-inclusive duplicate analysis, an
+authenticated maintainer must explicitly start a **different conversation**
+with Responses metadata:
+
+```json
+{
+  "input": [{"role": "user", "content": [{"type": "input_text", "text": "Find duplicates of owner/repo#123, including owner/related-repo."}]}],
+  "conversation": "INTERNAL_CONVERSATION_ID",
+  "metadata": {"issuelens_access": "internal-analysis"},
+  "stream": true
+}
+```
+
+Send that metadata on every internal turn. The host requires a nonempty
+Foundry-supplied `x-agent-user-id`, not `request.user`, an input claim, or a
+conversation ID. Only the authenticated Foundry ingress may supply this header:
+restrict endpoint access to trusted maintainers and do not expose the local
+server directly or accept caller-spoofed identity headers. A local request
+without platform identity cannot start internal analysis. This mode does not
+grant new App installation access; each private repository still requires the
+App's scoped read permissions, and existing wiki audience rules still apply.
+
+Internal analysis has only repository reads and the read-only configuration
+tool. There are **no issue/PR/wiki writes, reactions, notifications, toolbox,
+delegation, shell, local-file tools, or persistent-memory/session-store
+retrieval**. Results return only to the requesting chat, never to an invocation
+or public triage session. The same live conversation cannot switch profiles.
+No automatic private-analysis job or report handoff is created.
+
+Both profiles use explicit tools and agent allowlists, deny out-of-catalog
+calls and execution permissions, and disable ambient instruction/configuration,
+file-hook, host-Git, memory, and cross-session discovery. Every MCP process,
+host policy/image loader, and delegated public agent inherits the host-selected
+profile. Public access checks verify canonical repository identity and public
+visibility before content reads and again before releasing results, without a
+visibility cache. A failed recheck discards the result; after a possible write,
+the outcome remains unknown rather than implying nothing was written. App
+tokens remain scoped and keep authenticated GitHub rate limits; public asset
+downloads never carry App credentials.
+
+This boundary governs agent-acquired repository data, not deliberate disclosure
+by an authenticated caller: supplied text/attachments and the chat client's own
+storage must be appropriate for the selected audience. Never paste an internal
+report into public automation or rely on model sanitization to make it public.
+GitHub visibility checks are not an atomic lock on repository privacy changes,
+and data that was public when acquired cannot be retroactively made confidential.
+Deploying these code changes and verifying the real hosted SDK catalog and
+ingress identity remain separate rollout steps; local tests alone do not prove
+production remediation.
 
 ### Large PR and commit analysis
 
@@ -506,7 +570,9 @@ azd env set GITHUB_APP_PRIVATE_KEY_SECRET_URI `
 Target repositories and all repositories receiving writes must be included in
 an installation of the App. Bounded REST reads prefer App authentication but fall
 back to anonymous access for public repositories when no installation is
-available. Private repository reads still require an installation. Each Copilot
+available. Private repository reads require both an installation and the
+separate authenticated internal-analysis profile; they are unavailable to
+invocations and ordinary chat. Each Copilot
 session owns its stdio MCP processes. Each process caches tokens only in memory by
 repository and permission set, refreshes them five minutes before expiry, and
 discards them when the process exits. Configure the App with **Metadata: Read**,
@@ -701,9 +767,10 @@ repositories without an App installation, and never uses this scope for writes.
 
 ### Foundry toolbox
 
-Set `TOOLBOX_ENDPOINT` to the versioned MCP endpoint for the toolbox containing
-non-GitHub chat capabilities. GitHub must remain excluded from this toolbox;
-GitHub access is provided only by the bundled stdio MCP server.
+Generic Foundry toolbox connections are not attached to either chat profile.
+`TOOLBOX_ENDPOINT` is retained only as legacy configuration and has no effect
+on tool availability. GitHub access uses the bundled stdio MCP server; configured
+public notifications use only IssueLens-owned in-process tools.
 
 ### Notifications
 
@@ -1132,7 +1199,7 @@ to avoid exposing infrastructure details:
 | `AZURE_AI_MODEL_DEPLOYMENT_NAME` | Secret | Existing model deployment used for inference. |
 | `ISSUELENS_APP_ID` | Variable | Existing GitHub App registration variable, passed as runtime `GITHUB_APP_ID`. |
 | `ISSUELENS_GITHUB_APP_PRIVATE_KEY_SECRET_URI` | Secret | Key Vault secret URI, passed as `GITHUB_APP_PRIVATE_KEY_SECRET_URI`, never PEM contents. |
-| `TOOLBOX_ENDPOINT` | Optional secret | Existing non-GitHub toolbox endpoint in this Foundry project. |
+| `TOOLBOX_ENDPOINT` | Legacy optional secret | Ignored by the restricted chat catalog; no toolbox connection is attached. |
 | `MAILING_URL` | Optional secret | Secret-bearing Logic App email endpoint. |
 | `PERSONAL_NOTIFICATION_URL` | Optional secret | Secret-bearing Logic App Teams endpoint. |
 

@@ -23,6 +23,7 @@ from .wiki import WikiPagePatch
 
 
 _ENABLE_WRITES_ENV = "GITHUB_MCP_ENABLE_WRITES"
+_PUBLIC_ONLY_ENV = "GITHUB_MCP_PUBLIC_ONLY"
 _PerPage = Annotated[int, Field(strict=True, ge=1, le=100)]
 _FilePage = Annotated[int, Field(strict=True, ge=1, le=3000)]
 
@@ -521,11 +522,16 @@ def build_server_from_environment(
         environment.get(_ENABLE_WRITES_ENV, "false"),
         _ENABLE_WRITES_ENV,
     )
+    public_only_value = environment.get(_PUBLIC_ONLY_ENV, "true")
+    if not public_only_value.strip():
+        raise ConfigurationError(f"{_PUBLIC_ONLY_ENV} must be true or false")
+    public_only = _boolean(public_only_value, _PUBLIC_ONLY_ENV)
     provider = GitHubAppTokenProvider(app_config)
     github = GitHubClient(
         provider,
         writes_enabled=writes_enabled,
         wiki_writes_enabled=wiki_writer,
+        public_only=public_only,
     )
     return create_server(github)
 

@@ -24,6 +24,11 @@ repository is public and has no App installation; writes always require the
 App. The trusted issue-image and repository-policy loaders use separate
 request-local clients and never return credentials to the model.
 
+Invocations and default chat sessions are public-only. Authenticated chat may
+explicitly select a separate, read-only internal-analysis session through
+Responses metadata; its history and tool catalog cannot be shared with public
+sessions.
+
 Model (inference) auth is selected automatically:
 
 * FOUNDRY_PROJECT_ENDPOINT + AZURE_AI_MODEL_DEPLOYMENT_NAME set
@@ -45,7 +50,7 @@ import os
 import pathlib
 import sys
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 
 import httpx
 from azure.core.credentials import AccessToken
@@ -64,8 +69,13 @@ from azure.ai.agentserver.responses import (
     ResponseEventStream,
     ResponsesAgentServerHost,
 )
+from azure.ai.agentserver.responses.models import ItemMessage
 from copilot import CopilotClient, PermissionHandler, ProviderConfig
-from copilot.session import CustomAgentConfig, ProviderTokenArgs
+from copilot.session import (
+    CustomAgentConfig, PermissionDecisionUserNotAvailable, PermissionInvocation,
+    PermissionRequest, PermissionRequestResult, PreToolUseHookInput,
+    PreToolUseHookOutput, ProviderTokenArgs,
+)
 from copilot.session_events import (
     AssistantMessageDeltaData,
     SessionEventType,
@@ -254,6 +264,22 @@ _TEAM_MEMORY_AGENT: CustomAgentConfig = {
     "infer": True,
 }
 
+_GITHUB_READ_TOOLS = [
+    name for name in _TEAM_MEMORY_AGENT["tools"] if name.startswith("github-")
+] + ["github-list_issue_reactions", "github-list_labels"]
+_GITHUB_WRITE_TOOLS = [
+    "github-add_labels", "github-set_assignees",
+    "github-add_issue_comment", "github-add_eyes_reaction",
+]
+_INTERNAL_ANALYSIS_AGENT: CustomAgentConfig = {
+    "name": "internal-analysis",
+    "display_name": "Internal duplicate analysis",
+    "description": "Read-only duplicate analysis in an authenticated internal chat.",
+    "prompt": _load_prompt(_agents_dir / "internal-analysis.md"),
+    "skills": ["issuelens-config", "team-memory", "find-duplicates"],
+    "tools": ["issuelens-config", *_GITHUB_READ_TOOLS],
+}
+
 
 # ── BYOK helpers ─────────────────────────────────────────────────────────────
 
@@ -329,7 +355,7 @@ def _byok_provider() -> tuple[ProviderConfig | None, str | None]:
 # ── Client & session management ──────────────────────────────────────────────
 
 
-def _github_mcp_server() -> dict:
+def _github_mcp_server(*, internal_analysis: bool = False) -> dict:
     """Build one session-owned GitHub App stdio MCP server configuration."""
     config = GitHubAppConfig.from_environment(os.environ)
     python_path = os.pathsep.join(filter(None, (
@@ -345,7 +371,8 @@ def _github_mcp_server() -> dict:
             "GITHUB_APP_PRIVATE_KEY_SECRET_URI": (
                 config.private_key_secret_uri
             ),
-            "GITHUB_MCP_ENABLE_WRITES": "true",
+            "GITHUB_MCP_ENABLE_WRITES": "false" if internal_analysis else "true",
+            "GITHUB_MCP_PUBLIC_ONLY": "false" if internal_analysis else "true",
             "PYTHONPATH": python_path,
         },
         "working_directory": str(_project_dir),
@@ -353,11 +380,13 @@ def _github_mcp_server() -> dict:
     }
 
 
-def _new_host_github_client() -> GitHubClient:
+def _new_host_github_client(*, internal_analysis: bool = False) -> GitHubClient:
     """Create a request-local, read-only client for trusted host loaders."""
     config = GitHubAppConfig.from_environment(os.environ)
     provider = GitHubAppTokenProvider(config)
-    return GitHubClient(provider, writes_enabled=False)
+    return GitHubClient(
+        provider, writes_enabled=False, public_only=not internal_analysis,
+    )
 
 
 async def _ensure_client() -> CopilotClient:
@@ -432,11 +461,82 @@ def _configured_team_memory_agent(mcp_servers: dict) -> CustomAgentConfig:
 def _session_options(
     mcp_servers: dict,
     runtime_tools: list[Tool] | None = None,
+    *,
+    internal_analysis: bool = False,
 ) -> dict:
     """Common ``create_session`` keyword arguments for both protocols."""
     provider, model = _byok_provider()
+    tools = _RUNTIME_TOOLS if runtime_tools is None else runtime_tools
+    custom_names = {"issuelens-config"}
+    agents = [dict(_INTERNAL_ANALYSIS_AGENT)] if internal_analysis else [
+        {
+            **agent,
+            "tools": [
+                "issuelens-config", *_GITHUB_READ_TOOLS, *_GITHUB_WRITE_TOOLS,
+                "send-email", "send-teams-notification",
+                *(["task"] if agent["name"] == "issuelens" else []),
+            ],
+        }
+        for agent in (_ISSUELENS_AGENT, _TRIAGE_AGENT, _FIND_CRITICALS_AGENT, _PLAN_AGENT)
+    ] + [_configured_team_memory_agent(mcp_servers)]
+    allowed = {"issuelens-config", *_GITHUB_READ_TOOLS}
+    if not internal_analysis:
+        custom_names.update({"send-email", "send-teams-notification"})
+        allowed.update({
+            "task", *_GITHUB_WRITE_TOOLS, *custom_names,
+            "wiki-writer-write_wiki_pages", "wiki-writer-patch_wiki_pages",
+        })
+    tools = [tool for tool in tools if tool.name in custom_names]
+    delegated_agents = {agent["name"] for agent in agents} - {"issuelens"}
+
+    def pre_tool_use(
+        value: PreToolUseHookInput, context: dict[str, str],
+    ) -> PreToolUseHookOutput | None:
+        name = value.get("toolName")
+        permitted = name in allowed
+        if name == "task":
+            arguments = value.get("toolArgs")
+            permitted = (
+                permitted and isinstance(arguments, Mapping)
+                and arguments.get("agent_type") in delegated_agents
+            )
+        if not permitted:
+            logger.info("Session tool denied by the confidentiality profile")
+            return {
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Tool is outside this session's confidentiality profile.",
+            }
+        return None
+
+    def permission(
+        request: PermissionRequest, invocation: PermissionInvocation,
+    ) -> PermissionRequestResult:
+        kind = getattr(request, "kind", None)
+        name = getattr(request, "tool_name", None)
+        permitted = (
+            kind == "mcp"
+            and f"{getattr(request, 'server_name', '')}-{name}" in allowed
+        ) or (kind == "custom-tool" and name in custom_names)
+        if not permitted or getattr(request, "managed_approval_required", False):
+            logger.info("Session permission denied by the confidentiality profile")
+            return PermissionDecisionUserNotAvailable()
+        return PermissionHandler.approve_all(request, invocation)
+
     return {
-        "on_permission_request": PermissionHandler.approve_all,
+        "on_permission_request": permission,
+        "available_tools": sorted(allowed),
+        "hooks": {"on_pre_tool_use": pre_tool_use},
+        "enable_config_discovery": False,
+        "included_builtin_skills": [],
+        "plugin_directories": [],
+        "instruction_directories": [],
+        "enable_on_demand_instruction_discovery": False,
+        "enable_file_hooks": False,
+        "enable_host_git_operations": False,
+        "enable_session_store": False,
+        "skip_embedding_retrieval": True,
+        "memory": {"enabled": False},
+        "enable_session_telemetry": False,
         "streaming": True,
         # Keep bounded PR/commit pages inline; agents cannot read SDK spill files.
         "large_output": {"max_size_bytes": 128 * 1024},
@@ -447,17 +547,9 @@ def _session_options(
         "provider": provider,
         "model": model,
         "mcp_servers": mcp_servers or None,
-        "tools": (
-            _RUNTIME_TOOLS if runtime_tools is None else runtime_tools
-        ) or None,
-        "custom_agents": [
-            _ISSUELENS_AGENT,
-            _TRIAGE_AGENT,
-            _FIND_CRITICALS_AGENT,
-            _PLAN_AGENT,
-            _configured_team_memory_agent(mcp_servers),
-        ],
-        "agent": "issuelens",
+        "tools": tools or None,
+        "custom_agents": agents,
+        "agent": "internal-analysis" if internal_analysis else "issuelens",
     }
 
 
@@ -808,8 +900,8 @@ _GITHUB_APP_UNCONFIGURED = (
 )
 
 # Copilot session id per conversation, so chat stays multi-turn.
-_chat_session_ids: dict[str, str] = {}
-_active_chat_conversations: set[str] = set()
+_chat_session_ids: dict[tuple[str, bool, str], str] = {}
+_active_chat_conversations: set[tuple[str, bool, str]] = set()
 
 _toolbox_credential = None
 _toolbox_token: AccessToken | None = None
@@ -875,7 +967,7 @@ def _unsubscribe_session(unsubscribe, run: RunTelemetry) -> None:
 
 
 async def _chat_session(
-    conversation: str,
+    conversation: tuple[str, bool, str],
     mcp_servers: dict,
     runtime_tools: list[Tool],
     run: RunTelemetry | None = None,
@@ -885,7 +977,9 @@ async def _chat_session(
     A session is resumed per conversation so chat history is preserved.
     """
     client = await _ensure_client()
-    options = _session_options(mcp_servers, runtime_tools)
+    options = _session_options(
+        mcp_servers, runtime_tools, internal_analysis=conversation[1],
+    )
 
     session_id = _chat_session_ids.get(conversation)
     if session_id:
@@ -926,14 +1020,32 @@ async def handle_chat(
         yield stream.emit_in_progress()
         if cancellation_signal.is_set():
             raise asyncio.CancelledError()
-        input_items = await context.get_input_items(resolve_references=True)
+        # Stored response references can otherwise import another profile's output.
+        input_items = await context.get_input_items(resolve_references=False)
         logger.info("Responses input received (%s items)", len(input_items))
         try:
+            metadata = request.metadata or {}
+            access = metadata.get("issuelens_access", "public")
+            if not isinstance(access, str) or access not in {"public", "internal-analysis"}:
+                raise MediaInputError("issuelens_access must be public or internal-analysis")
+            internal_analysis = access == "internal-analysis"
+            user_id = context.platform_context.user_id_key
+            if internal_analysis and (not isinstance(user_id, str) or not user_id.strip()):
+                raise MediaInputError(
+                    "Internal analysis requires a platform-authenticated maintainer identity"
+                )
+            if request.previous_response_id or any(
+                not isinstance(item, ItemMessage) or item.role != "user"
+                for item in input_items
+            ):
+                raise MediaInputError(
+                    "Use inline current-user messages, not stored responses or imported history"
+                )
             prompt, attachments = response_input(input_items)
         except MediaInputError as exc:
             status, stage, error_type = "rejected", "validation", "invalid_input"
-            logger.info("Responses media input rejected")
-            for event in stream.output_item_message(f"Unsupported attachment: {exc}"):
+            logger.info("Responses input rejected")
+            for event in stream.output_item_message(f"Unsupported chat input: {exc}"):
                 yield event
             transport = "completed"
             yield stream.emit_completed()
@@ -952,11 +1064,22 @@ async def handle_chat(
                 yield stream.emit_completed()
                 return
 
-        conversation = (
+        conversation_id = (
             context.conversation_id
             or context.platform_context.user_id_key
             or _ANONYMOUS_CONVERSATION
         )
+        conversation = (user_id or _ANONYMOUS_CONVERSATION, internal_analysis, conversation_id)
+        other_profile = (conversation[0], not internal_analysis, conversation_id)
+        if other_profile in _chat_session_ids or other_profile in _active_chat_conversations:
+            status, stage, error_type = "rejected", "validation", "invalid_input"
+            for event in stream.output_item_message(
+                "Public and internal analysis require separate conversations."
+            ):
+                yield event
+            transport = "completed"
+            yield stream.emit_completed()
+            return
         if conversation in _active_chat_conversations or len(_active_chat_conversations) >= _MAX_CHAT_SESSIONS:
             status, error_type = "rejected", "concurrent_turn"
             for event in stream.output_item_message(
@@ -970,8 +1093,8 @@ async def handle_chat(
         guarded_conversation = conversation
         run.admit()
         try:
-            request_github_client = _new_host_github_client()
-            github_mcp_server = _github_mcp_server()
+            request_github_client = _new_host_github_client(internal_analysis=internal_analysis)
+            github_mcp_server = _github_mcp_server(internal_analysis=internal_analysis)
         except (ConfigurationError, GitHubAppError):
             status, error_type = "failed", "configuration"
             for event in stream.output_item_message(_GITHUB_APP_UNCONFIGURED):
@@ -992,15 +1115,14 @@ async def handle_chat(
             run.degraded("media_unavailable")
             issue_attachments = []
         attachments = [*attachments, *issue_attachments]
-        toolbox_endpoint = os.environ.get(_TOOLBOX_ENDPOINT_ENV, "").strip()
         mcp_servers = {"github": github_mcp_server}
-        if toolbox_endpoint:
-            mcp_servers["toolbox"] = _toolbox_mcp_server(
-                toolbox_endpoint, context.platform_context.call_id
-            )
+        runtime_tools = (
+            [request_config_tool] if internal_analysis
+            else [*_NOTIFICATION_TOOLS, request_config_tool]
+        )
         with run.phase("session_open"):
             session = await _chat_session(
-                conversation, mcp_servers, [*_NOTIFICATION_TOOLS, request_config_tool], run,
+                conversation, mcp_servers, runtime_tools, run,
             )
         run.set_identifier("session_id", getattr(session, "session_id", None))
         queue: asyncio.Queue = asyncio.Queue()
