@@ -22,9 +22,18 @@ SSH, or credential helpers.
   through `DefaultAzureCredential`. Private-key contents are never accepted as
   command-line arguments or environment variables.
 - Every tool requires an explicit `owner/repository` argument.
+- `GITHUB_MCP_PUBLIC_ONLY` defaults to `true`; empty or whitespace-only values
+  are rejected. Public-mode REST, pinned-source
+  search, wiki, policy, and image reads reject non-public or unverified
+  repositories before accessing content and recheck visibility before release.
+  Canonical identity, `visibility: public`, and `private: false` must all match;
+  visibility is not cached. Private/internal targets and wiki destinations are
+  unavailable to default invocations and chat, including maintenance jobs.
 - REST reads prefer a repository-scoped GitHub App token and fall back to anonymous
   access only for public repositories. Private reads and every write require an
-  App installation.
+  App installation. The trusted host enables private reads only in separately
+  authenticated internal-analysis chat, with `GITHUB_MCP_ENABLE_WRITES=false`
+  and an explicit read-only tool catalog. No model parameter changes the profile.
 - Installation tokens are minted for one repository using GitHub's
   `repositories` restriction and for only the permission required by the tool.
   The cache key includes the repository and permission set.
@@ -45,6 +54,21 @@ SSH, or credential helpers.
 Install the App on every target repository and any private related repository
 IssueLens is authorized to access. Public related repositories can be searched
 through bounded anonymous reads without an installation.
+
+Public-mode asset downloads omit App credentials. Public-mode content 404s
+recheck repository visibility before allowing missing-policy fallback.
+Denied policy access is an
+error, not a missing configuration, and backend wiki failures return static
+messages instead of content-bearing diagnostics. A failed post-write visibility
+check retains an unknown outcome. Pre/post checks are not an atomic lock on
+GitHub visibility changes; data previously read as public cannot be made
+retroactively confidential.
+
+Direct library users explicitly select `GitHubClient(public_only=True)` for this
+boundary; its legacy constructor default remains unrestricted. Deployed host
+clients always supply the profile, and the standalone server defaults public.
+See [separate internal duplicate analysis](../docs/guide.md#separate-internal-duplicate-analysis)
+for authenticated ingress requirements, history isolation, and caller-input limits.
 
 ## Tools
 
@@ -490,6 +514,7 @@ Equivalent Copilot SDK stdio configuration shape:
             "https://vault-name.vault.azure.net/secrets/github-app-key"
         ),
         "GITHUB_MCP_ENABLE_WRITES": "false",
+        "GITHUB_MCP_PUBLIC_ONLY": "true",
     },
     "tools": ["*"],
 }

@@ -98,11 +98,15 @@ class GitHubClient:
         *,
         writes_enabled: bool = False,
         wiki_writes_enabled: bool = False,
+        public_only: bool = False,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         if not isinstance(wiki_writes_enabled, bool):
             raise GitHubAppError("wiki_writes_enabled must be a boolean")
+        if not isinstance(public_only, bool):
+            raise GitHubAppError("public_only must be a boolean")
         self._wiki_writes_enabled = wiki_writes_enabled
+        self._public_only = public_only
         self._token_provider = token_provider
         self._writes_enabled = writes_enabled
         self._transport = transport
@@ -476,6 +480,8 @@ class GitHubClient:
                     result = await self._search_repository_content_at_ref(
                         repository, query, ref, per_page=per_page, page=page, client=client,
                     )
+                    if self._public_only:
+                        await self._require_public_repository(repository)
                     deadline = scan_timeout.when()
                     if deadline is not None and asyncio.get_running_loop().time() >= deadline:
                         raise GitHubAppError(budget_error)
@@ -489,6 +495,8 @@ class GitHubClient:
         self, repository: str, query: str, ref: str, *,
         per_page: int, page: int, client: httpx.AsyncClient,
     ) -> Any:
+        if self._public_only:
+            await self._require_public_repository(repository)
         try:
             credential = await self._token_provider.get_token(
                 repository, {"contents": "read"}
@@ -746,6 +754,8 @@ class GitHubClient:
         repository = validate_repository(repository)
         if not self.wiki_writes_enabled:
             raise GitHubAppError("Wiki writes are not enabled", error_type="permission_denied")
+        if self._public_only:
+            await self._require_public_repository(repository)
         try:
             if not (
                 isinstance(expected_wiki_repository, str)
@@ -760,6 +770,8 @@ class GitHubClient:
         wiki_repository = await self._resolve_wiki_repository(
             repository, write=True, expected_wiki_repository=expected_wiki_repository,
         )
+        if self._public_only:
+            await self._require_public_repository(wiki_repository)
         try:
             credential = await self._token_provider.get_token(
                 wiki_repository, {"contents": "write"}
@@ -772,11 +784,23 @@ class GitHubClient:
             ) from None
         except Exception:
             raise GitHubAppError("Wiki write authentication failed", error_type="authentication_error") from None
-        return await asyncio.to_thread(
-            self._wiki_operation, repository, wiki_repository, credential.token,
-            lambda wiki: operation(wiki, author_name, author_email),
-            write=True,
-        )
+        try:
+            result = await asyncio.to_thread(
+                self._wiki_operation, repository, wiki_repository, credential.token,
+                lambda wiki: operation(wiki, author_name, author_email),
+                write=True,
+            )
+        except GitHubAppError as error:
+            if not self._public_only:
+                raise
+            raise GitHubAppError(
+                "Public wiki operation failed; inspect current state before recovery.",
+                error_type=error.error_type, outcome=error.outcome, http_status=error.http_status,
+            ) from None
+        if self._public_only:
+            await self._require_public_repository(repository, outcome="unknown")
+            await self._require_public_repository(wiki_repository, outcome="unknown")
+        return result
 
     async def _resolve_wiki_repository(
         self, repository: str, *, write: bool, expected_wiki_repository: str | None = None,
@@ -837,7 +861,11 @@ class GitHubClient:
         self, repository: str, operation: Callable[[WikiRepository], Any]
     ) -> Any:
         repository = self._authorize(repository)
+        if self._public_only:
+            await self._require_public_repository(repository)
         wiki_repository = await self._resolve_wiki_repository(repository, write=False)
+        if self._public_only:
+            await self._require_public_repository(wiki_repository)
         try:
             credential = await self._token_provider.get_token(
                 wiki_repository, {"contents": "read"}
@@ -849,9 +877,21 @@ class GitHubClient:
             ) from None
         except Exception:
             raise GitHubAppError("Wiki read authentication failed", error_type="authentication_error") from None
-        return await asyncio.to_thread(
-            self._wiki_operation, repository, wiki_repository, credential.token, operation
-        )
+        try:
+            result = await asyncio.to_thread(
+                self._wiki_operation, repository, wiki_repository, credential.token, operation
+            )
+        except GitHubAppError as error:
+            if not self._public_only:
+                raise
+            raise GitHubAppError(
+                "Public wiki operation failed.",
+                error_type=error.error_type, outcome=error.outcome, http_status=error.http_status,
+            ) from None
+        if self._public_only:
+            await self._require_public_repository(repository)
+            await self._require_public_repository(wiki_repository)
+        return result
 
     @staticmethod
     def _wiki_operation(
@@ -909,6 +949,8 @@ class GitHubClient:
         """Load validated GitHub-hosted images from one issue body for the host."""
         repository = self._authorize(repository)
         issue_number = _positive(issue_number, "issue_number")
+        if self._public_only:
+            await self._require_public_repository(repository)
         credential = await self._token_provider.get_token(
             repository, {"issues": "read"}
         )
@@ -930,6 +972,8 @@ class GitHubClient:
                 )
                 response.raise_for_status()
                 payload = response.json()
+                if self._public_only:
+                    await self._require_public_repository(repository)
                 body = payload.get("body") if isinstance(payload, Mapping) else None
                 urls = _extract_issue_image_urls(
                     body if isinstance(body, str) else ""
@@ -949,7 +993,7 @@ class GitHubClient:
                         image = await self._download_issue_image(
                             client,
                             url,
-                            credential.token,
+                            "" if self._public_only else credential.token,
                             min(_MAX_ISSUE_IMAGE_BYTES, remaining_bytes),
                         )
                     except GitHubAppError:
@@ -966,6 +1010,8 @@ class GitHubClient:
         except (httpx.HTTPError, ValueError) as error:
             raise GitHubAppError("GitHub issue image request failed") from error
 
+        if self._public_only:
+            await self._require_public_repository(repository)
         return {
             "images": images,
             "discovered_count": len(urls),
@@ -986,7 +1032,7 @@ class GitHubClient:
 
             host = urlparse(current_url).hostname
             headers = {"Accept": "image/png,image/jpeg,image/gif,image/webp"}
-            if host in _GITHUB_ASSET_HOSTS:
+            if token and host in _GITHUB_ASSET_HOSTS:
                 headers["Authorization"] = f"Bearer {token}"
 
             try:
@@ -1128,6 +1174,38 @@ class GitHubClient:
             raise GitHubAppError("GitHub write tools are disabled for this server", error_type="permission_denied")
         return repository
 
+    @staticmethod
+    def _check_public_metadata(repository: str, metadata: Any) -> None:
+        if (
+            not isinstance(metadata, Mapping)
+            or metadata.get("visibility") != "public"
+            or metadata.get("private") is not False
+            or not isinstance(metadata.get("full_name"), str)
+            or metadata["full_name"].casefold() != repository.casefold()
+        ):
+            raise GitHubAppError(
+                "Public sessions require verified public repository access. "
+                "Use a separate authenticated internal-analysis chat for non-public evidence.",
+                error_type="permission_denied",
+            )
+
+    async def _require_public_repository(
+        self, repository: str, *, outcome: Literal["not_applied", "unknown"] = "not_applied",
+    ) -> None:
+        # Never cache visibility across operations or release data after a failed recheck.
+        try:
+            metadata = await self._request(
+                "GET", repository, permissions={"metadata": "read"},
+                _visibility_probe=True,
+            )
+            self._check_public_metadata(repository, metadata)
+        except GitHubAppError as error:
+            raise GitHubAppError(
+                "Public repository visibility could not be verified; access was denied.",
+                error_type="permission_denied" if error.http_status == 404 else error.error_type,
+                http_status=error.http_status, outcome=outcome,
+            ) from None
+
     async def _request(
         self,
         method: str,
@@ -1144,8 +1222,12 @@ class GitHubClient:
         _commit_detail: CommitDetail | None = None,
         _pull_request_file_manifest: bool = False,
         _api_version: str = _API_VERSION,
+        _visibility_probe: bool = False,
     ) -> Any:
         repository = self._authorize(repository, write=write)
+        metadata_read = method == "GET" and not path and absolute_url is None
+        if self._public_only and not _visibility_probe and not metadata_read:
+            await self._require_public_repository(repository)
         if _client is not None and content_read_auth is None:
             raise GitHubAppError("Repository content authentication scope mismatch")
         headers = {
@@ -1219,6 +1301,11 @@ class GitHubClient:
                             )
                 payload = json.loads(content)
         except httpx.HTTPStatusError as error:
+            if (
+                self._public_only and not _visibility_probe and not metadata_read
+                and error.response.status_code == 404
+            ):
+                await self._require_public_repository(repository)
             if anonymous_fallback:
                 if (
                     error.response.status_code == 403
@@ -1248,6 +1335,13 @@ class GitHubClient:
                 outcome="unknown" if write else "not_applied",
             ) from error
 
+        if self._public_only and not _visibility_probe:
+            if metadata_read:
+                self._check_public_metadata(repository, payload)
+            else:
+                await self._require_public_repository(
+                    repository, outcome="unknown" if write else "not_applied",
+                )
         if _commit_detail is not None:
             if not isinstance(payload, dict):
                 raise GitHubAppError("GitHub returned an invalid commit")

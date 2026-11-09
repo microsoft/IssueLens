@@ -81,6 +81,8 @@ def validate_wiki_repository(value: Any) -> str:
 
 
 def _is_not_found(error: Exception) -> bool:
+    if getattr(error, "error_type", None) == "permission_denied":
+        return False
     return (
         getattr(error, "http_status", None) == 404
         or getattr(error, "status_code", None) == 404

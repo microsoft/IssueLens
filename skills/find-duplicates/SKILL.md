@@ -117,9 +117,17 @@ matches in `possiblyRelated`; do not describe them as duplicates.
   authorization. Related-repository policy never authorizes writes there.
 - Public related repositories may be read anonymously when the IssueLens App is
   not installed. Private related repositories still require an App
-  installation. Anonymous GitHub search is rate-limited, so do not retry failed
+  installation and a separate authenticated internal-analysis chat. Ordinary
+  sessions cannot read them, regardless of explicit user or policy scope.
+  Anonymous GitHub search is rate-limited, so do not retry failed
   or redundant searches. Never write to a related repository during duplicate
   analysis.
+- Respect the host's fixed confidentiality profile. In a public session,
+  describe an empty result as **no public duplicate found**, never as proof
+  that no duplicate exists in private repositories. Keep inaccessible-scope
+  diagnostics out of public issue comments. In an internal-analysis chat,
+  return private findings only to that chat, without publication, notifications,
+  delegation, or a handoff to a public session.
 
 ## Output
 
