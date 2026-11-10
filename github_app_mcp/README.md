@@ -137,9 +137,20 @@ access:
 | `list_merged_pull_requests` | Pull requests: read |
 
 With a supplied `ref`, `search_repository_content` scans an immutable snapshot:
-at most 64 regular files, 256 KiB of eligible content (64 KiB per file), and
+optional `path` selects an exact file or directory subtree at that commit.
+Use a canonical repository-relative POSIX path without a trailing slash,
+at most 240 characters and 16 components; globs and textual prefixes are not
+supported. For example, `ref=<full SHA>, path="src/test"` searches only that
+subtree, while `path="src/main.ts"` searches one file. Path resolution reads
+nonrecursive trees from the pinned root, never the entire recursive root
+inventory, and never follows symlinks or submodules. Missing paths fail
+explicitly. `path` without `ref` is rejected, not translated into indexed search.
+
+Within the selected scope, at most 64 regular files, 256 KiB of eligible content
+(64 KiB per file), and
 66 content API requests for a full SHA (one lightweight `/git/commits` object,
-one tree, and up to 64 blobs). Branch/tag inputs resolve through fixed
+one tree, and up to 64 blobs) are allowed, plus at most one nonrecursive tree read
+per path component. Branch/tag inputs resolve through fixed
 `/git/ref/heads`, `/git/ref/tags`, and at most eight `/git/tags` reads before the
 immutable commit-object read: at most ten additional requests, still inside
 the same scan deadline. `HEAD` first reads the repository's default branch.
@@ -159,6 +170,27 @@ result is retained only for that scan; no negative authentication cache survives
 the scan. Anonymous fallback remains read-only and never authorizes writes.
 Without `ref`, search uses GitHub's indexed default-branch code search with its
 existing single-request 30-second HTTP timeout, not the scan budget.
+
+Internal search-tree metadata has its own 1-MiB HTTP-response budget and is
+never returned directly to the model. The generic 100,000-byte result guard
+therefore does not reject a larger intermediate tree before matching.
+Other HTTP responses remain capped at 128 KiB; model-facing match pages
+and their MCP envelopes remain capped at 100,000 bytes. Truncated or oversized
+trees and file/content/time budget exhaustion fail explicitly without partial
+results or indexed fallback. Narrow `path` after an inventory or scan-limit
+error, or use `get_file` at a full SHA if even a shallow tree exceeds its budget.
+Do not just reduce `per_page`: that paginates matches, not the inventory scan.
+
+Pinned results return the selected `path` (`null` for the repository root),
+`resolved_ref`, and repository-relative, commit-pinned matches sorted by path.
+`total_count` counts matching files only within that scope.
+`incomplete_results`, `skipped_files`, and `skipped_reasons` describe skipped
+content within the chosen scope, not excluded paths elsewhere in the repository.
+Even zero matches with `incomplete_results=false` establish coverage only for
+that scope. Files over 64 KiB, binary/non-UTF-8 files, unsupported encodings,
+symlinks, and submodules are explicitly skipped. Reuse the same `path`,
+`resolved_ref`, and `per_page` for subsequent pages; restart at page 1 if changing
+`per_page`. Reduce `per_page` only for an oversized match-page result.
 
 ### Paged PR and commit reads
 
