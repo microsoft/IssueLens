@@ -488,6 +488,10 @@ def _session_options(
         })
     tools = [tool for tool in tools if tool.name in custom_names]
     delegated_agents = {agent["name"] for agent in agents} - {"issuelens"}
+    mcp_tools = {
+        server: {name for name in allowed if name.startswith(f"{server}-")}
+        for server in ("github", "wiki-writer")
+    }
 
     def pre_tool_use(
         value: PreToolUseHookInput, context: dict[str, str],
@@ -513,12 +517,25 @@ def _session_options(
     ) -> PermissionRequestResult:
         kind = getattr(request, "kind", None)
         name = getattr(request, "tool_name", None)
+        server = getattr(request, "server_name", None)
+        server_tools = mcp_tools.get(server, ())
+        # SDK MCP requests can already carry the server-qualified tool name.
         permitted = (
             kind == "mcp"
-            and f"{getattr(request, 'server_name', '')}-{name}" in allowed
+            and (name in server_tools or f"{server}-{name}" in server_tools)
         ) or (kind == "custom-tool" and name in custom_names)
-        if not permitted or getattr(request, "managed_approval_required", False):
-            logger.info("Session permission denied by the confidentiality profile")
+        if not permitted:
+            logger.info(
+                "Session permission denied by the confidentiality profile: outside the tool catalog"
+            )
+            return PermissionDecisionUserNotAvailable()
+        if (
+            getattr(request, "managed_approval_required", False)
+            or invocation.get("managed_settings_enabled", False)
+        ):
+            logger.info(
+                "Session permission denied by the confidentiality profile: managed approval required"
+            )
             return PermissionDecisionUserNotAvailable()
         return PermissionHandler.approve_all(request, invocation)
 

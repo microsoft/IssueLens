@@ -461,7 +461,10 @@ Both profiles use explicit tools and agent allowlists, deny out-of-catalog
 calls and execution permissions, and disable ambient instruction/configuration,
 file-hook, host-Git, memory, and cross-session discovery. Every MCP process,
 host policy/image loader, and delegated public agent inherits the host-selected
-profile. Public access checks verify canonical repository identity and public
+profile. MCP permission checks bind each allowlisted tool to its owning server,
+accepting both bare and SDK server-qualified tool names. Read-only annotations
+do not grant out-of-catalog access, and requests needing managed approval remain
+denied. Public access checks verify canonical repository identity and public
 visibility before content reads and again before releasing results, without a
 visibility cache. A failed recheck discards the result; after a possible write,
 the outcome remains unknown rather than implying nothing was written. App
