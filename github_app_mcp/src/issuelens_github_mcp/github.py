@@ -35,6 +35,8 @@ _MAX_HTTP_RESPONSE_BYTES = 128 * 1024
 _MAX_COMMIT_HTTP_RESPONSE_BYTES = 1024 * 1024
 _MAX_FILE_BYTES = 64 * 1024
 _MAX_QUERY_CHARS = 512
+_MAX_SEARCH_TREE_BYTES = 1024 * 1024
+_MAX_SEARCH_PATH_DEPTH = 16
 _MAX_SEARCH_FILES = 64
 _MAX_SEARCH_BYTES = 256 * 1024
 _MAX_SEARCH_SECONDS = 60
@@ -448,7 +450,7 @@ class GitHubClient:
 
     async def search_repository_content(
         self, repository: str, query: str, *, ref: str | None = None,
-        per_page: int = 30, page: int = 1,
+        path: str | None = None, per_page: int = 30, page: int = 1,
     ) -> Any:
         repository = self._authorize(repository)
         if not isinstance(query, str) or any(
@@ -459,6 +461,19 @@ class GitHubClient:
         query = query.strip()
         if not query or len(query) > _MAX_QUERY_CHARS or _SEARCH_QUALIFIER.search(query):
             raise GitHubAppError("query must be plain text and within the bounded limit")
+        if path is not None:
+            if ref is None:
+                raise GitHubAppError("path requires ref for a pinned search", error_type="invalid_input")
+            path = _repository_path(path)
+            parts = pathlib.PurePosixPath(path).parts
+            if path != "/".join(parts) or any(
+                unicodedata.category(char).startswith("C") for char in path
+            ):
+                raise GitHubAppError("path must be a canonical repository-relative POSIX path", error_type="invalid_input")
+            if len(parts) > _MAX_SEARCH_PATH_DEPTH:
+                raise GitHubAppError(
+                    f"path must have at most {_MAX_SEARCH_PATH_DEPTH} components", error_type="invalid_input",
+                )
         pagination = _pagination(per_page, page)
         if ref is None:
             return await self._request(
@@ -478,22 +493,23 @@ class GitHubClient:
                     )
                     stack.push_async_callback(client.aclose)
                     result = await self._search_repository_content_at_ref(
-                        repository, query, ref, per_page=per_page, page=page, client=client,
+                        repository, query, ref, search_path=path,
+                        per_page=per_page, page=page, client=client,
                     )
                     if self._public_only:
                         await self._require_public_repository(repository)
                     deadline = scan_timeout.when()
                     if deadline is not None and asyncio.get_running_loop().time() >= deadline:
-                        raise GitHubAppError(budget_error)
+                        raise GitHubAppError(budget_error, error_type="limit_exceeded")
                     return result
             except TimeoutError:
                 if not scan_timeout.expired():
                     raise
-                raise GitHubAppError(budget_error) from None
+                raise GitHubAppError(budget_error, error_type="limit_exceeded") from None
 
     async def _search_repository_content_at_ref(
         self, repository: str, query: str, ref: str, *,
-        per_page: int, page: int, client: httpx.AsyncClient,
+        search_path: str | None, per_page: int, page: int, client: httpx.AsyncClient,
     ) -> Any:
         if self._public_only:
             await self._require_public_repository(repository)
@@ -516,36 +532,46 @@ class GitHubClient:
         tree_sha = _search_oid(commit["tree"].get("sha"))
         if _SEARCH_OID_PATTERN.fullmatch(ref) and ref.lower() != resolved_ref:
             raise GitHubAppError("GitHub returned a different search commit")
-        tree = await self._request(
-            "GET", repository, f"/git/trees/{tree_sha}",
-            permissions={"contents": "read"}, params={"recursive": "1"},
-            content_read_auth=content_read_auth,
-            _client=client,
-        )
-        if (
-            not isinstance(tree, Mapping)
-            or not isinstance(tree.get("tree"), list)
-            or type(tree.get("truncated")) is not bool
-            or _search_oid(tree.get("sha")) != tree_sha
-        ):
-            raise GitHubAppError("GitHub returned an invalid search tree")
-        if tree["truncated"]:
-            raise GitHubAppError("Repository search tree is truncated; scan cannot be complete")
+        prefix = ""
+        if search_path is not None:
+            parts = search_path.split("/")
+            for index, part in enumerate(parts):
+                entries = await self._read_search_tree(
+                    repository, tree_sha, recursive=False,
+                    content_read_auth=content_read_auth, client=client,
+                )
+                selected = next((entry for entry in entries if entry["path"] == part), None)
+                if selected is None:
+                    raise GitHubAppError(
+                        "Repository search path was not found at the resolved commit", error_type="not_found",
+                    )
+                if selected["type"] == "tree":
+                    tree_sha = _search_oid(selected["sha"])
+                    continue
+                if index != len(parts) - 1:
+                    raise GitHubAppError(
+                        "Repository search path cannot descend through a file, symlink, or submodule",
+                        error_type="invalid_input",
+                    )
+                entries = [selected]
+                prefix = search_path.rpartition("/")[0]
+                break
+            else:
+                entries = await self._read_search_tree(
+                    repository, tree_sha, recursive=True,
+                    content_read_auth=content_read_auth, client=client,
+                )
+                prefix = search_path
+        else:
+            entries = await self._read_search_tree(
+                repository, tree_sha, recursive=True,
+                content_read_auth=content_read_auth, client=client,
+            )
 
         files = []
-        seen_paths = set()
         skipped_reasons: dict[str, int] = {}
-        for entry in tree["tree"]:
-            if not isinstance(entry, Mapping):
-                raise GitHubAppError("GitHub returned an invalid search tree entry")
-            path = _repository_path(entry.get("path"))
-            if (
-                path in seen_paths
-                or path != "/".join(pathlib.PurePosixPath(path).parts)
-                or any(unicodedata.category(char).startswith("C") for char in path)
-            ):
-                raise GitHubAppError("GitHub returned an invalid search tree path")
-            seen_paths.add(path)
+        for entry in entries:
+            path = _repository_path(f"{prefix}/{entry['path']}" if prefix else entry["path"])
             blob_sha = _search_oid(entry.get("sha"))
             kind, mode = entry.get("type"), entry.get("mode")
             if kind == "tree" and mode == "040000":
@@ -554,16 +580,17 @@ class GitHubClient:
                 reason = "symlink" if kind == "blob" else "submodule"
                 skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
                 continue
-            if kind != "blob" or mode not in ("100644", "100755"):
-                raise GitHubAppError("GitHub returned an unsupported search tree mode")
-            size = entry.get("size")
-            if type(size) is not int or size < 0:
-                raise GitHubAppError("GitHub returned an invalid search file size")
-            files.append((path, blob_sha, size))
+            files.append((path, blob_sha, entry["size"]))
         if len(files) > _MAX_SEARCH_FILES:
-            raise GitHubAppError(f"Repository search exceeds {_MAX_SEARCH_FILES} regular files")
+            raise GitHubAppError(
+                f"Repository search exceeds {_MAX_SEARCH_FILES} regular files; narrow path, not per_page",
+                error_type="limit_exceeded",
+            )
         if sum(size for _, _, size in files if size <= _MAX_FILE_BYTES) > _MAX_SEARCH_BYTES:
-            raise GitHubAppError(f"Repository search exceeds {_MAX_SEARCH_BYTES} content bytes")
+            raise GitHubAppError(
+                f"Repository search exceeds {_MAX_SEARCH_BYTES} content bytes; narrow path, not per_page",
+                error_type="limit_exceeded",
+            )
 
         items = []
         for path, blob_sha, size in sorted(files):
@@ -591,11 +618,61 @@ class GitHubClient:
         result = {
             "items": items[start:start + per_page], "total_count": len(items),
             "incomplete_results": bool(skipped_reasons), "resolved_ref": resolved_ref,
+            "path": search_path,
             "skipped_files": sum(skipped_reasons.values()), "skipped_reasons": skipped_reasons,
         }
         if len(json.dumps(result, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
-            raise GitHubAppError("GitHub search result is too large; reduce per_page")
+            raise GitHubAppError("GitHub search result is too large; reduce per_page", error_type="limit_exceeded")
         return result
+
+    async def _read_search_tree(
+        self, repository: str, tree_sha: str, *, recursive: bool,
+        content_read_auth: _ContentReadAuth, client: httpx.AsyncClient,
+    ) -> list[Mapping[str, Any]]:
+        tree = await self._request(
+            "GET", repository, f"/git/trees/{tree_sha}",
+            permissions={"contents": "read"}, params={"recursive": "1"} if recursive else None,
+            content_read_auth=content_read_auth, _client=client, _search_tree=True,
+        )
+        if (
+            not isinstance(tree, Mapping)
+            or not isinstance(tree.get("tree"), list)
+            or type(tree.get("truncated")) is not bool
+            or _search_oid(tree.get("sha")) != tree_sha
+        ):
+            raise GitHubAppError("GitHub returned an invalid search tree")
+        if tree["truncated"]:
+            raise GitHubAppError(
+                "Repository search tree is truncated; narrow path or use get_file with a full SHA",
+                error_type="limit_exceeded",
+            )
+        entries = []
+        seen_paths = set()
+        for entry in tree["tree"]:
+            if not isinstance(entry, Mapping):
+                raise GitHubAppError("GitHub returned an invalid search tree entry")
+            path = _repository_path(entry.get("path"))
+            if (
+                path in seen_paths
+                or path != "/".join(pathlib.PurePosixPath(path).parts)
+                or any(unicodedata.category(char).startswith("C") for char in path)
+                or (not recursive and "/" in path)
+            ):
+                raise GitHubAppError("GitHub returned an invalid search tree path")
+            seen_paths.add(path)
+            _search_oid(entry.get("sha"))
+            kind, mode = entry.get("type"), entry.get("mode")
+            if (kind, mode) not in (
+                ("tree", "040000"), ("blob", "120000"), ("commit", "160000"),
+                ("blob", "100644"), ("blob", "100755"),
+            ):
+                raise GitHubAppError("GitHub returned an unsupported search tree mode")
+            if kind == "blob" and mode in ("100644", "100755"):
+                size = entry.get("size")
+                if type(size) is not int or size < 0:
+                    raise GitHubAppError("GitHub returned an invalid search file size")
+            entries.append(entry)
+        return entries
 
     async def _resolve_search_commit(
         self, repository: str, ref: str, *,
@@ -1221,6 +1298,7 @@ class GitHubClient:
         _client: httpx.AsyncClient | None = None,
         _commit_detail: CommitDetail | None = None,
         _pull_request_file_manifest: bool = False,
+        _search_tree: bool = False,
         _api_version: str = _API_VERSION,
         _visibility_probe: bool = False,
     ) -> Any:
@@ -1287,6 +1365,7 @@ class GitHubClient:
                     response.raise_for_status()
                     content = bytearray()
                     limit = (
+                        _MAX_SEARCH_TREE_BYTES if _search_tree else
                         _MAX_COMMIT_HTTP_RESPONSE_BYTES
                         if _commit_detail is not None or _pull_request_file_manifest
                         else _MAX_HTTP_RESPONSE_BYTES
@@ -1295,7 +1374,8 @@ class GitHubClient:
                         content.extend(chunk)
                         if len(content) > limit:
                             raise GitHubAppError(
-                                "GitHub response is too large; narrow the request",
+                                "Repository search tree metadata is too large; narrow path or use get_file with a full SHA"
+                                if _search_tree else "GitHub response is too large; narrow the request",
                                 error_type="limit_exceeded",
                                 outcome="unknown" if write else "not_applied",
                             )
@@ -1370,7 +1450,8 @@ class GitHubClient:
                 }
                 for item in payload
             ]
-        if len(json.dumps(payload, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
+        # Search trees are internal metadata; only the constructed match page reaches the model.
+        if not _search_tree and len(json.dumps(payload, ensure_ascii=True).encode("utf-8")) > _MAX_RESULT_BYTES:
             raise GitHubAppError(
                 "GitHub response is too large; narrow the request", error_type="limit_exceeded",
                 outcome="unknown" if write else "not_applied",

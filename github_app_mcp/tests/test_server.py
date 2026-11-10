@@ -324,6 +324,32 @@ class MCPServerTests(unittest.IsolatedAsyncioTestCase):
             READ_TOOLS | WRITE_TOOLS,
         )
 
+    async def test_pinned_search_scope_and_pagination_are_discoverable_and_forwarded(self):
+        github = FakeGitHubClient()
+        async with Client(create_server(cast(GitHubClient, github))) as client:
+            tools = await client.list_tools()
+            result = await client.call_tool("search_repository_content", {
+                "repository": "microsoft/IssueLens", "query": "needle",
+                "ref": "a" * 40, "path": "src/test", "per_page": 2, "page": 3,
+            })
+            for invalid in ({"per_page": True}, {"page": 101}, {"path": 123}):
+                with self.subTest(invalid=invalid):
+                    rejected = await client.call_tool("search_repository_content", {
+                        "repository": "microsoft/IssueLens", "query": "needle", **invalid,
+                    })
+                    self.assertTrue(rejected.is_error)
+                    self.assertEqual(rejected.structured_content["error"]["type"], "invalid_input")
+        search_tool = next(tool for tool in tools.tools if tool.name == "search_repository_content")
+        properties = search_tool.input_schema["properties"]
+        self.assertIsNone(properties["path"]["default"])
+        self.assertEqual(properties["per_page"]["maximum"], 100)
+        self.assertEqual(properties["page"]["maximum"], 100)
+        self.assertIn("reducing per_page only shrinks returned matches", search_tool.description)
+        self.assertFalse(result.is_error)
+        self.assertEqual(github.calls, [("search_repository_content", ("microsoft/IssueLens", "needle"), {
+            "ref": "a" * 40, "path": "src/test", "per_page": 2, "page": 3,
+        })])
+
     async def test_wiki_writer_has_only_direct_mutation_and_bounded_schema(self):
         github = FakeGitHubClient(wiki_writes_enabled=True)
         server = create_server(cast(GitHubClient, github))

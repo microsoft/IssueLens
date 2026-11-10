@@ -90,8 +90,11 @@ instead of claiming full coverage.
   exact or complete PR patch.
 - `get_file` supports bounded UTF-8 content up to 64 KiB, not arbitrary file
   ranges or automatic large-resource downloads. A full-SHA
-  `search_repository_content` can answer a targeted question, but its bounded
-  matches and `incomplete_results` do not prove whole-file or whole-PR coverage.
+  `search_repository_content` can answer a targeted question. Use its optional
+  `path` to select an exact file or directory subtree after an inventory/scan
+  limit; `per_page` only paginates matches, not the scan. Preserve `path` and
+  `resolved_ref` across pages. Its bounded matches and `incomplete_results`
+  describe only the chosen scope, not whole-file or whole-PR coverage.
 - PR manifests and PR/commit file lists have a 3,000-file ceiling. REST file
   tools permit at most 3,000 pages so single-file paging remains possible;
   other numbered-page reads remain capped at 100 pages. The PR-commit endpoint

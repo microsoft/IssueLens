@@ -82,6 +82,7 @@ class PublicAccessTests(unittest.IsolatedAsyncioTestCase):
             "tree": lambda c: c.list_repository_tree(REPOSITORY, COMMIT),
             "indexed source": lambda c: c.search_repository_content(REPOSITORY, "crash"),
             "pinned source": lambda c: c.search_repository_content(REPOSITORY, "crash", ref=COMMIT),
+            "scoped pinned source": lambda c: c.search_repository_content(REPOSITORY, "crash", ref=COMMIT, path="src"),
             "merged PRs": lambda c: c.list_merged_pull_requests(REPOSITORY, base="main"),
             "wiki": lambda c: c.get_wiki_snapshot(REPOSITORY),
             "wiki pages": lambda c: c.list_wiki_pages(REPOSITORY),
@@ -280,6 +281,52 @@ class PublicAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["images"], [])
         self.assertNotIn(CANARY, json.dumps(result))
         self.assertTrue(any(r.url.host == "private-user-images.githubusercontent.com" for r in self.requests))
+
+    async def test_scoped_search_rechecks_visibility_before_releasing_tree_or_match_data(self):
+        subtree = "d" * 40
+        for changed_after in ("ancestor", "subtree", "blob"):
+            with self.subTest(changed_after=changed_after):
+                self.requests.clear()
+                nonpublic = False
+
+                def metadata():
+                    return {**PUBLIC, "private": True, "visibility": "private"} if nonpublic else PUBLIC
+
+                def material(request):
+                    nonlocal nonpublic
+                    if request.url.path.endswith(f"/git/commits/{COMMIT}"):
+                        return httpx.Response(200, json={"sha": COMMIT, "tree": {"sha": TREE}})
+                    if request.url.path.endswith(f"/git/trees/{TREE}"):
+                        self.assertFalse(request.url.params)
+                        nonpublic = changed_after == "ancestor"
+                        return httpx.Response(200, json={
+                            "sha": TREE, "truncated": False,
+                            "tree": [{"path": "src", "sha": subtree, "type": "tree", "mode": "040000"}],
+                        })
+                    if request.url.path.endswith(f"/git/trees/{subtree}"):
+                        self.assertEqual(request.url.params["recursive"], "1")
+                        nonpublic = changed_after == "subtree"
+                        return httpx.Response(200, json={
+                            "sha": subtree, "truncated": False,
+                            "tree": [{"path": "source.py", "sha": BLOB, "type": "blob", "mode": "100644", "size": len(CANARY)}],
+                        })
+                    self.assertTrue(request.url.path.endswith(f"/git/blobs/{BLOB}"))
+                    nonpublic = changed_after == "blob"
+                    return httpx.Response(200, json={
+                        "sha": BLOB, "size": len(CANARY), "encoding": "base64",
+                        "content": base64.b64encode(CANARY.encode()).decode(),
+                    })
+
+                client = self.client(metadata, material=material)
+                result = await create_server(client).call_tool("search_repository_content", {
+                    "repository": REPOSITORY, "query": CANARY, "ref": COMMIT, "path": "src",
+                })
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["error"]["type"], "permission_denied")
+                self.assertIsNone(result.structured_content["result"])
+                self.assertNotIn(CANARY, str(result))
+                content_reads = [r for r in self.requests if r.url.path != f"/repos/{REPOSITORY}"]
+                self.assertEqual(len(content_reads), {"ancestor": 2, "subtree": 3, "blob": 4}[changed_after])
 
     async def test_public_wiki_rejects_nonpublic_destination_before_git_access(self):
         client = self.client(PUBLIC)

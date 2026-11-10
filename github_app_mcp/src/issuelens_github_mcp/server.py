@@ -311,15 +311,27 @@ def create_server(
         return await github.list_repository_tree(repository, ref, recursive=recursive)
 
     @server.tool()
-    async def search_repository_content(repository: str, query: str, ref: str | None = None, per_page: int = 30, page: int = 1) -> Any:
+    async def search_repository_content(
+        repository: str, query: str, ref: str | None = None,
+        per_page: _PerPage = 30, page: Annotated[int, Field(strict=True, ge=1, le=100)] = 1,
+        path: str | None = None,
+    ) -> Any:
         """Search content in one explicit repository; query cannot contain qualifiers.
 
         With ref, resolve a branch, tag, or commit to one immutable commit and
         search its regular UTF-8 files for the trimmed, case-insensitive literal
         query within each line, not in paths. No regex or search operators apply.
-        At most 64 regular files, 256 KiB eligible content, and 66 content API
-        requests are allowed for a full SHA, plus initial authentication
-        lookup/minting overhead. Branch/tag resolution uses fixed Git-ref/tag
+        Optional path selects one exact file or directory subtree, not a glob
+        or textual prefix. It requires ref and a canonical repository-relative
+        POSIX path (no trailing slash), at most 240 characters/16 components.
+        Resolve it through nonrecursive trees at the pinned commit, then scan
+        only that subtree; symlinks/submodules are never followed. Omitting path
+        scans the root. The same 64-regular-file/256-KiB eligible-content caps
+        apply within the chosen scope. Narrow path after a scan-limit error;
+        reducing per_page only shrinks returned matches, not the scan.
+        A full SHA uses at most 66 content API requests plus one nonrecursive
+        tree read per path component, plus initial authentication lookup/minting
+        overhead. Branch/tag resolution uses fixed Git-ref/tag
         routes (up to ten additional requests), never patch-bearing commits.
         One HTTP client is reused for the scan's content requests and closed on
         success, error, cancellation, or deadline expiry. A fixed 60-second overall
@@ -329,20 +341,26 @@ def create_server(
         propagates after cleanup. Files over 64 KiB, binary/non-UTF-8 content, unsupported
         encodings, symlinks, and submodules are skipped explicitly. Truncated
         trees, exhausted scan limits, and malformed responses fail without an
-        indexed fallback. HTTP responses are capped at 128 KiB and returned
-        results at 100,000 bytes.
+        indexed fallback. Internal tree downloads have a separate 1-MiB budget
+        per response; other HTTP responses remain capped at 128 KiB. Only the
+        constructed match page is subject to the 100,000-byte model-result cap.
         Items are sorted by path then paginated; total_count counts matching
-        files in the scanned subset. Check incomplete_results and skipped_reasons
-        before treating zero matches as exhaustive. Each item has a blob SHA,
-        commit-pinned URL, and at most three matching line numbers with excerpts
-        capped at the first 160 characters. Reuse resolved_ref for later pages
-        to avoid a moving branch changing the snapshot; reduce per_page if the
-        result exceeds the response limit.
+        files within returned path (null means repository root), not the whole
+        repository when scoped. incomplete_results/skipped_reasons describe only
+        that scope; check them before treating zero matches as exhaustive there.
+        Missing paths fail explicitly, not as empty successful scans.
+        Each item has a blob SHA, commit-pinned URL, and at most three matching
+        line numbers with excerpts capped at the first 160 characters.
+        Reuse resolved_ref and the same path for later pages to keep scope and snapshot;
+        restart at page 1 after changing per_page. Reduce per_page if the result
+        exceeds the response limit.
 
         Without ref, use GitHub's indexed default-branch code search and return
         its native result/pagination semantics, not immutable source evidence.
         """
-        return await github.search_repository_content(repository, query, ref=ref, per_page=per_page, page=page)
+        return await github.search_repository_content(
+            repository, query, ref=ref, path=path, per_page=per_page, page=page,
+        )
 
     @server.tool()
     async def list_merged_pull_requests(repository: str, base: str, since: str | None = None, per_page: int = 30, page: int = 1) -> Any:
