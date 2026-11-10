@@ -5,6 +5,13 @@ It prepares and validates the request, authenticates to an existing IssueLens
 agent with Azure OIDC, and invokes it through a shared bounded HTTP/SSE client.
 It is a client of the agent, not part of the hosted agent runtime.
 
+The hosted invocation profile is public-only: private/internal repository reads
+and private wiki destinations are rejected, even when the App has access.
+Private-inclusive duplicate analysis is available only on request in a separate
+authenticated, read-only maintainer chat; no internal report is returned to this
+action. Inputs and Actions display modes must be appropriate for the workflow's
+audience.
+
 The normal path prepares the request, logs in with the pinned `azure/login`
 action, and submits the request. Coordinated team-memory inputs select a bounded
 reconciliation range; source/run validation, ancestry checks, and complete

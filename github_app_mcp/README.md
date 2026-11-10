@@ -22,9 +22,18 @@ SSH, or credential helpers.
   through `DefaultAzureCredential`. Private-key contents are never accepted as
   command-line arguments or environment variables.
 - Every tool requires an explicit `owner/repository` argument.
+- `GITHUB_MCP_PUBLIC_ONLY` defaults to `true`; empty or whitespace-only values
+  are rejected. Public-mode REST, pinned-source
+  search, wiki, policy, and image reads reject non-public or unverified
+  repositories before accessing content and recheck visibility before release.
+  Canonical identity, `visibility: public`, and `private: false` must all match;
+  visibility is not cached. Private/internal targets and wiki destinations are
+  unavailable to default invocations and chat, including maintenance jobs.
 - REST reads prefer a repository-scoped GitHub App token and fall back to anonymous
   access only for public repositories. Private reads and every write require an
-  App installation.
+  App installation. The trusted host enables private reads only in separately
+  authenticated internal-analysis chat, with `GITHUB_MCP_ENABLE_WRITES=false`
+  and an explicit read-only tool catalog. No model parameter changes the profile.
 - Installation tokens are minted for one repository using GitHub's
   `repositories` restriction and for only the permission required by the tool.
   The cache key includes the repository and permission set.
@@ -45,6 +54,21 @@ SSH, or credential helpers.
 Install the App on every target repository and any private related repository
 IssueLens is authorized to access. Public related repositories can be searched
 through bounded anonymous reads without an installation.
+
+Public-mode asset downloads omit App credentials. Public-mode content 404s
+recheck repository visibility before allowing missing-policy fallback.
+Denied policy access is an
+error, not a missing configuration, and backend wiki failures return static
+messages instead of content-bearing diagnostics. A failed post-write visibility
+check retains an unknown outcome. Pre/post checks are not an atomic lock on
+GitHub visibility changes; data previously read as public cannot be made
+retroactively confidential.
+
+Direct library users explicitly select `GitHubClient(public_only=True)` for this
+boundary; its legacy constructor default remains unrestricted. Deployed host
+clients always supply the profile, and the standalone server defaults public.
+See [separate internal duplicate analysis](../docs/guide.md#separate-internal-duplicate-analysis)
+for authenticated ingress requirements, history isolation, and caller-input limits.
 
 ## Tools
 
@@ -113,9 +137,20 @@ access:
 | `list_merged_pull_requests` | Pull requests: read |
 
 With a supplied `ref`, `search_repository_content` scans an immutable snapshot:
-at most 64 regular files, 256 KiB of eligible content (64 KiB per file), and
+optional `path` selects an exact file or directory subtree at that commit.
+Use a canonical repository-relative POSIX path without a trailing slash,
+at most 240 characters and 16 components; globs and textual prefixes are not
+supported. For example, `ref=<full SHA>, path="src/test"` searches only that
+subtree, while `path="src/main.ts"` searches one file. Path resolution reads
+nonrecursive trees from the pinned root, never the entire recursive root
+inventory, and never follows symlinks or submodules. Missing paths fail
+explicitly. `path` without `ref` is rejected, not translated into indexed search.
+
+Within the selected scope, at most 64 regular files, 256 KiB of eligible content
+(64 KiB per file), and
 66 content API requests for a full SHA (one lightweight `/git/commits` object,
-one tree, and up to 64 blobs). Branch/tag inputs resolve through fixed
+one tree, and up to 64 blobs) are allowed, plus at most one nonrecursive tree read
+per path component. Branch/tag inputs resolve through fixed
 `/git/ref/heads`, `/git/ref/tags`, and at most eight `/git/tags` reads before the
 immutable commit-object read: at most ten additional requests, still inside
 the same scan deadline. `HEAD` first reads the repository's default branch.
@@ -135,6 +170,27 @@ result is retained only for that scan; no negative authentication cache survives
 the scan. Anonymous fallback remains read-only and never authorizes writes.
 Without `ref`, search uses GitHub's indexed default-branch code search with its
 existing single-request 30-second HTTP timeout, not the scan budget.
+
+Internal search-tree metadata has its own 1-MiB HTTP-response budget and is
+never returned directly to the model. The generic 100,000-byte result guard
+therefore does not reject a larger intermediate tree before matching.
+Other HTTP responses remain capped at 128 KiB; model-facing match pages
+and their MCP envelopes remain capped at 100,000 bytes. Truncated or oversized
+trees and file/content/time budget exhaustion fail explicitly without partial
+results or indexed fallback. Narrow `path` after an inventory or scan-limit
+error, or use `get_file` at a full SHA if even a shallow tree exceeds its budget.
+Do not just reduce `per_page`: that paginates matches, not the inventory scan.
+
+Pinned results return the selected `path` (`null` for the repository root),
+`resolved_ref`, and repository-relative, commit-pinned matches sorted by path.
+`total_count` counts matching files only within that scope.
+`incomplete_results`, `skipped_files`, and `skipped_reasons` describe skipped
+content within the chosen scope, not excluded paths elsewhere in the repository.
+Even zero matches with `incomplete_results=false` establish coverage only for
+that scope. Files over 64 KiB, binary/non-UTF-8 files, unsupported encodings,
+symlinks, and submodules are explicitly skipped. Reuse the same `path`,
+`resolved_ref`, and `per_page` for subsequent pages; restart at page 1 if changing
+`per_page`. Reduce `per_page` only for an oversized match-page result.
 
 ### Paged PR and commit reads
 
@@ -490,6 +546,7 @@ Equivalent Copilot SDK stdio configuration shape:
             "https://vault-name.vault.azure.net/secrets/github-app-key"
         ),
         "GITHUB_MCP_ENABLE_WRITES": "false",
+        "GITHUB_MCP_PUBLIC_ONLY": "true",
     },
     "tools": ["*"],
 }

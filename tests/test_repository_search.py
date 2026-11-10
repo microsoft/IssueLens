@@ -113,6 +113,14 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         }
         return blob_sha
 
+    def add_directory(self, path, *, tree=OLD_TREE):
+        tree_sha = hashlib.sha1(f"{tree}/{path}".encode("utf-8")).hexdigest()
+        self.trees[tree]["tree"].append({
+            "path": path, "type": "tree", "mode": "040000", "sha": tree_sha,
+        })
+        self.trees[tree_sha] = {"sha": tree_sha, "truncated": False, "tree": []}
+        return tree_sha
+
     def handler(self, request):
         self.requests.append(request)
         self.assertEqual(request.method, "GET")
@@ -143,7 +151,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
             commit = self.commits.get(ref.lower())
             return httpx.Response(200, json=commit) if commit is not None else httpx.Response(404)
         if route.startswith("git/trees/"):
-            self.assertEqual(request.url.params["recursive"], "1")
+            self.assertIn(dict(request.url.params), ({}, {"recursive": "1"}))
             return httpx.Response(200, json=self.trees[route.removeprefix("git/trees/")])
         if route.startswith("git/blobs/"):
             return httpx.Response(200, json=self.blobs[route.removeprefix("git/blobs/")])
@@ -1101,6 +1109,7 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_snapshot_is_complete(self):
         result = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
         self.assertEqual(result["items"], [])
+        self.assertIsNone(result["path"])
         self.assertEqual(result["total_count"], 0)
         self.assertEqual(result["skipped_reasons"], {})
         self.assertFalse(result["incomplete_results"])
@@ -1122,8 +1131,9 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
         content = (("needle" + "\u4e00" * 154 + "\n") * 3).encode("utf-8")
         for index in range(64):
             self.add_file(f"{index:02}.txt", content)
-        with self.assertRaisesRegex(GitHubAppError, "reduce per_page"):
+        with self.assertRaisesRegex(GitHubAppError, "reduce per_page") as caught:
             await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT, per_page=100)
+        self.assertEqual(caught.exception.error_type, "limit_exceeded")
         result = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT, per_page=1)
         self.assertEqual(len(result["items"]), 1)
         self.assertEqual(result["total_count"], 64)
@@ -1136,10 +1146,227 @@ class RepositorySearchTests(unittest.IsolatedAsyncioTestCase):
             {"line_number": 2, "excerpt": "needle", "truncated": False},
         ])
 
-    async def test_oversized_tree_honors_request_result_limit(self):
+    async def test_internal_tree_metadata_is_not_a_model_result(self):
+        self.add_file("source.txt", b"needle")
         self.trees[OLD_TREE]["padding"] = "x" * 100_000
+        response = httpx.Response(200, json=self.trees[OLD_TREE])
+        self.assertLess(len(response.content), github_module._MAX_HTTP_RESPONSE_BYTES)
+        self.assertGreater(
+            len(json.dumps(self.trees[OLD_TREE]).encode("utf-8")),
+            github_module._MAX_RESULT_BYTES,
+        )
+        result = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+        self.assertEqual(result["total_count"], 1)
+        self.assertNotIn("padding", result)
+        self.assertLess(len(json.dumps(result).encode("utf-8")), github_module._MAX_RESULT_BYTES)
         with self.assertRaisesRegex(GitHubAppError, "too large"):
+            await self.client.list_repository_tree(REPOSITORY, OLD_TREE)
+
+    async def test_path_avoids_large_root_inventory_and_unrelated_scan_budgets(self):
+        for index in range(338):
+            self.add_file(f"{index:03}.txt", b"x" * 5000)
+        subtree = self.add_directory("src")
+        blob = self.add_file("source.py", b"needle", tree=subtree)
+        self.add_directory("src-other")
+        self.trees[OLD_TREE]["padding"] = "x" * 100_000
+        self.assertGreater(
+            len(httpx.Response(200, json=self.trees[OLD_TREE]).content),
+            github_module._MAX_HTTP_RESPONSE_BYTES,
+        )
+        for per_page in (1, 100):
+            with self.subTest(per_page=per_page):
+                self.requests.clear()
+                with self.assertRaisesRegex(GitHubAppError, "64 regular files; narrow path") as caught:
+                    await self.client.search_repository_content(
+                        REPOSITORY, "needle", ref=OLD_COMMIT, per_page=per_page,
+                    )
+                self.assertEqual(caught.exception.error_type, "limit_exceeded")
+                self.assertEqual(caught.exception.outcome, "not_applied")
+                self.assertEqual(len(self.requests), 2)
+
+        self.requests.clear()
+        result = await self.client.search_repository_content(
+            REPOSITORY, "needle", ref=OLD_COMMIT, path="src",
+        )
+        self.assertEqual(result["path"], "src")
+        self.assertEqual(result["resolved_ref"], OLD_COMMIT)
+        self.assertEqual(result["total_count"], 1)
+        self.assertFalse(result["incomplete_results"])
+        self.assertEqual(result["items"][0]["path"], "src/source.py")
+        self.assertEqual(result["items"][0]["sha"], blob)
+        self.assertEqual(result["items"][0]["html_url"],
+                         f"https://github.com/{REPOSITORY}/blob/{OLD_COMMIT}/src/source.py")
+        self.assertEqual(
+            [(r.url.path, dict(r.url.params)) for r in self.requests],
+            [(f"/repos/{REPOSITORY}/git/commits/{OLD_COMMIT}", {}),
+             (f"/repos/{REPOSITORY}/git/trees/{OLD_TREE}", {}),
+             (f"/repos/{REPOSITORY}/git/trees/{subtree}", {"recursive": "1"}),
+             (f"/repos/{REPOSITORY}/git/blobs/{blob}", {})],
+        )
+
+    async def test_nested_directory_and_exact_file_scopes_preserve_paths_and_pagination(self):
+        subtree = self.add_directory("src")
+        nested = self.add_directory("space # \u00fc", tree=subtree)
+        self.add_file("z.py", b"needle last", tree=nested)
+        first_blob = self.add_file("a.py", b"needle first", tree=nested)
+        self.add_file("a.py-extra", b"needle unrelated", tree=subtree)
+        search_path = "src/space # \u00fc"
+        first = await self.client.search_repository_content(
+            REPOSITORY, "needle", ref="release/topic", path=search_path, per_page=1,
+        )
+        self.refs["release/topic"] = NEW_COMMIT
+        second = await self.client.search_repository_content(
+            REPOSITORY, "needle", ref=first["resolved_ref"], path=search_path, per_page=1, page=2,
+        )
+        past_end = await self.client.search_repository_content(
+            REPOSITORY, "needle", ref=first["resolved_ref"], path=search_path, per_page=1, page=3,
+        )
+        self.assertEqual(first["total_count"], 2)
+        self.assertEqual(second["total_count"], 2)
+        self.assertEqual(first["path"], second["path"])
+        self.assertEqual(second["resolved_ref"], OLD_COMMIT)
+        self.assertEqual(first["items"][0]["path"], f"{search_path}/a.py")
+        self.assertEqual(second["items"][0]["path"], f"{search_path}/z.py")
+        self.assertEqual(past_end["items"], [])
+        self.assertEqual(past_end["total_count"], 2)
+        self.assertIn("/src/space%20%23%20%C3%BC/a.py", first["items"][0]["html_url"])
+
+        self.requests.clear()
+        exact = await self.client.search_repository_content(
+            REPOSITORY, "needle", ref=OLD_COMMIT, path=f"{search_path}/a.py",
+        )
+        self.assertEqual(exact["path"], f"{search_path}/a.py")
+        self.assertEqual(exact["items"], first["items"])
+        self.assertEqual(exact["total_count"], 1)
+        self.assertEqual(exact["items"][0]["sha"], first_blob)
+        self.assertEqual(len(self.requests), 5)
+        self.assertTrue(all(not r.url.params for r in self.requests))
+
+    async def test_scope_keeps_missing_and_skipped_coverage_explicit(self):
+        subtree = self.add_directory("src")
+        self.add_file("outside.txt", b"needle")
+        self.add_file("binary.bin", b"needle\x00", tree=subtree)
+        self.add_file("large.txt", b"x" * (64 * 1024 + 1), tree=subtree)
+        self.add_file("link", b"../outside.txt", tree=subtree, mode="120000")
+        self.trees[subtree]["tree"].append({
+            "path": "module", "type": "commit", "mode": "160000", "sha": NEW_COMMIT,
+        })
+        result = await self.client.search_repository_content(
+            REPOSITORY, "needle", ref=OLD_COMMIT, path="src",
+        )
+        self.assertEqual(result["items"], [])
+        self.assertEqual(result["total_count"], 0)
+        self.assertTrue(result["incomplete_results"])
+        self.assertEqual(result["skipped_files"], 4)
+        self.assertEqual(result["skipped_reasons"], {
+            "binary": 1, "file_too_large": 1, "symlink": 1, "submodule": 1,
+        })
+        for path, reason in (("src/link", "symlink"), ("src/module", "submodule")):
+            with self.subTest(path=path):
+                result = await self.client.search_repository_content(
+                    REPOSITORY, "needle", ref=OLD_COMMIT, path=path,
+                )
+                self.assertEqual(result["items"], [])
+                self.assertEqual(result["path"], path)
+                self.assertTrue(result["incomplete_results"])
+                self.assertEqual(result["skipped_reasons"], {reason: 1})
+        self.add_directory("empty")
+        empty = await self.client.search_repository_content(
+            REPOSITORY, "needle", ref=OLD_COMMIT, path="empty",
+        )
+        self.assertFalse(empty["incomplete_results"])
+        self.assertEqual(empty["path"], "empty")
+        self.assertEqual(empty["total_count"], 0)
+        for path, error_type in (
+            ("missing", "not_found"), ("Src", "not_found"), ("src/missing", "not_found"),
+            ("src/link/child", "invalid_input"), ("src/module/child", "invalid_input"),
+            ("outside.txt/child", "invalid_input"),
+        ):
+            with self.subTest(path=path):
+                with self.assertRaises(GitHubAppError) as caught:
+                    await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT, path=path)
+                self.assertEqual(caught.exception.error_type, error_type)
+        self.assertFalse(any(r.url.path == "/search/code" for r in self.requests))
+
+    async def test_invalid_paths_fail_before_authentication(self):
+        for path in (
+            "", ".", "..", "/src", "src/", "src//test", "src/./test", "src/../test",
+            "src\\test", "src\n", "src\u200b", 123, [], {}, "x" * 241,
+            "/".join(["src"] * 17),
+        ):
+            with self.subTest(path=path):
+                with self.assertRaises(GitHubAppError) as caught:
+                    await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT, path=path)
+                self.assertEqual(caught.exception.error_type, "invalid_input")
+        with self.assertRaisesRegex(GitHubAppError, "path requires ref"):
+            await self.client.search_repository_content(REPOSITORY, "needle", path="src")
+        self.assertEqual(self.provider.calls, [])
+        self.assertEqual(self.requests, [])
+
+    async def test_maximum_path_depth_is_bounded_and_accepted(self):
+        subtree = OLD_TREE
+        for _ in range(github_module._MAX_SEARCH_PATH_DEPTH):
+            subtree = self.add_directory("d", tree=subtree)
+        self.add_file("source.py", b"needle", tree=subtree)
+        search_path = "/".join(["d"] * github_module._MAX_SEARCH_PATH_DEPTH)
+        result = await self.client.search_repository_content(
+            REPOSITORY, "needle", ref=OLD_COMMIT, path=search_path,
+        )
+        self.assertEqual(result["items"][0]["path"], f"{search_path}/source.py")
+        self.assertEqual(len(self.requests), 3 + github_module._MAX_SEARCH_PATH_DEPTH)
+
+    async def test_scoped_search_still_enforces_file_and_content_budgets(self):
+        subtree = self.add_directory("src")
+        for count, size, message in ((65, 6, "64 regular files"), (5, 64 * 1024, "262144 content bytes")):
+            self.trees[subtree]["tree"] = []
+            for index in range(count):
+                self.add_file(f"{index:02}.py", b"needle" + b"x" * (size - 6), tree=subtree)
+            for per_page in (1, 100):
+                with self.subTest(count=count, per_page=per_page):
+                    self.requests.clear()
+                    with self.assertRaisesRegex(GitHubAppError, message) as caught:
+                        await self.client.search_repository_content(
+                            REPOSITORY, "needle", ref=OLD_COMMIT, path="src", per_page=per_page,
+                        )
+                    self.assertEqual(caught.exception.error_type, "limit_exceeded")
+                    self.assertEqual(caught.exception.outcome, "not_applied")
+                    self.assertEqual(len(self.requests), 3)
+
+    async def test_path_resolution_rejects_truncated_or_malformed_ancestors(self):
+        subtree = self.add_directory("src")
+        self.add_file("source.py", b"needle", tree=subtree)
+        valid = copy.deepcopy(self.trees[OLD_TREE])
+        entry = valid["tree"][0]
+        for tree in (
+            {**valid, "truncated": True},
+            {**valid, "sha": NEW_TREE},
+            {**valid, "tree": [entry, entry]},
+            {**valid, "tree": [{**entry, "path": "src/nested"}]},
+            {**valid, "tree": [{**entry, "mode": []}]},
+        ):
+            with self.subTest(tree=tree):
+                self.requests.clear()
+                self.trees[OLD_TREE] = tree
+                with self.assertRaises(GitHubAppError):
+                    await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT, path="src")
+                self.assertEqual(len(self.requests), 2)
+
+    async def test_internal_tree_download_budget_remains_bounded(self):
+        self.add_file("source.py", b"needle")
+        self.trees[OLD_TREE]["padding"] = ""
+        encoded = json.dumps(self.trees[OLD_TREE]).encode("utf-8")
+        self.trees[OLD_TREE]["padding"] = "x" * (github_module._MAX_SEARCH_TREE_BYTES - len(encoded))
+        encoded = json.dumps(self.trees[OLD_TREE]).encode("utf-8")
+        self.assertEqual(len(encoded), github_module._MAX_SEARCH_TREE_BYTES)
+        self.overrides[f"git/trees/{OLD_TREE}"] = httpx.Response(200, content=encoded)
+        result = await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+        self.assertEqual(result["total_count"], 1)
+        self.overrides[f"git/trees/{OLD_TREE}"] = httpx.Response(200, content=encoded + b" ")
+        self.requests.clear()
+        with self.assertRaisesRegex(GitHubAppError, "tree metadata is too large; narrow path") as caught:
             await self.client.search_repository_content(REPOSITORY, "needle", ref=OLD_COMMIT)
+        self.assertEqual(caught.exception.error_type, "limit_exceeded")
+        self.assertEqual(caught.exception.outcome, "not_applied")
         self.assertEqual(len(self.requests), 2)
 
     async def test_malformed_commit_payloads_fail_safely(self):

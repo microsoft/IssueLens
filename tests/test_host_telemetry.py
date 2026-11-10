@@ -23,6 +23,7 @@ from azure.ai.agentserver.responses import (
 )
 from azure.ai.agentserver.responses.models import (
     ItemMessage,
+    ItemReferenceParam,
     MessageContentInputFileContent,
     MessageContentInputImageContent,
     MessageContentInputTextContent,
@@ -32,7 +33,10 @@ from azure.ai.agentserver.responses.streaming._sse import encode_sse_event
 from azure.core.credentials import AccessToken
 from azure.core.exceptions import ClientAuthenticationError
 from copilot import CopilotClient, PermissionHandler
-from copilot.generated.session_events import SessionEvent, SessionEventType
+from copilot.generated.session_events import (
+    PermissionRequestCustomTool, PermissionRequestMcp, PermissionRequestShell,
+    SessionEvent, SessionEventType,
+)
 from copilot.session import ProviderTokenAcquireRequest
 from copilot.tools import ToolInvocation
 from opentelemetry.trace import StatusCode
@@ -347,6 +351,8 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             self.host, "CopilotClient", side_effect=AssertionError("Live Copilot CLI startup"),
         ))
         self.github_client = Mock(spec=[])
+        self.real_github_factory = self.host._new_host_github_client
+        self.real_github_mcp = self.host._github_mcp_server
         self.github_factory = self.stack.enter_context(patch.object(
             self.host, "_new_host_github_client", return_value=self.github_client,
         ))
@@ -355,6 +361,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             return_value={"type": "stdio", "command": "offline-only", "args": [], "env": {}},
         ))
         self.config_tool = Mock(name="offline-config-tool")
+        self.config_tool.name = "issuelens-config"
         self.config_factory = self.stack.enter_context(patch.object(
             self.host, "create_issuelens_config_tool", return_value=self.config_tool,
         ))
@@ -413,22 +420,31 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
     def chat_stream(
         self, prompt=PROMPT_SECRET, *, conversation="conversation1",
         response_id="response1", content=None, cancellation=None,
+        access="public", user_id="offline-user", items=None, previous_response_id=None,
     ):
         if content is None:
             content = [MessageContentInputTextContent(text=prompt)] if prompt else []
-        items = [ItemMessage(role="user", content=content)] if content else []
-        request = CreateResponse(input=items, stream=True, conversation=conversation)
+        if items is None:
+            items = [ItemMessage(role="user", content=content)] if content else []
+        request = CreateResponse(
+            input=items, stream=True, conversation=conversation,
+            metadata={"issuelens_access": access}, previous_response_id=previous_response_id,
+        )
         context = ResponseContext(
             response_id=response_id, request=request, input_items=items,
             conversation_id=conversation,
             mode_flags=ResponseModeFlags(stream=True, store=False, background=False),
-            platform_context=PlatformContext(user_id_key="offline-user", call_id="offline-call"),
+            platform_context=PlatformContext(user_id_key=user_id, call_id="offline-call"),
         )
         stream = self.host.handle_chat(
             request, context, cancellation if cancellation is not None else asyncio.Event(),
         )
         self.addAsyncCleanup(self.close_stream, stream)
         return stream
+
+    @staticmethod
+    def chat_key(conversation="conversation1", *, access="public", user_id="offline-user"):
+        return (user_id, access == "internal-analysis", conversation)
 
     async def close_stream(self, stream):
         await stream.aclose()
@@ -488,6 +504,325 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             for span in self.backend.exporter.get_finished_spans()
         ])
         self.assert_no_canaries(exported)
+
+    async def test_internal_analysis_requires_nonempty_platform_identity_before_any_data_access(self):
+        for user_id in (None, "", " "):
+            with self.subTest(user_id=user_id):
+                result = await self.chat(access="internal-analysis", user_id=user_id)
+                self.assertIn("platform-authenticated", json.dumps([item.as_dict() for item in result]))
+        self.github_factory.assert_not_called()
+        self.github_mcp.assert_not_called()
+        self.config_factory.assert_not_called()
+        self.images.assert_not_called()
+        self.assertEqual(self.client.create_calls, [])
+
+    async def test_internal_analysis_has_readonly_catalog_and_only_private_chat_output(self):
+        session = self.session([
+            sdk_event("assistant.message_delta", {"messageId": "m1", "deltaContent": ANSWER_SECRET}),
+            sdk_event("session.idle"),
+        ])
+        with patch.dict(os.environ, {"TOOLBOX_ENDPOINT": "https://toolbox.invalid"}):
+            result = await self.chat(access="internal-analysis")
+        self.assertIn(ANSWER_SECRET, json.dumps([item.as_dict() for item in result]))
+        self.github_factory.assert_called_once_with(internal_analysis=True)
+        self.github_mcp.assert_called_once_with(internal_analysis=True)
+        self.config_factory.assert_called_once_with(self.github_client)
+        self.images.assert_awaited_once()
+        self.toolbox.assert_not_called()
+        options, = self.client.create_calls
+        self.assertEqual(options["agent"], "internal-analysis")
+        self.assertEqual(options["tools"], [self.config_tool])
+        self.assertEqual({agent["name"] for agent in options["custom_agents"]}, {"internal-analysis"})
+        for names in (options["available_tools"], options["custom_agents"][0]["tools"]):
+            self.assertEqual(set(names), {"issuelens-config", *self.host._GITHUB_READ_TOOLS})
+            self.assertTrue(set(names).isdisjoint({
+                "task", "bash", "view", "send-email", "send-teams-notification",
+                "github-add_issue_comment", "wiki-writer-write_wiki_pages",
+            }))
+        self.assertEqual(session.send_calls[0][0], self.host._responses_turn(PROMPT_SECRET))
+        self.assert_content_free_telemetry()
+
+    async def test_same_conversation_cannot_switch_between_internal_and_public_profiles(self):
+        for initial, following in (("internal-analysis", "public"), ("public", "internal-analysis")):
+            with self.subTest(initial=initial):
+                self.host._chat_session_ids.clear()
+                self.session([sdk_event("session.idle")], session_id=initial)
+                await self.chat(access=initial)
+                created = len(self.client.create_calls)
+                resumed = len(self.client.resume_calls)
+                result = await self.chat(access=following)
+                self.assertIn("separate conversations", json.dumps([item.as_dict() for item in result]))
+                self.assertEqual(len(self.client.create_calls), created)
+                self.assertEqual(len(self.client.resume_calls), resumed)
+
+    async def test_internal_session_history_is_partitioned_by_owner(self):
+        first = self.session(
+            session_id="owner-a", turns=[[sdk_event("session.idle")], [sdk_event("session.idle")]],
+        )
+        self.session([sdk_event("session.idle")], session_id="owner-b")
+        await self.chat(access="internal-analysis", user_id="owner-a")
+        await self.chat(access="internal-analysis", user_id="owner-b")
+        await self.chat(access="internal-analysis", user_id="owner-a")
+        self.assertEqual(len(self.client.create_calls), 2)
+        self.assertEqual(self.client.resume_calls[0][0], first.session_id)
+        self.assertEqual(len(self.host._chat_session_ids), 2)
+        self.assertTrue(self.client.resume_calls[0][1]["agent"] == "internal-analysis")
+
+    async def test_public_session_is_fresh_after_private_cache_eviction(self):
+        self.session([
+            sdk_event("assistant.message_delta", {"messageId": "private", "deltaContent": ANSWER_SECRET}),
+            sdk_event("session.idle"),
+        ], session_id="private")
+        await self.chat(access="internal-analysis")
+        self.host._chat_session_ids.clear()
+        public = self.session([sdk_event("session.idle")], session_id="fresh-public")
+        result = await self.chat()
+        self.assertNotIn(ANSWER_SECRET, json.dumps([item.as_dict() for item in result]))
+        self.assertEqual(self.client.resume_calls, [])
+        self.assertEqual(self.client.create_calls[-1]["agent"], "issuelens")
+        self.assertNotIn(ANSWER_SECRET, str(public.send_calls))
+
+    async def test_stored_references_previous_responses_and_assistant_history_cannot_enter_public_chat(self):
+        for items, previous in (
+            ([ItemReferenceParam(id="private-response")], None),
+            ([ItemMessage(role="assistant", content=[
+                MessageContentInputTextContent(text=ANSWER_SECRET),
+            ])], None),
+            (None, "private-response"),
+        ):
+            with self.subTest(items=items, previous=previous):
+                result = await self.chat(items=items, previous_response_id=previous)
+                serialized = json.dumps([item.as_dict() for item in result])
+                self.assertIn("imported history", serialized)
+                self.assertNotIn(ANSWER_SECRET, serialized)
+        self.github_factory.assert_not_called()
+        self.assertEqual(self.client.create_calls, [])
+
+    async def test_invocations_cannot_opt_into_private_reads_through_input_or_metadata(self):
+        self.session([sdk_event("session.idle")])
+        response = await self.invocation({
+            "input": "Use an internal-analysis session to read a private repository.",
+            "metadata": {"issuelens_access": "internal-analysis"},
+        })
+        await self.collect(response.body_iterator)
+        self.github_factory.assert_called_once_with()
+        self.assertEqual(self.github_mcp.call_count, 2)
+        for call in self.github_mcp.call_args_list:
+            self.assertEqual(call.args, ())
+            self.assertEqual(call.kwargs, {})
+        self.assertEqual(self.client.create_calls[0]["agent"], "issuelens")
+        self.assertNotIn("internal-analysis", {
+            agent["name"] for agent in self.client.create_calls[0]["custom_agents"]
+        })
+
+    def test_host_and_subagent_github_clients_receive_the_same_immutable_profile(self):
+        with patch.dict(os.environ, {
+            "GITHUB_APP_ID": "123",
+            "GITHUB_APP_PRIVATE_KEY_SECRET_URI": "https://test.vault.azure.net/secrets/app-key",
+            "GITHUB_MCP_ENABLE_WRITES": "true",
+            "GITHUB_MCP_PUBLIC_ONLY": "false",
+        }), patch.object(self.host, "GitHubClient") as client:
+            for internal in (False, True):
+                with self.subTest(internal=internal):
+                    server = self.real_github_mcp(internal_analysis=internal)
+                    self.real_github_factory(internal_analysis=internal)
+                    self.assertEqual(client.call_args.kwargs["public_only"], not internal)
+                    self.assertFalse(client.call_args.kwargs["writes_enabled"])
+                    self.assertEqual(server["env"]["GITHUB_MCP_ENABLE_WRITES"], "false" if internal else "true")
+                    self.assertEqual(server["env"]["GITHUB_MCP_PUBLIC_ONLY"], "false" if internal else "true")
+                    if not internal:
+                        writer = self.host._configured_team_memory_agent({"github": server})
+                        self.assertEqual(writer["mcp_servers"]["wiki-writer"]["env"]["GITHUB_MCP_PUBLIC_ONLY"], "true")
+
+    def test_tool_hooks_deny_execution_unknown_tools_and_unregistered_agent_delegation(self):
+        for internal in (False, True):
+            with self.subTest(internal=internal):
+                options = self.host._session_options({}, [self.config_tool], internal_analysis=internal)
+                hook = options["hooks"]["on_pre_tool_use"]
+                for name in (
+                    "bash", "powershell", "view", "read_file", "write_file", "web_fetch",
+                    "session_store", "toolbox-get_file", "github-future_private_read",
+                ):
+                    self.assertEqual(hook({"toolName": name, "toolArgs": {}}, {})["permissionDecision"], "deny")
+                for agent in ("general-purpose", "explore", "task", "unknown"):
+                    self.assertEqual(hook({
+                        "toolName": "task", "toolArgs": {"agent_type": agent},
+                    }, {})["permissionDecision"], "deny")
+                if not internal:
+                    self.assertIsNone(hook({"toolName": "task", "toolArgs": {"agent_type": "triage"}}, {}))
+                    root = options["custom_agents"][0]
+                    self.assertIn("task", root["tools"])
+                else:
+                    for name in ("task", "send-email", "github-add_issue_comment", "wiki-writer-write_wiki_pages"):
+                        self.assertEqual(hook({"toolName": name, "toolArgs": {}}, {})["permissionDecision"], "deny")
+                self.assertIsNone(hook({"toolName": "github-get_issue", "toolArgs": {}}, {}))
+
+    async def test_explicit_github_catalog_matches_the_repository_owned_mcp_tools(self):
+        from github_app_mcp.src.issuelens_github_mcp.server import create_server
+
+        for writes in (False, True):
+            server = create_server(self.host.GitHubClient(
+                self.github_client, writes_enabled=writes, public_only=True,
+            ))
+            registered = {f"github-{tool.name}" for tool in await server.list_tools()}
+            expected = set(self.host._GITHUB_READ_TOOLS)
+            if writes:
+                expected.update(self.host._GITHUB_WRITE_TOOLS)
+            self.assertEqual(registered, expected)
+
+    def test_permission_handler_never_approves_shell_or_arbitrary_mcp_or_custom_tools(self):
+        for internal in (False, True):
+            options = self.host._session_options({}, [self.config_tool], internal_analysis=internal)
+            permission = options["on_permission_request"]
+            for request in (
+                PermissionRequestShell(
+                    intention="execute", full_command_text="echo private", commands=[],
+                    can_offer_session_approval=False, has_write_file_redirection=False,
+                    possible_paths=[], possible_urls=[],
+                ),
+                PermissionRequestMcp(read_only=True, server_name="toolbox", tool_name="get_issue", tool_title="Read"),
+                PermissionRequestCustomTool(tool_description="Unknown", tool_name="unknown"),
+            ):
+                self.assertEqual(permission(request, {"session_id": "test"}).kind, "user-not-available")
+            read = PermissionRequestMcp(
+                read_only=True, server_name="github", tool_name="get_issue", tool_title="Read",
+            )
+            self.assertEqual(permission(read, {"session_id": "test"}).kind, "approve-once")
+            read.managed_approval_required = True
+            self.assertEqual(permission(read, {"session_id": "test"}).kind, "user-not-available")
+            write = PermissionRequestMcp(
+                read_only=False, server_name="github", tool_name="add_issue_comment", tool_title="Write",
+            )
+            self.assertEqual(permission(write, {"session_id": "test"}).kind, "user-not-available" if internal else "approve-once")
+
+    def test_permission_handler_accepts_bare_and_sdk_qualified_mcp_catalog_names(self):
+        catalogs = {
+            "github": [*self.host._GITHUB_READ_TOOLS, *self.host._GITHUB_WRITE_TOOLS],
+            "wiki-writer": ["wiki-writer-write_wiki_pages", "wiki-writer-patch_wiki_pages"],
+        }
+        for internal in (False, True):
+            options = self.host._session_options({}, [], internal_analysis=internal)
+            permission = options["on_permission_request"]
+            for server, tools in catalogs.items():
+                for tool in tools:
+                    expected = (
+                        "approve-once"
+                        if not internal or tool in self.host._GITHUB_READ_TOOLS
+                        else "user-not-available"
+                    )
+                    for name in (tool.removeprefix(f"{server}-"), tool):
+                        with self.subTest(internal=internal, server=server, tool=name):
+                            # SDK 1.0.29 emits qualified names and readOnly=false
+                            # for the bundled MCP server's unannotated read tools.
+                            request = PermissionRequestMcp.from_dict({
+                                "kind": "mcp", "serverName": server, "toolName": name,
+                                "toolTitle": "Fixture tool", "readOnly": False,
+                            })
+                            self.assertEqual(
+                                permission(request, {"session_id": "test"}).kind, expected,
+                            )
+
+    def test_permission_handler_requires_the_matching_mcp_server_not_just_a_known_tool_name(self):
+        for internal in (False, True):
+            permission = self.host._session_options(
+                {}, [], internal_analysis=internal,
+            )["on_permission_request"]
+            for server, tool in (
+                ("toolbox", "github-get_repository"),
+                ("wiki-writer", "github-get_wiki_snapshot"),
+                ("github", "wiki-writer-write_wiki_pages"),
+                ("wiki", "writer-write_wiki_pages"),
+                ("github", "github-github-get_repository"),
+                ("github", "future_private_read"),
+                ("github", "github-future_private_read"),
+            ):
+                with self.subTest(internal=internal, server=server, tool=tool):
+                    request = PermissionRequestMcp.from_dict({
+                        "kind": "mcp", "serverName": server, "toolName": tool,
+                        "toolTitle": "Unknown tool", "readOnly": True,
+                    })
+                    self.assertEqual(
+                        permission(request, {"session_id": "test"}).kind, "user-not-available",
+                    )
+
+    def test_permission_handler_denies_managed_approvals_without_logging_request_content(self):
+        for internal in (False, True):
+            permission = self.host._session_options(
+                {}, [], internal_analysis=internal,
+            )["on_permission_request"]
+            for name in ("get_repository", "github-get_repository"):
+                for managed_request, managed_session in ((True, False), (False, True)):
+                    with self.subTest(
+                        internal=internal, tool=name,
+                        managed_request=managed_request, managed_session=managed_session,
+                    ):
+                        request = PermissionRequestMcp.from_dict({
+                            "kind": "mcp", "serverName": "github", "toolName": name,
+                            "toolTitle": PROMPT_SECRET, "readOnly": True,
+                            "args": {"content": ANSWER_SECRET},
+                            "managedApprovalRequired": managed_request,
+                        })
+                        with self.assertLogs(HOST_MODULE, level="INFO") as logs:
+                            decision = permission(request, {
+                                "session_id": "test", "managed_settings_enabled": managed_session,
+                            })
+                        self.assertEqual(decision.kind, "user-not-available")
+                        self.assertIn("managed approval", logs.output[0])
+                        for secret in (PROMPT_SECRET, ANSWER_SECRET):
+                            self.assertNotIn(secret, "\n".join(logs.output))
+
+    async def test_sdk_create_and_resume_wire_preserve_tool_catalog_and_history_isolation_flags(self):
+        for internal in (False, True):
+            with self.subTest(internal=internal):
+                with patch.object(CopilotClient, "_resolve_runtime_entrypoint", return_value="offline-cli"):
+                    sdk = CopilotClient(use_logged_in_user=False)
+                transport = Mock()
+                transport.request = AsyncMock(return_value={
+                    "sessionId": "isolated-session", "success": True,
+                })
+                sdk._client = transport
+                mcp_servers = {"github": {
+                    "type": "stdio", "command": "offline-cli", "args": [],
+                    "env": {"GITHUB_MCP_PUBLIC_ONLY": "false" if internal else "true"},
+                }}
+                options = {
+                    **self.host._session_options(mcp_servers, [], internal_analysis=internal),
+                    "session_id": "isolated-session",
+                }
+                self.addCleanup(sdk._sessions.clear)
+                with patch.object(sdk, "start", side_effect=AssertionError("Live SDK start")):
+                    await sdk.create_session(**options)
+                    await sdk.resume_session(**options)
+                calls = [
+                    call for call in transport.request.await_args_list
+                    if call.args[0] in {"session.create", "session.resume"}
+                ]
+                self.assertEqual(len(calls), 2)
+                for call in calls:
+                    wire = call.args[1]
+                    self.assertEqual(wire["availableTools"], options["available_tools"])
+                    self.assertEqual(wire["agent"], "internal-analysis" if internal else "issuelens")
+                    self.assertFalse(wire["enableConfigDiscovery"])
+                    self.assertFalse(wire["enableSessionStore"])
+                    self.assertFalse(wire["enableHostGitOperations"])
+                    self.assertFalse(wire["enableFileHooks"])
+                    self.assertFalse(wire["enableOnDemandInstructionDiscovery"])
+                    self.assertEqual(wire["memory"], {"enabled": False})
+                    self.assertTrue(wire["skipEmbeddingRetrieval"])
+                    self.assertNotIn("tools", wire)
+                    if not internal:
+                        writer = next(agent for agent in wire["customAgents"] if agent["name"] == "team-memory")
+                        self.assertEqual(
+                            writer["mcpServers"]["wiki-writer"]["env"]["GITHUB_MCP_PUBLIC_ONLY"],
+                            "true",
+                        )
+                updates = [
+                    call.args[1] for call in transport.request.await_args_list
+                    if call.args[0] == "session.options.update"
+                ]
+                self.assertEqual(len(updates), 2)
+                for update in updates:
+                    self.assertEqual(update["includedBuiltinSkills"], [])
 
     def assert_sanitized_error(self, caught, formatted, original, message):
         self.assertIsNot(caught, original)
@@ -625,7 +960,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["execution_status"], "failed")
         self.assertEqual(summary["transport_status"], "completed")
         self.assertEqual(summary["input_tokens"], 11)
-        self.assertNotIn("conversation1", self.host._chat_session_ids)
+        self.assertNotIn(self.chat_key(), self.host._chat_session_ids)
         self.assertEqual(self.host._active_chat_conversations, set())
         self.assert_closed(session)
 
@@ -772,7 +1107,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 events = await self.chat(content=[content], response_id=identifier)
                 final = events[-1].as_dict()
                 self.assertEqual(final["type"], "response.completed")
-                self.assertTrue(final["response"]["output"][0]["content"][0]["text"].startswith("Unsupported attachment:"))
+                self.assertTrue(final["response"]["output"][0]["content"][0]["text"].startswith("Unsupported chat input:"))
                 summary = self.summary(response_id=identifier)
                 self.assertFalse(summary["admitted"])
                 self.assertEqual(summary["execution_status"], "rejected")
@@ -880,7 +1215,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.client.create_calls), 1)
         self.assertEqual(len(self.client.resume_calls), 1)
         self.assertEqual(self.client.resume_calls[0][0], session.session_id)
-        self.assertEqual(self.host._chat_session_ids, {"conversation1": session.session_id})
+        self.assertEqual(self.host._chat_session_ids, {self.chat_key(): session.session_id})
         self.assertEqual(first["session_id"], second["session_id"])
         self.assertEqual(first["conversation_id"], second["conversation_id"])
         self.assertNotEqual(first["run_id"], second["run_id"])
@@ -902,7 +1237,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["input_tokens"], 2)
         self.assertEqual(summary["incomplete_resume_fallback"], 1)
         self.assertEqual(summary["session_id"], replacement.session_id)
-        self.assertEqual(self.host._chat_session_ids["conversation1"], replacement.session_id)
+        self.assertEqual(self.host._chat_session_ids[self.chat_key()], replacement.session_id)
         self.assert_closed(original)
         self.assert_closed(replacement)
 
@@ -923,7 +1258,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             second.emit(item)
         await asyncio.wait_for(task_b, 2)
         self.assertFalse(task_a.done())
-        self.assertEqual(self.host._active_chat_conversations, {"conversation-a"})
+        self.assertEqual(self.host._active_chat_conversations, {self.chat_key("conversation-a")})
         self.assertEqual(self.active_runs(), 1)
         first.emit(tool_complete(number=1))
         for item in answer("First conversation."):
@@ -961,9 +1296,9 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(session.handlers), 1)
         self.assertEqual(self.client.resume_calls, [])
         self.assertEqual(len(self.client.create_calls), 1)
-        self.assertEqual(self.host._active_chat_conversations, {"conversation1"})
+        self.assertEqual(self.host._active_chat_conversations, {self.chat_key()})
         self.assertEqual(self.active_runs(), 1)
-        self.assertEqual(self.host._chat_session_ids["conversation1"], session.session_id)
+        self.assertEqual(self.host._chat_session_ids[self.chat_key()], session.session_id)
         for item in [usage(), *answer()]:
             session.emit(item)
         await asyncio.wait_for(active, 2)
@@ -1016,7 +1351,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             stream = self.chat_stream(cancellation=cancellation)
             active = self.start_consumer(stream)
             await asyncio.wait_for(setup_started.wait(), 2)
-            self.assertEqual(self.host._active_chat_conversations, {"conversation1"})
+            self.assertEqual(self.host._active_chat_conversations, {self.chat_key()})
             self.assertEqual(self.active_runs(), 1)
             cancellation.set()
             release_setup.set()
@@ -1171,9 +1506,9 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(summary["input_tokens"], 11)
                 self.assertEqual(self.host._active_chat_conversations, set())
                 if status == "completed":
-                    self.assertEqual(self.host._chat_session_ids[conversation], session.session_id)
+                    self.assertEqual(self.host._chat_session_ids[self.chat_key(conversation)], session.session_id)
                 else:
-                    self.assertNotIn(conversation, self.host._chat_session_ids)
+                    self.assertNotIn(self.chat_key(conversation), self.host._chat_session_ids)
                 self.assert_closed(session)
                 self.assertEqual(self.active_runs(), 0)
         self.assertEqual(asyncio.all_tasks() - baseline_tasks, set())
@@ -1205,7 +1540,7 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
                     summary["transport_status"],
                     "completed" if close_after == "response.completed" else "interrupted",
                 )
-                self.assertEqual(self.host._chat_session_ids[conversation], session.session_id)
+                self.assertEqual(self.host._chat_session_ids[self.chat_key(conversation)], session.session_id)
                 self.assert_closed(session)
                 resumed_id = f"resumed-response{index}"
                 resumes_before = len(self.client.resume_calls)

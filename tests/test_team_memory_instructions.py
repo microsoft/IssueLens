@@ -101,7 +101,10 @@ class TeamMemoryInstructionTests(unittest.TestCase):
                     if isinstance(key, ast.Constant)
                 }
                 agents[node.target.id] = ast.literal_eval(fields["skills"])
-        self.assertEqual(len(agents), 5)
+        self.assertEqual(set(agents), {
+            "_ISSUELENS_AGENT", "_TRIAGE_AGENT", "_FIND_CRITICALS_AGENT",
+            "_PLAN_AGENT", "_TEAM_MEMORY_AGENT", "_INTERNAL_ANALYSIS_AGENT",
+        })
         for name, skills in agents.items():
             with self.subTest(agent=name):
                 self.assertIn("issuelens-config", skills)
@@ -181,7 +184,11 @@ class TeamMemoryAccessTests(unittest.TestCase):
             node for node in module.body
             if (isinstance(node, ast.AnnAssign)
                 and isinstance(node.target, ast.Name)
-                and node.target.id == "_TEAM_MEMORY_AGENT")
+                and node.target.id in {"_TEAM_MEMORY_AGENT", "_INTERNAL_ANALYSIS_AGENT"})
+            or (isinstance(node, ast.Assign)
+                and any(isinstance(target, ast.Name) and target.id in {
+                    "_GITHUB_READ_TOOLS", "_GITHUB_WRITE_TOOLS",
+                } for target in node.targets))
             or (isinstance(node, ast.FunctionDef) and node.name in {
                 "_configured_team_memory_agent", "_session_options",
             })
@@ -189,6 +196,12 @@ class TeamMemoryAccessTests(unittest.TestCase):
         self.namespace = {
             "CustomAgentConfig": dict,
             "Tool": object,
+            "Mapping": dict,
+            "PreToolUseHookInput": dict,
+            "PreToolUseHookOutput": dict,
+            "PermissionRequest": object,
+            "PermissionInvocation": object,
+            "PermissionRequestResult": object,
             "_agents_dir": ROOT / "agents",
             "_load_prompt": lambda path: path.read_text(encoding="utf-8"),
             "_ISSUELENS_AGENT": {"name": "issuelens"},
@@ -236,7 +249,10 @@ class TeamMemoryAccessTests(unittest.TestCase):
                 self.assertEqual(set(wire["tools"]), expected)
                 for other in options["custom_agents"]:
                     if other["name"] != "team-memory":
-                        self.assertNotIn("tools", other)
+                        self.assertIn("tools", other)
+                        self.assertNotIn("*", other["tools"])
+                        self.assertNotIn("wiki-writer-write_wiki_pages", other["tools"])
+                        self.assertNotIn("wiki-writer-patch_wiki_pages", other["tools"])
 
     def test_maintenance_allowlist_uses_registered_reads_and_only_wiki_write(self):
         module = ast.parse((ROOT / "github_app_mcp" / "src" / "issuelens_github_mcp" / "server.py").read_text(encoding="utf-8"))
