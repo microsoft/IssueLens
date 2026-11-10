@@ -695,6 +695,82 @@ class HostTelemetryTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(permission(write, {"session_id": "test"}).kind, "user-not-available" if internal else "approve-once")
 
+    def test_permission_handler_accepts_bare_and_sdk_qualified_mcp_catalog_names(self):
+        catalogs = {
+            "github": [*self.host._GITHUB_READ_TOOLS, *self.host._GITHUB_WRITE_TOOLS],
+            "wiki-writer": ["wiki-writer-write_wiki_pages", "wiki-writer-patch_wiki_pages"],
+        }
+        for internal in (False, True):
+            options = self.host._session_options({}, [], internal_analysis=internal)
+            permission = options["on_permission_request"]
+            for server, tools in catalogs.items():
+                for tool in tools:
+                    expected = (
+                        "approve-once"
+                        if not internal or tool in self.host._GITHUB_READ_TOOLS
+                        else "user-not-available"
+                    )
+                    for name in (tool.removeprefix(f"{server}-"), tool):
+                        with self.subTest(internal=internal, server=server, tool=name):
+                            # SDK 1.0.29 emits qualified names and readOnly=false
+                            # for the bundled MCP server's unannotated read tools.
+                            request = PermissionRequestMcp.from_dict({
+                                "kind": "mcp", "serverName": server, "toolName": name,
+                                "toolTitle": "Fixture tool", "readOnly": False,
+                            })
+                            self.assertEqual(
+                                permission(request, {"session_id": "test"}).kind, expected,
+                            )
+
+    def test_permission_handler_requires_the_matching_mcp_server_not_just_a_known_tool_name(self):
+        for internal in (False, True):
+            permission = self.host._session_options(
+                {}, [], internal_analysis=internal,
+            )["on_permission_request"]
+            for server, tool in (
+                ("toolbox", "github-get_repository"),
+                ("wiki-writer", "github-get_wiki_snapshot"),
+                ("github", "wiki-writer-write_wiki_pages"),
+                ("wiki", "writer-write_wiki_pages"),
+                ("github", "github-github-get_repository"),
+                ("github", "future_private_read"),
+                ("github", "github-future_private_read"),
+            ):
+                with self.subTest(internal=internal, server=server, tool=tool):
+                    request = PermissionRequestMcp.from_dict({
+                        "kind": "mcp", "serverName": server, "toolName": tool,
+                        "toolTitle": "Unknown tool", "readOnly": True,
+                    })
+                    self.assertEqual(
+                        permission(request, {"session_id": "test"}).kind, "user-not-available",
+                    )
+
+    def test_permission_handler_denies_managed_approvals_without_logging_request_content(self):
+        for internal in (False, True):
+            permission = self.host._session_options(
+                {}, [], internal_analysis=internal,
+            )["on_permission_request"]
+            for name in ("get_repository", "github-get_repository"):
+                for managed_request, managed_session in ((True, False), (False, True)):
+                    with self.subTest(
+                        internal=internal, tool=name,
+                        managed_request=managed_request, managed_session=managed_session,
+                    ):
+                        request = PermissionRequestMcp.from_dict({
+                            "kind": "mcp", "serverName": "github", "toolName": name,
+                            "toolTitle": PROMPT_SECRET, "readOnly": True,
+                            "args": {"content": ANSWER_SECRET},
+                            "managedApprovalRequired": managed_request,
+                        })
+                        with self.assertLogs(HOST_MODULE, level="INFO") as logs:
+                            decision = permission(request, {
+                                "session_id": "test", "managed_settings_enabled": managed_session,
+                            })
+                        self.assertEqual(decision.kind, "user-not-available")
+                        self.assertIn("managed approval", logs.output[0])
+                        for secret in (PROMPT_SECRET, ANSWER_SECRET):
+                            self.assertNotIn(secret, "\n".join(logs.output))
+
     async def test_sdk_create_and_resume_wire_preserve_tool_catalog_and_history_isolation_flags(self):
         for internal in (False, True):
             with self.subTest(internal=internal):
