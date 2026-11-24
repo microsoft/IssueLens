@@ -412,8 +412,14 @@ class BridgeExecutionTests(unittest.TestCase):
                 with self.subTest(role=role):
                     result = subprocess.run(
                         [sys.executable, "-c", (
-                            "from function_app import app; "
-                            "print(','.join(sorted(x.get_function_name() for x in app.get_functions())))"
+                            "from inspect import signature\n"
+                            "from function_app import app\n"
+                            "functions = app.get_functions()\n"
+                            "for function in functions:\n"
+                            "    trigger = function.get_trigger().get_dict_repr()['name']\n"
+                            "    assert trigger in signature(function.get_user_function()).parameters, "
+                            "(function.get_function_name(), trigger)\n"
+                            "print(','.join(sorted(x.get_function_name() for x in functions)))"
                         )],
                         cwd=root, env={**os.environ, "ISSUELENS_BRIDGE_ROLE": role},
                         capture_output=True, text=True, timeout=30,
