@@ -6,7 +6,7 @@
 # .github/issuelens.yml, not in this workflow.
 #
 # After the isolated Function bridge is approved, set the ISSUELENS_BRIDGE_URL
-# repository variable and opt in with ISSUELENS_ISSUE_LOOP_ENABLED=true.
+# repository secret and opt in with ISSUELENS_ISSUE_LOOP_ENABLED=true.
 # This workflow authenticates only to the bridge. The worker's Azure identity
 # invokes Foundry; the hosted agent still owns all GitHub App writes.
 
@@ -36,7 +36,6 @@ jobs:
   orchestrate:
     if: >-
       vars.ISSUELENS_ISSUE_LOOP_ENABLED == 'true' &&
-      vars.ISSUELENS_BRIDGE_URL != '' &&
       github.repository == 'microsoft/IssueLens' &&
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request == null &&
@@ -45,12 +44,15 @@ jobs:
        github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      ISSUELENS_BRIDGE_CONFIGURED: ${{ secrets.ISSUELENS_BRIDGE_URL != '' && 'true' || 'false' }}
     permissions:
       contents: read
       issues: read
       id-token: write
     steps:
       - name: Load action from trusted workflow revision
+        if: env.ISSUELENS_BRIDGE_CONFIGURED == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
@@ -59,9 +61,10 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Process issue event
+        if: env.ISSUELENS_BRIDGE_CONFIGURED == 'true'
         uses: ./.github/actions/issuelens
         with:
           request-type: issue-loop
           issue-number: ${{ inputs.issue_number }}
           transport: bridge
-          bridge-url: ${{ vars.ISSUELENS_BRIDGE_URL }}
+          bridge-url: ${{ secrets.ISSUELENS_BRIDGE_URL }}
