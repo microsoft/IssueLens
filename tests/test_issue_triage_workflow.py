@@ -42,10 +42,15 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertEqual(invoke["uses"], "./.github/actions/issuelens")
         self.assertEqual(invoke["with"]["request-type"], "issue-loop")
         self.assertEqual(invoke["with"]["transport"], "bridge")
-        self.assertEqual(invoke["with"]["bridge-url"], "${{ vars.ISSUELENS_BRIDGE_URL }}")
+        self.assertEqual(invoke["with"]["bridge-url"], "${{ secrets.ISSUELENS_BRIDGE_URL }}")
+        self.assertEqual(self.job["env"], {
+            "ISSUELENS_BRIDGE_CONFIGURED": "${{ secrets.ISSUELENS_BRIDGE_URL != '' && 'true' || 'false' }}",
+        })
+        for step in (checkout, invoke):
+            self.assertEqual(step["if"], "env.ISSUELENS_BRIDGE_CONFIGURED == 'true'")
         self.assertEqual(invoke["with"]["issue-number"], "${{ inputs.issue_number }}")
         self.assertIn("vars.ISSUELENS_ISSUE_LOOP_ENABLED == 'true'", self.job["if"])
-        self.assertIn("vars.ISSUELENS_BRIDGE_URL != ''", self.job["if"])
+        self.assertNotIn("ISSUELENS_BRIDGE_URL", self.job["if"])
         self.assertIn("github.repository == 'microsoft/IssueLens'", self.job["if"])
         self.assertNotIn("secrets.AZURE_", self.source)
         self.assertEqual(self.workflow["permissions"], {})

@@ -40,12 +40,13 @@ jobs:
     if: >-
       (vars.ISSUELENS_TEAM_MEMORY_ENABLED == 'true' ||
        (vars.ISSUELENS_TEAM_MEMORY_MANUAL_PILOT == 'true' && inputs.pull_request_number != '')) &&
-      vars.ISSUELENS_BRIDGE_URL != '' &&
       github.repository == 'microsoft/IssueLens' &&
       github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      ISSUELENS_BRIDGE_CONFIGURED: ${{ secrets.ISSUELENS_BRIDGE_URL != '' && 'true' || 'false' }}
     permissions:
       contents: read
       pull-requests: read
@@ -53,6 +54,7 @@ jobs:
       id-token: write
     steps:
       - name: Load action from trusted workflow revision
+        if: env.ISSUELENS_BRIDGE_CONFIGURED == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.workflow_sha }}
@@ -61,6 +63,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Maintain team memory
+        if: env.ISSUELENS_BRIDGE_CONFIGURED == 'true'
         uses: ./.github/actions/issuelens
         with:
           request-type: team-memory
@@ -71,4 +74,4 @@ jobs:
           push-after: ${{ inputs.push_after }}
           pull-request-number: ${{ inputs.pull_request_number }}
           transport: bridge
-          bridge-url: ${{ vars.ISSUELENS_BRIDGE_URL }}
+          bridge-url: ${{ secrets.ISSUELENS_BRIDGE_URL }}

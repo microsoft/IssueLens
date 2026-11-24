@@ -204,8 +204,13 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertEqual(invoke["uses"], "./.github/actions/issuelens")
         self.assertEqual(invoke["with"]["request-type"], "team-memory")
         self.assertEqual(invoke["with"]["transport"], "bridge")
-        self.assertEqual(invoke["with"]["bridge-url"], "${{ vars.ISSUELENS_BRIDGE_URL }}")
-        self.assertIn("vars.ISSUELENS_BRIDGE_URL != ''", self.job["if"])
+        self.assertEqual(invoke["with"]["bridge-url"], "${{ secrets.ISSUELENS_BRIDGE_URL }}")
+        self.assertEqual(self.job["env"], {
+            "ISSUELENS_BRIDGE_CONFIGURED": "${{ secrets.ISSUELENS_BRIDGE_URL != '' && 'true' || 'false' }}",
+        })
+        for step in (checkout, invoke):
+            self.assertEqual(step["if"], "env.ISSUELENS_BRIDGE_CONFIGURED == 'true'")
+        self.assertNotIn("ISSUELENS_BRIDGE_URL", self.job["if"])
         self.assertIn("vars.ISSUELENS_TEAM_MEMORY_MANUAL_PILOT == 'true' && inputs.pull_request_number != ''", self.job["if"])
         self.assertNotIn("secrets.AZURE_", self.source)
         self.assertTrue(set(invoke["with"]).issubset(self.action_metadata["inputs"]))

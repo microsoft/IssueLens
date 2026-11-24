@@ -376,7 +376,7 @@ identity check is not authorization for any additional repositories named by a t
 | `source-run-attempt` | With `source-run-id` | Positive originating run attempt. |
 | `push-before`, `push-after` | With `source-run-id` | Full nonzero requested ancestor/source-run-head SHAs. Supply all four run/range inputs, never with `pull-request-number`. Before is not an attested original event boundary. |
 | `transport` | No | `foundry` (default for existing callers) or `bridge` (IssueLens pilot only). |
-| `bridge-url` | For `bridge` | Complete approved HTTPS Azure Function jobs endpoint. |
+| `bridge-url` | For `bridge` | Complete approved HTTPS Azure Function jobs endpoint. Pass it from the `ISSUELENS_BRIDGE_URL` Actions secret, not a configuration variable. |
 | `azure-client-id` | For `foundry` | Existing Azure OIDC identity's client ID. |
 | `azure-tenant-id` | For `foundry` | Tenant used by Azure login. |
 | `azure-subscription-id` | For `foundry` | Subscription used by Azure login. |

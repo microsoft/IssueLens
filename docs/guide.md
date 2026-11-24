@@ -1092,9 +1092,11 @@ Keep direct endpoint access limited to approved callers. The GitHub workflow
 for deploying the agent is separate from this migration and still requires
 an approved replacement for its retired identity.
 
-Set the repository variable `ISSUELENS_BRIDGE_URL` to the approved ingress
-jobs URL only when the bridge and worker RBAC are ready. Verify that
-out-of-scope workflows and jobs are rejected before enabling the workflows.
+Set the Actions repository secret `ISSUELENS_BRIDGE_URL` to the approved
+ingress jobs URL only when the bridge and worker RBAC are ready. Do not keep
+a repository variable with the same name. If the secret is unavailable, the
+workflows skip checkout and invocation. Verify that out-of-scope workflows
+and jobs are rejected before enabling the workflows.
 The existing deployed agent can write, so treat a live invocation as a
 write-capable test, not a dry run. After approval, set
 `ISSUELENS_ISSUE_LOOP_ENABLED=true` for issue events. Enable
