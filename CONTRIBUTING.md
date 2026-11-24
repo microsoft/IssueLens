@@ -24,7 +24,7 @@ Run commands from the repository root. In Bash:
 ```bash
 python3.13 -m venv .venv
 source .venv/bin/activate
-python -m pip install -r requirements.txt -r requirements-ci.txt
+python -m pip install -r requirements.txt -r automation_bridge/requirements.txt -r requirements-ci.txt
 ```
 
 Or in PowerShell:
@@ -32,7 +32,7 @@ Or in PowerShell:
 ```powershell
 py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt -r requirements-ci.txt
+python -m pip install -r requirements.txt -r automation_bridge/requirements.txt -r requirements-ci.txt
 ```
 
 **You do not need a `.env` file, Azure credentials, a GitHub App, or a live model
@@ -115,7 +115,7 @@ python -m unittest discover -s tests -p 'test_issue_triage_workflow.py' -v
 The complete application checks are:
 
 ```bash
-python -m compileall -q *.py .github/actions/issuelens .github/actions/queue-team-memory github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
+python -m compileall -q *.py automation_bridge .github/actions/issuelens .github/actions/queue-team-memory github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
@@ -124,7 +124,7 @@ Python files explicitly:
 
 ```powershell
 $rootModules = Get-ChildItem -File -Filter *.py | Select-Object -ExpandProperty Name
-python -m compileall -q $rootModules .github\actions\issuelens .github\actions\queue-team-memory github_app_mcp\src github_app_mcp\scripts tests github_app_mcp\tests
+python -m compileall -q $rootModules automation_bridge .github\actions\issuelens .github\actions\queue-team-memory github_app_mcp\src github_app_mcp\scripts tests github_app_mcp\tests
 ```
 
 ### Standalone MCP tests and package checks

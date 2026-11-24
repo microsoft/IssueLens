@@ -469,7 +469,8 @@ azd() {
         for filename in ("issue-triage.yml", "team-memory-coordinator.yml"):
             caller = (ROOT / ".github/workflows" / filename).read_text(encoding="utf-8")
             for reference in login["with"].values():
-                self.assertIn(reference, caller)
+                self.assertNotIn(reference, caller)
+            self.assertIn("transport: bridge", caller)
         configure = next(step for step in self.steps if "azd config set" in step.get("run", ""))
         self.assertIn("azd config set auth.useAzCliAuth true", configure["run"])
         self.assertIn('azd env new "$AZD_ENV_NAME"', configure["run"])

@@ -68,8 +68,8 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         preflight, login, submit = self.action_metadata["runs"]["steps"]
         self.assertEqual(preflight["id"], "preflight")
         self.assertRegex(login["uses"], r"^azure/login@[0-9a-f]{40}\Z")
-        for step in (login, submit):
-            self.assertEqual(step["if"], "steps.preflight.outputs.eligible == 'true'")
+        self.assertEqual(login["if"], "steps.preflight.outputs.eligible == 'true' && inputs.transport == 'foundry'")
+        self.assertEqual(submit["if"], "steps.preflight.outputs.eligible == 'true'")
         self.assertEqual(submit["env"]["AGENT_URL"], "${{ inputs.agent-url }}")
         self.assertEqual(submit["env"]["AGENT_SCOPE"], "${{ inputs.agent-scope }}")
         self.assertEqual(submit["env"]["REQUEST_PATH"], "${{ steps.preflight.outputs.request-path }}")
@@ -180,7 +180,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertNotIn("source-artifact-id", self.action_metadata["inputs"])
         self.assertNotIn("artifact", json.dumps(self.action_metadata))
         self.assertNotIn("source-repositories", invoke["with"])
-        self.assertEqual(login["if"], "steps.preflight.outputs.eligible == 'true'")
+        self.assertEqual(login["if"], "steps.preflight.outputs.eligible == 'true' && inputs.transport == 'foundry'")
         self.assertTrue(all("${{" not in step["run"] for step in self.action_metadata["runs"]["steps"] if "run" in step))
 
     def test_job_timeout_has_setup_and_receipt_headroom(self):
@@ -203,8 +203,11 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         invoke = self.steps[-1]
         self.assertEqual(invoke["uses"], "./.github/actions/issuelens")
         self.assertEqual(invoke["with"]["request-type"], "team-memory")
-        self.assertEqual(invoke["with"]["agent-url"], "${{ secrets.ISSUELENS_AGENT_URL }}")
-        self.assertEqual(invoke["with"]["agent-scope"], "${{ secrets.ISSUELENS_AGENT_SCOPE }}")
+        self.assertEqual(invoke["with"]["transport"], "bridge")
+        self.assertEqual(invoke["with"]["bridge-url"], "${{ vars.ISSUELENS_BRIDGE_URL }}")
+        self.assertIn("vars.ISSUELENS_BRIDGE_URL != ''", self.job["if"])
+        self.assertIn("vars.ISSUELENS_TEAM_MEMORY_MANUAL_PILOT == 'true' && inputs.pull_request_number != ''", self.job["if"])
+        self.assertNotIn("secrets.AZURE_", self.source)
         self.assertTrue(set(invoke["with"]).issubset(self.action_metadata["inputs"]))
         self.assertNotIn("pull_request.head", self.source)
         self.assertNotIn("actions/checkout", json.dumps(self.action_metadata))
@@ -298,7 +301,7 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
             self.assertIn(requirement, orchestrator)
 
     def test_workflow_owns_its_request_and_setup_contract(self):
-        guide = (ROOT / "docs" / "guide.md").read_text(encoding="utf-8")
+        guide = " ".join((ROOT / "docs" / "guide.md").read_text(encoding="utf-8").split())
         request = action.build_team_memory_request({})["input"]
         for field in ("source_repository", "pull_number", "merge_commit_sha", "wiki_repository", "wiki_sha", "reason"):
             self.assertIn(field, request)
@@ -307,7 +310,8 @@ class TeamMemoryWorkflowTests(unittest.TestCase):
         self.assertIn("requested response format", guide)
         self.assertIn("ISSUELENS_TEAM_MEMORY_ENABLED=true", guide)
         self.assertIn("default-branch pushes", guide)
-        self.assertIn("OIDC federation", guide)
+        self.assertIn("ISSUELENS_TEAM_MEMORY_MANUAL_PILOT=true", guide)
+        self.assertIn("no Entra token exchange or FIC on the Actions side", guide)
         self.assertIn("inspect the mapped wiki/history", guide)
         for path in ("agents/issuelens.md", "agents/team-memory.md", "README.md", "docs/guide.md", "github_app_mcp/README.md",
                      ".github/copilot-instructions.md", ".github/issuelens/team-memory.md", "examples/team-memory.md"):

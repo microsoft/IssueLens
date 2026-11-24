@@ -314,18 +314,25 @@ agent's role or tool restrictions to repository contributors.
 The agent is driven by a workflow in the target repo
 (`.github/workflows/issue-triage.yml`):
 
-1. Authenticate to the Foundry agent endpoint via **Azure OIDC** (`azure/login`).
-2. POST `{ input, attachments? }` to the agent's invocations endpoint. The
-  hosted agent owns the App credentials; target repositories do not store the
-  App private key or mint tokens.
+1. The opted-in `microsoft/IssueLens` caller submits typed metadata to the
+   Azure Function bridge with a bridge-audience GitHub Actions token. The
+   Function verifies GitHub identity without exchanging the token for Entra
+   credentials. No App webhook or corporate FIC is used.
+2. The worker uses its managed identity to POST the existing `{ input }`
+   payload to the deployed agent's `/invocations` API. Bridge validation and
+   queueing stay outside the hosted agent. The agent remains independently
+   deployable and serves authorized direct callers as before. Only the hosted
+   agent owns the App credentials and performs GitHub writes.
 
 Both issue-loop and team-memory workflows use `.github/actions/issuelens`.
 Its `request-type` selects `issue-loop`, `team-memory`, or a direct `task` with
-explicit `input`. Request adapters validate before shared OIDC login and one
-bounded invocation. The action does not choose sub-agents or parse commands.
+explicit `input`. Request adapters validate before authenticating to either
+the pilot bridge or the legacy direct transport. The action does not choose
+sub-agents or parse commands.
 The event adapter omits issue/comment bodies; direct tasks never synthesize
 trusted event provenance. Generic final answers are saved in a runner-local
-`response-path`: `completed` means stream completion, not successful writes.
+`response-path` on the direct transport; bridge issue jobs return a completion
+notice. `completed` means stream completion, not successful writes.
 Only team-memory results require the wiki-specific structured result contract.
 The action's `output-mode` selects hybrid live text/activity, activity-only, or
 quiet display; `summary-mode` selects full, status-only, or no job summary.
@@ -336,7 +343,7 @@ Callers must choose privacy-appropriate modes for their Actions audience.
 Triggers: `issues` opened/reopened, `issue_comment` created/edited for issues
 only, and `workflow_dispatch`. The workflow does not subscribe to issue edits or
 pull request comments. A preflight step rejects PR-backed and bot-authored
-comments before Azure login, then sends a neutral orchestration task with
+comments before authenticating to the bridge, then sends neutral
 trusted event metadata. Per-issue concurrency allows different issues to run
 independently while coalescing bursts for the same issue.
 
@@ -359,7 +366,7 @@ Target inputs and credentials grant no new access.
 The central coordinator owns the actual concurrency queue and only calls
 `.github/actions/issuelens` after trusted sparse checkout. The invocation action
 owns source/workflow validation, current default-branch ancestry, full paginated
-range/PR discovery before OIDC login, policy/privacy, and final outcomes.
+range/PR discovery before bridge admission, policy/privacy, and final outcomes.
 The trusted coordinator workflow may configure `source-repositories`, a bounded
 canonical-name-to-numeric-ID JSON map; never populate it from dispatch inputs.
 Cross-repository sources and coordinators must both be public.
@@ -381,12 +388,12 @@ final source at pinned SHAs. Missing required evidence remains non-success;
 neither an optional bulk-read limit nor preflight success establishes publication.
 Explicit single-PR manual requests use the coordinator instead of source IDs.
 The shared composite action in `.github/actions/issuelens`
-owns preflight, pinned Azure OIDC login, and submission through a standalone
+owns preflight and both transports through a standalone
 Python helper. External callers pin an action commit and need no checkout;
 this repository's thin caller sparsely loads the local action from the trusted
 `github.workflow_sha`, never a PR head, with credentials not persisted. The
-action checks authoritative GitHub metadata before OIDC login and submits a
-bounded wiki-only job using the issue-loop secrets. For a push, it verifies the
+action checks authoritative GitHub metadata before submitting a bounded
+wiki-only job to the bridge. For a push, it verifies the
 complete fast-forward commit inventory and discovers all eligible merged PRs
 using bounded GitHub metadata reads before submitting one batch. It fails on
 incomplete discovery rather than silently omitting sources. IssueLens automatic
@@ -400,9 +407,8 @@ unchanged and will need authenticated cross-repository dispatch and a separate
 queue for their shared `microsoft/vscode-java-pack` wiki. Direct external action
 callers retain their existing event behavior and per-push concurrency.
 The pilot does not serialize chat, issue-loop work, or external direct requests.
-Verify default-branch Azure OIDC federation when migrating from a PR-scoped subject.
-Enable it with the repository
-variable `ISSUELENS_TEAM_MEMORY_ENABLED=true`, not an agent environment flag.
+The manual pilot uses `ISSUELENS_TEAM_MEMORY_MANUAL_PILOT=true` after bridge
+setup and approval. `ISSUELENS_TEAM_MEMORY_ENABLED=true` also enables pushes.
 The workflow explicitly requests merge revalidation, wiki-only writes, no
 reactions/comments, and a JSON result through its `input`. The generic agent
 preserves wiki policy/privacy/preconditions and the requested response format;
@@ -415,7 +421,8 @@ retaining its per-PR response and any confirmed wiki publication, never implying
 that no write occurred. The batch schema remains caller-owned.
 Ambiguous agent submissions and workflow dispatches are not retried
 automatically. A timeout or cancellation does not prove the hosted invocation
-stopped; the queue is not a distributed runtime lock. Monitor overflow
+stopped. The bridge keeps its durable reservation until settlement or operator
+reconciliation; the GitHub queue alone is not a distributed lock. Monitor overflow
 and failed/canceled runs. Git provides knowledge, history, and conflict
 detection, not a durable job queue or guaranteed exactly-once delivery. Local
 tests do not establish live OIDC federation, hosted writer dispatch, or publication.

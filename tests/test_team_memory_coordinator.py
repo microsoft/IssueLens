@@ -7,6 +7,7 @@ import urllib.error
 from unittest.mock import patch
 
 import test_team_memory_workflow as memory_tests
+from automation_bridge import bridge
 
 
 action = memory_tests.action
@@ -74,6 +75,16 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
             values.append(self.source_project)
         return self.responses(*values, self.source_run, self.branch, self.ancestry)
 
+    def coordinator_claims(self):
+        return {
+            "kind": "team-memory", "repository_id": self.project["id"],
+            "actor": self.environment["GITHUB_ACTOR"],
+            "workflow_ref": self.environment["GITHUB_WORKFLOW_REF"],
+            "workflow_sha": self.environment["GITHUB_WORKFLOW_SHA"],
+            "run_id": int(self.environment["GITHUB_RUN_ID"]),
+            "run_attempt": int(self.environment["GITHUB_RUN_ATTEMPT"]),
+        }
+
     def preflight_responses(self):
         return self.source_responses() + self.responses(self.comparison, self.associations)
 
@@ -104,6 +115,10 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.assertEqual(metadata["pull_requests"][0]["merge_commit_sha"], self.merge_sha)
         self.assertEqual(len(metadata["pull_requests"]), 1)
         self.assertEqual(metadata["range_origin"], "authorized-reconciliation")
+        self.assertEqual(bridge.validate_request(
+            {"request_type": "team-memory", "metadata": metadata},
+            self.coordinator_claims(),
+        ), "wiki")
         self.assertIn("not an attestation of the original push boundary", envelope["request"]["input"])
         self.assertIn("Preflight already verified the complete fast-forward commit inventory", envelope["request"]["input"])
         self.assertIn("Do not repeat that range validation with compare_commits", envelope["request"]["input"])
@@ -444,12 +459,20 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
         self.token.assert_called_once()
 
     def test_manual_pr_selection_uses_the_same_coordinator_without_range_inputs(self):
-        self.environment.update({name: "" for name in action.SOURCE_INPUTS}, DISPATCH_PR="27")
+        self.environment.update(
+            {name: "" for name in action.SOURCE_INPUTS}, DISPATCH_PR="27",
+            TRANSPORT="bridge", BRIDGE_URL="https://issuelens.azurewebsites.net/api/issuelens/v1/jobs",
+        )
         self.execute("preflight", self.responses(self.project, self.pull))
         metadata = self.prepared_envelope()["metadata"]
         self.assertEqual(metadata["pull_number"], 27)
         self.assertEqual(metadata["required_wiki_repository"], self.repository)
         self.assertEqual(metadata["coordinator_run_id"], 999)
+        job = {"request_type": "team-memory", "metadata": metadata}
+        claims = self.coordinator_claims()
+        self.assertEqual(bridge.validate_request(job, claims), "wiki")
+        with self.assertRaisesRegex(ValueError, "coordinator identity mismatch"):
+            bridge.validate_request(job, {**claims, "run_attempt": claims["run_attempt"] + 1})
         self.assertEqual(self.opener.open.call_count, 2)
         self.token.assert_not_called()
 

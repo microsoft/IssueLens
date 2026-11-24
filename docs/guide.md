@@ -204,36 +204,25 @@ contracts do not establish live hosted sub-agent dispatch or deployment.
   The coordinator loads and calls only `issuelens`, using `github.workflow_sha`
   with credentials not persisted. Neither path executes PR-head code.
   Protect workflow and action changes as privileged code.
-2. Reuse the issue-loop Actions secrets: `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`,
-  `AZURE_SUBSCRIPTION_ID`, `ISSUELENS_AGENT_URL` (the complete Foundry
-  invocations endpoint), and `ISSUELENS_AGENT_SCOPE`. The old skeleton's
-  `ISSUELENS_AGENT_ENDPOINT` is not used. Configure Azure OIDC federation for
-  this repository and the actual workflow event/ref subject, including manual
-  dispatch if used. In IssueLens's two-workflow pilot, only the coordinator uses
-  Azure OIDC, under its default-branch `workflow_dispatch` identity; also verify
-  any workflow-specific federation conditions. The dispatcher needs only
-  repository-scoped `GITHUB_TOKEN` Actions write access. No new cross-repository
-  credential is required for this same-repository pilot.
-  Migrating from `pull_request_target` can change the OIDC
-  subject; verify the actual default-branch subject, including immutable
-  repository/owner IDs where enabled. Do not assume the old PR-scoped credential
-  covers `push`, or broaden federation to untrusted refs.
-  The identity needs permission to invoke the existing Foundry agent, not
-  deployment or GitHub wiki-write credentials. No App private key is stored here.
+2. The IssueLens coordinator uses the [Function bridge](#issuelens-function-bridge-pilot).
+  Its dispatcher needs only repository-scoped `GITHUB_TOKEN` Actions write access
+  and does not send a token to the bridge. External callers pinned to an earlier
+  revision still use direct Azure OIDC and need their own approved identity.
+  Do not restore the retired IssueLens federated identity credentials (FICs).
 3. Use a deployed agent with wiki-maintenance support and source-independent
   request handling, configure optional `instructions.team_memory` policy, initialize the chosen
   wiki, and confirm destination App Contents read/write access. The workflow
   neither initializes the wiki nor changes permissions or agent deployments.
 4. Set the repository Actions variable `ISSUELENS_TEAM_MEMORY_ENABLED=true`
-  when ready. This opts into automatic maintenance; it is not an agent
-  environment flag or a wiki-destination allowlist. Without it, the job skips
-  before acquiring Azure credentials.
+  only after the manual pilot succeeds. This opts into automatic maintenance; it
+  is not an agent environment flag or a wiki-destination allowlist. For a
+  manual-only pilot, leave it unset and use `ISSUELENS_TEAM_MEMORY_MANUAL_PILOT`.
 
 Each eligible push produces one invocation containing its verified merged PRs,
 not one invocation per PR. The preflight checks the complete fast-forward
 commit inventory and discovers associated PRs through bounded metadata-only
 GitHub queries. It does not send raw combined diffs to the model. Direct pushes
-without newly merged PRs skip before Azure login. Missing/truncated inventories,
+without newly merged PRs skip before authentication to the invocation transport. Missing/truncated inventories,
 force pushes, and ambiguous discovery fail without submitting a partial source
 list; use manual PR dispatch to recover. This batches PRs within one push, not
 across separate pushes, so an ordinary one-PR merge still usually produces one run.
@@ -252,7 +241,7 @@ to dispatch the
 No source code, commit messages, issue/PR bodies, agent output, or credentials
 are included.
 The coordinator keeps the queue but only invokes the shared `issuelens` action
-after trusted sparse checkout. Before Azure login, that action authenticates
+after trusted sparse checkout. Before submitting to the bridge, that action authenticates
 the allowed source and exact default-branch push workflow/run/attempt, matches
 `push_after` to its head, verifies current default-branch ancestry, and retrieves
 the full fast-forward requested range in pages of 100 commits (at most 1,000).
@@ -314,7 +303,7 @@ Only PRs merged into the current default branch are accepted. Manual **Run
 workflow** now uses the coordinator, with a positive `pull_request_number`
 instead of source identifiers, and the default branch;
 it revalidates the same merged PR instead of inventing a merge event. GitHub
-repository and PR metadata are re-read before Azure login. PR titles, bodies,
+repository and PR metadata are re-read before submitting the job. PR titles, bodies,
 comments, and fork source are not embedded in the trusted task. The authenticated
 request authorizes only minimal wiki maintenance; the agent independently
 rechecks the merge and treats retrieved content as untrusted evidence. Endpoint
@@ -323,11 +312,11 @@ authentication alone does not cryptographically attest the JSON metadata.
 Issue-loop and the team-memory coordinator use one composite action with three
 request adapters:
 `issue-loop`, `team-memory`, and `task`. The selected adapter prepares and
-validates the request before shared Azure OIDC login and invocation. The helper is
-a normal, directly testable Python module; no Python is embedded in the YAML.
-The action is one client of the same agent used by chat and other callers.
-It supplies its origin, merge evidence, validation constraints, no-reaction
-instruction, and requested response format in `input`. Its JSON result schema
+validates the request before authenticating to the pilot bridge or the legacy
+direct endpoint. The helper is a normal, directly testable Python module; no
+Python is embedded in the YAML. The invocation prompt supplies its origin,
+merge evidence, validation constraints, no-reaction instruction, and requested
+response format in `input`. Its JSON result schema
 belongs to this caller, not to the shared agent prompts or knowledge policy.
 Other callers may request different formats or updates unrelated to a merge;
 the same authorization, evidence, and wiki preconditions still apply. Shared
@@ -1008,8 +997,9 @@ data: {"invocation_id": "...", "session_id": "..."}
 ## Triggering with GitHub Actions
 
 The recommended trigger is a **GitHub Actions workflow in the target
-repository**. It authenticates only to the Foundry endpoint through Azure OIDC
-and sends the task. The hosted agent owns its Key Vault-backed App identity, so
+repository**. In `microsoft/IssueLens`, the workflow sends a bounded job to the
+[Function bridge](#issuelens-function-bridge-pilot) instead of logging into Azure
+from GitHub. The hosted agent owns its Key Vault-backed App identity, so
 target repositories store no App private key and transmit no GitHub token.
 
 - **Event-driven:** issue opened/reopened and human-authored issue-comment
@@ -1022,7 +1012,7 @@ target repositories store no App private key and transmit no GitHub token.
 The workflow does not currently trigger on issue title/body edits or pull
 request comments. Its preflight step rejects PR-backed comments and comments
 whose sender or author is a bot, records the accepted/skipped reason before
-Azure login, and passes only trusted event metadata to the agent. It never
+bridge authentication, and passes only trusted event metadata to the agent. It never
 copies issue or comment body text into the workflow-generated control prompt.
 
 Runs are grouped by repository and issue. Different issues run independently;
@@ -1050,8 +1040,9 @@ workflow filename intentionally differs from the policy filename.
 
 For explicit triage, planning, or other supported requests, use `request-type:
 task` with trusted `input` text. This does not synthesize issue-loop event or
-maintainer-command authority. Both generic adapters accept a completed final
-answer in the format chosen by the caller. `status=completed` confirms invocation
+maintainer-command authority. On the direct transport, both generic adapters
+accept a completed final answer in the format chosen by the caller.
+`status=completed` confirms invocation
 completion, not a successful requested write; the original answer is available
 through a runner-local `response-path`. The default hybrid view streams readable
 text and tool activity, and the full job summary renders the final answer. Use
@@ -1059,6 +1050,88 @@ the [publication controls](../.github/actions/issuelens/README.md#publication-co
 for sensitive requests. Raw protocol events and tool payloads are not logged. Only
 `team-memory` enforces the wiki-specific result schema. The agent retains role
 routing and command validation; no new permanent agent contract is introduced.
+
+### IssueLens Function bridge pilot
+
+The pilot is **only for `microsoft/IssueLens`**. Keep the GitHub App webhook
+unchanged. No Java workflow or other App installation participates. Obtain
+approval for the GitHub-facing endpoint, direct trust of the GitHub Actions
+issuer, network access, and the Azure release path before provisioning or
+enabling anything. The Function validates a GitHub token addressed to itself;
+there is no Entra token exchange or FIC on the Actions side. The token
+authenticates the workflow run, not the event JSON independently. The approved
+workflow revision is responsible for validating the event before submission.
+
+Build the Function source bundle from the reviewed bridge and action revision:
+`python -m automation_bridge.bundle <new-zip-path>`. The ZIP contains only the
+two Functions roles and the reused workflow helpers, with a separate dependency
+manifest. Publish it through an approved release path to **two** Function apps
+with distinct managed identities. Use a plan that supports a 40-minute function
+timeout for the worker. Use identity-backed Functions host storage separately
+from the application job table.
+
+| Target | Configuration and access |
+| --- | --- |
+| Both Function apps | `ISSUELENS_BRIDGE_TABLE_ACCOUNT` points to the account containing precreated `IssueLensBridgeJobs`. Both need Table data read/write on that table. `ISSUELENS_BRIDGE_QUEUE` and `ISSUELENS_BRIDGE_SERVICE_BUS__fullyQualifiedNamespace` identify the same dedicated Service Bus queue. Use a queue with duplicate detection; reservations remain authoritative even outside the broker window. |
+| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the enrolled numeric GitHub repository ID, and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. The receiver verifies signature, audience, issuer, expiry, public repository, `main` ref, and the two exact GitHub-hosted workflows and their event types. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
+| Worker | `ISSUELENS_BRIDGE_ROLE=worker`, `ISSUELENS_BRIDGE_FOUNDRY_URL` set to the existing deployed agent's full invocations URL (including API version). Grant queue **Data Receiver** and the narrowest applicable Foundry invocation access to the worker managed identity. It requests an Entra token for `https://ai.azure.com/.default`. No repository write, deployment, signing key, or GitHub App key access is needed. |
+
+Keep `main` protected. If the signed token supplies `ref_protected`, the
+bridge rejects a value that does not confirm protection. If the claim is
+missing, the ingress must confirm current protection through GitHub's public
+branch API before reserving or queueing a job. An unprotected branch or an
+unavailable check stops admission. Status polls still require the owning
+workflow run's signed identity, but do not repeat the branch API check.
+
+The worker POSTs the standard `{ "input": "..." }` payload to the existing
+`/invocations` API. No replacement agent, host configuration change, or Foundry
+redeployment is required. Authorized direct API callers and chat continue to
+use the same agent. The bridge scopes jobs accepted through its own endpoint;
+it does not change Foundry RBAC or add per-job tool restrictions to the host.
+Keep direct endpoint access limited to approved callers. The GitHub workflow
+for deploying the agent is separate from this migration and still requires
+an approved replacement for its retired identity.
+
+Set the repository variable `ISSUELENS_BRIDGE_URL` to the approved ingress
+jobs URL only when the bridge and worker RBAC are ready. Verify that
+out-of-scope workflows and jobs are rejected before enabling the workflows.
+The existing deployed agent can write, so treat a live invocation as a
+write-capable test, not a dry run. After approval, set
+`ISSUELENS_ISSUE_LOOP_ENABLED=true` for issue events. Enable
+`ISSUELENS_TEAM_MEMORY_MANUAL_PILOT=true` for a manual `pull_request_number`
+run on a controlled merged PR, and leave `ISSUELENS_TEAM_MEMORY_ENABLED` off
+until the manual path and resulting App-attributed writes have been verified.
+The action sends metadata only, never issue/comment text or `GITHUB_TOKEN`.
+For a new comment it sends a digest. The worker checks the current revision
+using an unauthenticated public GitHub read before the Foundry call. This
+point-in-time check does not lock the comment against later edits; the agent's
+existing authoritative comment, command, and replay checks remain in place.
+
+The coordinator waits on the job receipt; acknowledgement is not maintenance
+success. Reservations cover one issue or the one IssueLens wiki through
+completion, including when a GitHub waiter is canceled. The queue contains job
+IDs only. The table keeps pending job metadata and bounded terminal identifiers
+and outcomes, not raw agent text. A runner retry may recover the same queued
+job but cannot replace its payload or resubmit a running or terminal job.
+Issue-loop `completed` means the session ended, not that any write succeeded.
+Team memory still validates the wiki and source receipt, retaining partial
+per-PR outcomes and failing the workflow on incomplete maintenance.
+
+Monitor old reservations, `unknown` outcomes, and the Service Bus dead-letter
+queue. A failed send may leave a `queued` reservation without a message. While
+it is still queued and less than 10 minutes old, a rerun of the **same workflow
+run** can resend the original job, not replace it. The ingress and worker log
+the job ID; receipts and logs never include credentials. Dead-lettered or
+expired jobs need reconciliation, not automatic replay.
+
+To roll back, remove the opt-in variables and pause the worker before
+reconciling in-flight jobs. For an unresolved reservation, verify no invocation
+can still write and inspect the issue or wiki state. Record the operator
+resolution without deleting the original job record, and release only the lock
+owned by that job. Transition the job out of `queued` or `running` and remove
+its reservation in one conditional Table transaction using both current ETags;
+do not reopen unresolved jobs for dispatch. Restarting a Function or restoring
+old FICs does not recover an ambiguous write.
 
 ## Using Your Own Foundry Model
 

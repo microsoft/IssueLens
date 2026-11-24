@@ -31,3 +31,4 @@ README.md
 
 # The webhook bridge is a separate deployable (Azure Function), not part of the agent image.
 webhook_bridge/
+automation_bridge/

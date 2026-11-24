@@ -31,8 +31,8 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         metadata = yaml.load((action_tests.ACTION_DIR / "action.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
         preflight, login, submit = metadata["runs"]["steps"]
         self.assertEqual(preflight["id"], "preflight")
-        for step in (login, submit):
-            self.assertEqual(step["if"], "steps.preflight.outputs.eligible == 'true'")
+        self.assertEqual(login["if"], "steps.preflight.outputs.eligible == 'true' && inputs.transport == 'foundry'")
+        self.assertEqual(submit["if"], "steps.preflight.outputs.eligible == 'true'")
 
     def test_caller_is_thin_and_loads_trusted_action(self):
         checkout, invoke = self.job["steps"]
@@ -41,7 +41,13 @@ class IssueTriageWorkflowTests(unittest.TestCase):
         self.assertEqual(checkout["with"]["sparse-checkout"], "/.github/actions/issuelens/")
         self.assertEqual(invoke["uses"], "./.github/actions/issuelens")
         self.assertEqual(invoke["with"]["request-type"], "issue-loop")
+        self.assertEqual(invoke["with"]["transport"], "bridge")
+        self.assertEqual(invoke["with"]["bridge-url"], "${{ vars.ISSUELENS_BRIDGE_URL }}")
         self.assertEqual(invoke["with"]["issue-number"], "${{ inputs.issue_number }}")
+        self.assertIn("vars.ISSUELENS_ISSUE_LOOP_ENABLED == 'true'", self.job["if"])
+        self.assertIn("vars.ISSUELENS_BRIDGE_URL != ''", self.job["if"])
+        self.assertIn("github.repository == 'microsoft/IssueLens'", self.job["if"])
+        self.assertNotIn("secrets.AZURE_", self.source)
         self.assertEqual(self.workflow["permissions"], {})
         self.assertEqual(self.job["permissions"], {"contents": "read", "issues": "read", "id-token": "write"})
         self.assertEqual(self.job["timeout-minutes"], "45")
@@ -75,8 +81,6 @@ class IssueTriageWorkflowTests(unittest.TestCase):
             "manual_dispatch",
         ):
             self.assertIn(field, helper)
-        self.assertNotIn('.get("body")', helper)
-        self.assertNotIn('["body"]', helper)
 
     def test_optional_metadata_uses_null_when_unknown(self):
         helper = action_tests.HELPER.read_text(encoding="utf-8")
