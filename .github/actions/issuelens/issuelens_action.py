@@ -88,9 +88,9 @@ def github_request(path, payload=None, *, token=None):
     )
 
 
-def github_read(path, payload=None, *, token=None):
+def github_read(path, payload=None, *, token=None, timeout=30):
     request = github_request(path, payload, token=token)
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
         data = response.read(4 * 1024 * 1024 + 1)
     require(len(data) <= 4 * 1024 * 1024, "GitHub response exceeds the preflight limit")
     result = json.loads(data)

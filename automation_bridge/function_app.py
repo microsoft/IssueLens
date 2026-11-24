@@ -1,5 +1,6 @@
 """Azure Functions entry point. Deploy the same bundle as ingress and worker."""
 
+import http.client
 import json
 import logging
 import os
@@ -83,6 +84,14 @@ if role == "ingress":
             target = bridge.validate_request(data, claims)
         except (ValueError, TypeError):
             return respond({"error": "invalid_job"}, 400)
+        if "ref_protected" not in claims:
+            try:
+                protected = bridge.pilot_branch_protected()
+            except (OSError, http.client.HTTPException, ValueError):
+                logger.warning("GitHub branch protection unavailable")
+                return respond({"error": "branch_protection_unavailable"}, 503)
+            if not protected:
+                return respond({"error": "workflow_not_authorized"}, 401)
         identifier = bridge.job_id(claims)
         try:
             job = jobs().reserve(identifier, target, body)

@@ -1073,8 +1073,15 @@ from the application job table.
 | Target | Configuration and access |
 | --- | --- |
 | Both Function apps | `ISSUELENS_BRIDGE_TABLE_ACCOUNT` points to the account containing precreated `IssueLensBridgeJobs`. Both need Table data read/write on that table. `ISSUELENS_BRIDGE_QUEUE` and `ISSUELENS_BRIDGE_SERVICE_BUS__fullyQualifiedNamespace` identify the same dedicated Service Bus queue. Use a queue with duplicate detection; reservations remain authoritative even outside the broker window. |
-| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the enrolled numeric GitHub repository ID, and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. The receiver verifies signature, audience, issuer, expiry, public repository, protected `main`, and the two exact GitHub-hosted workflows and their event types. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
+| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the enrolled numeric GitHub repository ID, and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. The receiver verifies signature, audience, issuer, expiry, public repository, `main` ref, and the two exact GitHub-hosted workflows and their event types. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
 | Worker | `ISSUELENS_BRIDGE_ROLE=worker`, `ISSUELENS_BRIDGE_FOUNDRY_URL` set to the existing deployed agent's full invocations URL (including API version). Grant queue **Data Receiver** and the narrowest applicable Foundry invocation access to the worker managed identity. It requests an Entra token for `https://ai.azure.com/.default`. No repository write, deployment, signing key, or GitHub App key access is needed. |
+
+Keep `main` protected. If the signed token supplies `ref_protected`, the
+bridge rejects a value that does not confirm protection. If the claim is
+missing, the ingress must confirm current protection through GitHub's public
+branch API before reserving or queueing a job. An unprotected branch or an
+unavailable check stops admission. Status polls still require the owning
+workflow run's signed identity, but do not repeat the branch API check.
 
 The worker POSTs the standard `{ "input": "..." }` payload to the existing
 `/invocations` API. No replacement agent, host configuration change, or Foundry

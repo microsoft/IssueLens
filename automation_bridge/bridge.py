@@ -26,7 +26,8 @@ action = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(action)
 
 PILOT_REPOSITORY = action.COORDINATOR_REPOSITORY
-BRANCH = "refs/heads/main"
+PILOT_BRANCH = "main"
+BRANCH = f"refs/heads/{PILOT_BRANCH}"
 ISSUE_WORKFLOW = ".github/workflows/issue-triage.yml"
 MEMORY_WORKFLOW = action.COORDINATOR_WORKFLOW
 WORKFLOWS = {
@@ -62,9 +63,11 @@ def workflow_claims(token: str, audience: str, repository_id: int) -> dict:
             and claims["repository_id"] == str(repository_id)
             and claims["repository_visibility"] == "public"
             and claims["ref"] == BRANCH
-            and claims.get("ref_protected") in {"true", True}
             and claims.get("runner_environment") == "github-hosted",
-            "Workflow is not in the protected IssueLens pilot scope")
+            "Workflow is not in the IssueLens pilot scope")
+    if "ref_protected" in claims:
+        protected = claims["ref_protected"]
+        require(protected is True or protected == "true", "Workflow ref was not protected")
     for path, (kind, events) in WORKFLOWS.items():
         if claims["workflow_ref"] == workflow_ref(path):
             require(claims["event_name"] in events, "Unsupported workflow event")
@@ -78,6 +81,13 @@ def workflow_claims(token: str, audience: str, repository_id: int) -> dict:
 
 def workflow_ref(path: str) -> str:
     return f"{PILOT_REPOSITORY}/{path}@{BRANCH}"
+
+
+def pilot_branch_protected() -> bool:
+    branch = action.github_read(f"/repos/{PILOT_REPOSITORY}/branches/{PILOT_BRANCH}", token="", timeout=5)
+    require(branch.get("name") == PILOT_BRANCH and isinstance(branch.get("protected"), bool),
+            "Invalid GitHub branch protection response")
+    return branch["protected"]
 
 
 def job_id(claims: dict) -> str:
@@ -153,7 +163,7 @@ def _validate_merge(merge: dict):
 
 def _memory_job(metadata: dict, claims: dict) -> str:
     require(metadata.get("repository_id") == claims["repository_id"]
-            and metadata.get("base_ref") == "main"
+            and metadata.get("base_ref") == PILOT_BRANCH
             and metadata.get("coordinator_repository") == PILOT_REPOSITORY
             and metadata.get("required_wiki_repository") == PILOT_REPOSITORY
             and metadata.get("coordinator_workflow_ref") == claims["workflow_ref"]

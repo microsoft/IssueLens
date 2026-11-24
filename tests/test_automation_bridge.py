@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import json
 import os
 import pathlib
@@ -14,6 +15,7 @@ from zipfile import ZipFile
 
 import jwt
 from azure.data.tables import TableTransactionError
+from azure.functions import HttpRequest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from automation_bridge import bridge, bundle
@@ -53,30 +55,56 @@ class BridgeIdentityTests(unittest.TestCase):
     def setUpClass(cls):
         cls.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 
-    def test_only_the_protected_pilot_workflow_can_submit_or_read_its_job(self):
+    def setUp(self):
         now = int(time.time())
-        claims = {
+        self.claims = {
             "iss": bridge.GITHUB_ISSUER, "aud": URL, "iat": now, "exp": now + 60, "nbf": now,
             "repository": PILOT_REPOSITORY, "repository_id": "100", "repository_visibility": "public",
-            "ref": bridge.BRANCH, "ref_protected": "true", "runner_environment": "github-hosted",
+            "ref": bridge.BRANCH, "runner_environment": "github-hosted",
             "workflow_ref": bridge.workflow_ref(bridge.ISSUE_WORKFLOW), "workflow_sha": "1" * 40,
             "event_name": "issue_comment", "actor": "maintainer", "run_id": "20", "run_attempt": "1",
         }
-        with patch.object(bridge.KEYS, "get_signing_key_from_jwt", return_value=Mock(key=self.key.public_key())):
-            accepted = bridge.workflow_claims(jwt.encode(claims, self.key, algorithm="RS256"), URL, 100)
-            self.assertEqual(bridge.validate_request(issue_payload(), accepted), "issue-12")
-            for alteration in (
-                {"repository_id": "101"}, {"ref_protected": "false"}, {"repository_visibility": "private"},
-                {"event_name": "pull_request"}, {"workflow_ref": bridge.workflow_ref("another.yml")},
-                {"aud": ENDPOINT}, {"exp": now - 1},
-            ):
-                with self.subTest(alteration=alteration), self.assertRaises((ValueError, jwt.PyJWTError)):
-                    bridge.workflow_claims(jwt.encode(claims | alteration, self.key, algorithm="RS256"), URL, 100)
-            with self.assertRaises(jwt.InvalidSignatureError):
-                bridge.workflow_claims(
-                    jwt.encode(claims, rsa.generate_private_key(public_exponent=65537, key_size=2048), algorithm="RS256"),
-                    URL, 100,
-                )
+        self.enterContext(patch.object(bridge.KEYS, "get_signing_key_from_jwt", return_value=Mock(key=self.key.public_key())))
+
+    def token(self, **overrides):
+        return jwt.encode(self.claims | overrides, self.key, algorithm="RS256")
+
+    def load_ingress(self):
+        self.enterContext(patch.dict(os.environ, {
+            "ISSUELENS_BRIDGE_ROLE": "ingress", "ISSUELENS_BRIDGE_REPOSITORY_ID": "100",
+            "ISSUELENS_BRIDGE_OIDC_AUDIENCE": URL, "ISSUELENS_BRIDGE_QUEUE": "test-jobs",
+        }))
+        path = pathlib.Path(bridge.__file__).with_name("function_app.py")
+        spec = importlib.util.spec_from_file_location("test_bridge_ingress", path)
+        assert spec is not None and spec.loader is not None
+        ingress = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, {"bridge": bridge}):
+            spec.loader.exec_module(ingress)
+        handlers = {handler.get_function_name(): handler.get_user_function() for handler in ingress.app.get_functions()}
+        return ingress, handlers["submit"], handlers["status"]
+
+    def request(self, identifier=None):
+        headers = {"Authorization": f"Bearer {self.token()}"}
+        if identifier is not None:
+            return HttpRequest("GET", f"{URL}/{identifier}", route_params={"job_id": identifier}, headers=headers, body=b"")
+        return HttpRequest("POST", URL, headers=headers, body=json.dumps(issue_payload()).encode())
+
+    def test_only_the_expected_workflow_identity_is_accepted(self):
+        accepted = bridge.workflow_claims(self.token(ref_protected="true"), URL, 100)
+        self.assertEqual(bridge.validate_request(issue_payload(), accepted), "issue-12")
+        for alteration in (
+            {"repository_id": "101"}, {"ref": "refs/heads/other"}, {"ref_protected": "false"},
+            {"repository_visibility": "private"}, {"runner_environment": "self-hosted"},
+            {"event_name": "pull_request"}, {"workflow_ref": bridge.workflow_ref("another.yml")},
+            {"aud": ENDPOINT}, {"exp": self.claims["iat"] - 1},
+        ):
+            with self.subTest(alteration=alteration), self.assertRaises((ValueError, jwt.PyJWTError)):
+                bridge.workflow_claims(self.token(**alteration), URL, 100)
+        with self.assertRaises(jwt.InvalidSignatureError):
+            bridge.workflow_claims(
+                jwt.encode(self.claims, rsa.generate_private_key(public_exponent=65537, key_size=2048), algorithm="RS256"),
+                URL, 100,
+            )
         self.assertEqual(bridge.job_id(accepted), bridge.job_id(accepted | {"run_attempt": 2}))
         self.assertNotEqual(bridge.job_id(accepted), bridge.job_id(accepted | {"run_id": 21}))
         for invalid in (
@@ -86,6 +114,56 @@ class BridgeIdentityTests(unittest.TestCase):
         ):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 bridge.validate_request(invalid, accepted)
+
+    def test_token_without_protection_claim_can_submit_and_poll_a_protected_branch_job(self):
+        ingress, submit, status = self.load_ingress()
+        identifier = bridge.job_id({"kind": "issue-loop", "run_id": 20, "repository_id": 100})
+        with (
+            patch.object(bridge.urllib.request, "build_opener") as opener,
+            patch.object(ingress, "jobs") as jobs,
+            patch.object(ingress, "service_bus") as bus,
+        ):
+            read = opener.return_value.open
+            read.return_value.__enter__.return_value.read.return_value = b'{"name":"main","protected":true}'
+            jobs.return_value.reserve.return_value = {"RowKey": identifier, "state": bridge.QUEUED}
+            jobs.return_value.get.return_value = {"RowKey": identifier, "state": bridge.COMPLETED}
+            queued = submit(self.request())
+            self.assertEqual(queued.status_code, 202, queued.get_body())
+            self.assertEqual(json.loads(queued.get_body()), {"job_id": identifier, "state": bridge.QUEUED})
+            jobs.return_value.reserve.assert_called_once()
+            sender = bus.return_value.get_queue_sender.return_value.__enter__.return_value
+            sender.send_messages.assert_called_once()
+
+            completed = status(self.request(identifier))
+            self.assertEqual(completed.status_code, 200, completed.get_body())
+            self.assertEqual(json.loads(completed.get_body()), {"job_id": identifier, "state": bridge.COMPLETED})
+            self.assertEqual(status(self.request("8" * 64)).status_code, 404)
+            jobs.return_value.get.assert_called_once_with(identifier)
+            read.assert_called_once()
+            branch_request, = read.call_args.args
+            self.assertEqual(branch_request.full_url, f"https://api.github.com/repos/{PILOT_REPOSITORY}/branches/main")
+            self.assertEqual(branch_request.get_header("Cache-control"), "no-cache")
+            self.assertFalse(branch_request.has_header("Authorization"))
+
+    def test_missing_protection_claim_does_not_admit_jobs_without_confirmed_protection(self):
+        ingress, submit, _ = self.load_ingress()
+        for response, expected in (
+            ({"name": "main", "protected": False}, (401, {"error": "workflow_not_authorized"})),
+            ({"name": "main"}, (503, {"error": "branch_protection_unavailable"})),
+            (urllib.error.URLError("offline"), (503, {"error": "branch_protection_unavailable"})),
+        ):
+            with (
+                self.subTest(response=response),
+                patch.object(bridge.action, "github_read", side_effect=[response]) as github,
+                patch.object(ingress, "jobs") as jobs,
+                patch.object(ingress, "service_bus") as bus,
+            ):
+                result = submit(self.request())
+                self.assertEqual((result.status_code, json.loads(result.get_body())), expected)
+                github.assert_called_once()
+                jobs.assert_not_called()
+                bus.assert_not_called()
+
 
 class BridgeActionTests(unittest.TestCase):
     def test_workflow_token_uses_the_bridge_audience_and_a_github_origin(self):
