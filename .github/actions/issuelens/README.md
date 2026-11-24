@@ -1,9 +1,9 @@
 # IssueLens Action
 
 A reusable composite action for issue-loop, team-memory, and explicit tasks.
-It prepares and validates the request, authenticates to an existing IssueLens
-agent with Azure OIDC, and invokes it through a shared bounded HTTP/SSE client.
-It is a client of the agent, not part of the hosted agent runtime.
+It prepares and validates the request. Existing external callers use the
+`foundry` transport; the IssueLens repository's pilot uses the `bridge` transport.
+The action is a client, not part of the hosted agent runtime.
 
 The hosted invocation profile is public-only: private/internal repository reads
 and private wiki destinations are rejected, even when the App has access.
@@ -12,7 +12,7 @@ authenticated, read-only maintainer chat; no internal report is returned to this
 action. Inputs and Actions display modes must be appropriate for the workflow's
 audience.
 
-The normal path prepares the request, logs in with the pinned `azure/login`
+The direct path prepares the request, logs in with the pinned `azure/login`
 action, and submits the request. Coordinated team-memory inputs select a bounded
 reconciliation range; source/run validation, ancestry checks, and complete
 paginated commit discovery all happen inside preflight before Azure login.
@@ -20,6 +20,14 @@ The standard-library Python helper
 owns metadata validation, the caller's task text, bounded HTTP/SSE processing,
 and result validation. No inline Python, pip installation, container build, or
 GitHub App private key is required.
+
+The [Function bridge pilot](../../../docs/guide.md#issuelens-function-bridge-pilot)
+uses GitHub workflow identity for `microsoft/IssueLens` only. It submits typed
+metadata after the same preflight, skips Azure login, and polls the job receipt.
+The worker authenticates to the existing `/invocations` endpoint using managed
+identity and submits the normal `{ "input": "..." }` request.
+It has no direct fallback or free-form task path. It does not stream or store
+raw agent output; the runner's issue-loop response file is a completion notice.
 
 ## Request Types
 
@@ -30,7 +38,7 @@ GitHub App private key is required.
 | `task` | Require explicit non-empty `input`, bounded to 64 KiB UTF-8. No issue-loop event metadata or maintainer-command authority is synthesized. | A completed root agent response in the requested format. |
 
 All request types validate the caller repository identity and that the caller
-workflow runs from its current default branch before Azure login. Unknown request
+workflow runs from its current default branch before authenticating. Unknown request
 types, malformed inputs, and an `input` supplied to an event adapter fail closed.
 Event adapters prepare context, not a role assignment: the agent owns routing,
 command validation, and task-specific write authorization. In particular there
@@ -156,7 +164,7 @@ claimed because no artifact is used.
 Automatic pushes and manual PR requests share the fixed
 `issuelens-team-memory-wiki-microsoft-IssueLens` concurrency group, with
 `queue: max` and `cancel-in-progress: false`. The slot covers the complete
-coordinator run, including discovery, Azure OIDC login, the one agent invocation,
+coordinator run, including discovery, bridge admission, the one agent invocation,
 and final result validation. GitHub retains up to 100 pending runs; further runs
 are canceled when that queue is full. Monitor canceled/failed runs.
 Dispatch acknowledgement means GitHub accepted the request, not that
@@ -367,19 +375,21 @@ identity check is not authorization for any additional repositories named by a t
 | `source-run-id` | For coordinated automatic `team-memory` | Positive source push run ID. |
 | `source-run-attempt` | With `source-run-id` | Positive originating run attempt. |
 | `push-before`, `push-after` | With `source-run-id` | Full nonzero requested ancestor/source-run-head SHAs. Supply all four run/range inputs, never with `pull-request-number`. Before is not an attested original event boundary. |
-| `azure-client-id` | Yes | Existing Azure OIDC identity's client ID. |
-| `azure-tenant-id` | Yes | Tenant used by Azure login. |
-| `azure-subscription-id` | Yes | Subscription used by Azure login. |
-| `agent-url` | Yes | Complete HTTPS Foundry invocations endpoint, including its API version query. |
-| `agent-scope` | Yes | Entra scope for that endpoint. |
+| `transport` | No | `foundry` (default for existing callers) or `bridge` (IssueLens pilot only). |
+| `bridge-url` | For `bridge` | Complete approved HTTPS Azure Function jobs endpoint. |
+| `azure-client-id` | For `foundry` | Existing Azure OIDC identity's client ID. |
+| `azure-tenant-id` | For `foundry` | Tenant used by Azure login. |
+| `azure-subscription-id` | For `foundry` | Subscription used by Azure login. |
+| `agent-url` | For `foundry` | Complete HTTPS Foundry invocations endpoint, including its API version query. |
+| `agent-scope` | For `foundry` | Entra scope for that endpoint. |
 | `output-mode` | No | `hybrid` (default): live agent text plus activity; `activity`: statuses only; `quiet`: no live event display. |
 | `summary-mode` | No | `full` (default): status/metrics and final answer; `status`: status/metrics only; `none`: do not write a job summary. |
 
 | Output | Meaning |
 | --- | --- |
 | `status` | `skipped` for ineligible events; `completed` for issue-loop/task streams; `updated`/`no-change` for complete maintenance. Validated push batches also expose `partial`, `needs-review`, or `failed` before failing the step. Unavailable for invalid/ambiguous results. |
-| `skip-reason` | Fixed reason for an event skipped before Azure login. |
-| `response-path` | Unique runner-local UTF-8 final root answer for `issue-loop`/`task`, or the complete validated push-batch JSON receipt, including incomplete batches. |
+| `skip-reason` | Fixed reason for an event skipped before authentication to the invocation transport. |
+| `response-path` | Unique runner-local UTF-8 final root answer for direct `issue-loop`/`task`, completion notice for a bridge issue-loop job, or the complete validated push-batch JSON receipt, including incomplete batches. |
 | `wiki-repository` | Reported verified wiki identity from a validated maintenance result, when available. Partial does not imply no publication. |
 | `wiki-sha` | Full reported tool-confirmed publication or snapshot SHA, when available in the validated maintenance result. |
 

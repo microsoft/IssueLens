@@ -53,21 +53,29 @@ inputs:
     description: Full nonzero source run head SHA ending the requested reconciliation range.
     required: false
     default: ''
+  transport:
+    description: Use foundry for direct Azure OIDC (legacy callers) or bridge for authenticated workflow jobs.
+    required: false
+    default: foundry
+  bridge-url:
+    description: Full HTTPS Azure Function jobs endpoint for the bridge transport.
+    required: false
+    default: ''
   azure-client-id:
-    description: Client ID of the existing Azure OIDC identity.
-    required: true
+    description: Client ID of the Azure OIDC identity for the foundry transport.
+    required: false
   azure-tenant-id:
-    description: Azure tenant ID for the OIDC identity.
-    required: true
+    description: Azure tenant ID for the foundry transport.
+    required: false
   azure-subscription-id:
-    description: Azure subscription ID for the OIDC login.
-    required: true
+    description: Azure subscription ID for the foundry transport.
+    required: false
   agent-url:
-    description: Full HTTPS Foundry invocations endpoint.
-    required: true
+    description: Full HTTPS Foundry invocations endpoint for the foundry transport.
+    required: false
   agent-scope:
-    description: Entra scope used to acquire the endpoint access token.
-    required: true
+    description: Entra scope used to acquire the foundry transport's endpoint access token.
+    required: false
   output-mode:
     description: Live log mode (hybrid includes agent text, activity shows statuses only, quiet disables stream display).
     required: false
@@ -120,12 +128,14 @@ runs:
         SOURCE_RUN_ATTEMPT: ${{ inputs.source-run-attempt }}
         PUSH_BEFORE: ${{ inputs.push-before }}
         PUSH_AFTER: ${{ inputs.push-after }}
+        TRANSPORT: ${{ inputs.transport }}
+        BRIDGE_URL: ${{ inputs.bridge-url }}
         OUTPUT_MODE: ${{ inputs.output-mode }}
         SUMMARY_MODE: ${{ inputs.summary-mode }}
       run: python3 -I "$GITHUB_ACTION_PATH/issuelens_action.py" preflight
 
     - name: Azure login (OIDC) for the agent endpoint
-      if: steps.preflight.outputs.eligible == 'true'
+      if: steps.preflight.outputs.eligible == 'true' && inputs.transport == 'foundry'
       uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3.0.2
       with:
         client-id: ${{ inputs.azure-client-id }}
@@ -139,6 +149,8 @@ runs:
       env:
         GITHUB_ACTION_PATH: ${{ github.action_path }}
         REQUEST_PATH: ${{ steps.preflight.outputs.request-path }}
+        TRANSPORT: ${{ inputs.transport }}
+        BRIDGE_URL: ${{ inputs.bridge-url }}
         AGENT_URL: ${{ inputs.agent-url }}
         AGENT_SCOPE: ${{ inputs.agent-scope }}
         OUTPUT_MODE: ${{ inputs.output-mode }}

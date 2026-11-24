@@ -1,6 +1,7 @@
 """GitHub Actions client for IssueLens issue-loop, maintenance, and direct tasks."""
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -8,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -24,6 +26,9 @@ MAX_BATCH_PRS = 100
 DISCOVERY_SECONDS = 180
 AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS = 300
 AGENT_STREAM_READ_BUDGET_SECONDS = 1800
+BRIDGE_POLL_SECONDS = 10
+BRIDGE_WAIT_SECONDS = 35 * 60
+BRIDGE_JOBS_PATH = "/api/issuelens/v1/jobs"
 ASSOCIATION_BATCH_SIZE = 20
 COORDINATOR_REPOSITORY = "microsoft/IssueLens"
 DISPATCH_WORKFLOW = ".github/workflows/team-memory-post-merge.yml"
@@ -67,15 +72,19 @@ def full_sha(value):
 
 
 def github_request(path, payload=None, *, token=None):
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Content-Type": "application/json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token == "":
+        headers["Cache-Control"] = "no-cache"
+    else:
+        headers["Authorization"] = "Bearer " + (os.environ["GH_TOKEN"] if token is None else token)
     return urllib.request.Request(
         "https://api.github.com" + path,
         data=None if payload is None else json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer " + (os.environ["GH_TOKEN"] if token is None else token),
-            "Accept": "application/vnd.github+json",
-            "Content-Type": "application/json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        headers=headers,
     )
 
 
@@ -618,12 +627,21 @@ def prepare_issue_loop(repository, event):
         "comment_edited": event_name == "issue_comment" and event_action == "edited",
         "manual_dispatch": event_name == "workflow_dispatch",
     }
+    request = build_issue_loop_request(metadata)
+    if os.environ.get("TRANSPORT") == "bridge" and metadata["comment_added"]:
+        body = comment.get("body")
+        require(isinstance(body, str), "Created comment has no authoritative revision in the event")
+        metadata["comment_sha256"] = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    return {"metadata": metadata, "request": request}
+
+
+def build_issue_loop_request(metadata):
     task = (
-        f"Process the trusted IssueLens issue-loop event for {repository}#{number} "
+        f"Process the trusted IssueLens issue-loop event for {metadata['repository']}#{metadata['issue_number']} "
         "under the global built-in command and trusted issue-loop contracts. "
         "Trusted event metadata: " + json.dumps(metadata, separators=(",", ":"))
     )
-    return {"metadata": metadata, "request": {"input": task}}
+    return {"input": task}
 
 
 def prepare_task(repository, event):
@@ -643,6 +661,12 @@ def preflight():
     display_options()
     request_type = os.environ.get("REQUEST_TYPE", "")
     require(request_type in REQUEST_TYPES, "Choose request-type issue-loop, team-memory, or task")
+    if transport() == "bridge":
+        bridge_url()
+        require(request_type in {"issue-loop", "team-memory"}
+                and (request_type != "team-memory" or os.environ.get("GITHUB_WORKFLOW_REF", "").endswith(
+                    "/" + COORDINATOR_WORKFLOW + "@refs/heads/main")),
+                "Bridge transport supports issue-loop and the IssueLens team-memory coordinator only")
     require(request_type == "team-memory"
             or not any(os.environ.get(name, "") for name in (*SOURCE_INPUTS, "SOURCE_REPOSITORY")),
             "Source identifiers are supported only for team-memory coordinator requests")
@@ -800,8 +824,105 @@ def save_response(text):
     return response_path
 
 
-def submit():
-    output_mode, summary_mode = display_options()
+def transport():
+    mode = os.environ.get("TRANSPORT", "foundry")
+    require(mode in {"foundry", "bridge"}, "Choose transport foundry or bridge")
+    require(mode != "foundry" or not os.environ.get("BRIDGE_URL"),
+            "bridge-url requires transport: bridge")
+    return mode
+
+
+def bridge_url():
+    url = os.environ.get("BRIDGE_URL", "")
+    parsed = urllib.parse.urlsplit(url)
+    require(parsed.scheme == "https"
+            and re.fullmatch(r"[a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)?\.azurewebsites\.net", parsed.netloc)
+            and parsed.path == BRIDGE_JOBS_PATH and not parsed.query and not parsed.fragment
+            and url == f"https://{parsed.netloc}{BRIDGE_JOBS_PATH}",
+            "Configure the full HTTPS Azure Function jobs endpoint for bridge-url")
+    return url
+
+
+def bridge_json(url, token, body=None):
+    request = urllib.request.Request(
+        url, data=None if body is None else json.dumps(body).encode("utf-8"),
+        headers={"Authorization": "Bearer " + token, "Accept": "application/json",
+                 "Content-Type": "application/json"},
+    )
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+        require(response.headers.get_content_type() == "application/json", "Expected a JSON bridge response")
+        data = response.read(128 * 1024 + 1)
+    require(len(data) <= 128 * 1024, "Bridge response exceeds the size limit")
+    try:
+        result = json.loads(data, object_pairs_hook=unique_object)
+    except (UnicodeError, ValueError):
+        raise ValueError("Invalid bridge JSON response") from None
+    require(isinstance(result, dict), "Invalid bridge JSON response")
+    return result
+
+
+def workflow_token(audience):
+    parsed = urllib.parse.urlsplit(os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", ""))
+    require(parsed.scheme == "https" and parsed.hostname is not None
+            and re.fullmatch(r"[a-z0-9.-]+\.actions\.githubusercontent\.com", parsed.hostname)
+            and parsed.username is None and parsed.password is None and parsed.port in {443, None}
+            and not parsed.fragment, "GitHub Actions OIDC endpoint unavailable; grant id-token: write")
+    credential = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
+    require(credential and not any(char.isspace() for char in credential),
+            "GitHub Actions OIDC credential unavailable; grant id-token: write")
+    query = [(key, value) for key, value in urllib.parse.parse_qsl(parsed.query) if key != "audience"]
+    query.append(("audience", audience))
+    url = parsed._replace(query=urllib.parse.urlencode(query)).geturl()
+    value = bridge_json(url, credential).get("value")
+    require(isinstance(value, str) and 0 < len(value) <= 16 * 1024
+            and re.fullmatch(r"[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+){2}", value),
+            "GitHub returned an invalid workflow identity token")
+    return value
+
+
+def submit_bridge(envelope):
+    url = bridge_url()
+    request_type = envelope["request_type"]
+    require(request_type in {"issue-loop", "team-memory"}, "Unsupported bridge request type")
+    token = workflow_token(url)
+    refreshed_at = time.monotonic()
+    try:
+        receipt = bridge_json(url, token, {"request_type": request_type, "metadata": envelope["metadata"]})
+    except urllib.error.HTTPError as error:
+        messages = {
+            400: "Bridge rejected the prepared workflow job",
+            401: "Bridge did not authorize this workflow identity",
+            409: "Another job owns the target; reconcile its outcome before retrying",
+        }
+        raise ValueError(messages.get(
+            error.code, "Bridge submission was not confirmed; inspect the job before retrying",
+        )) from None
+    job = receipt.get("job_id")
+    require(isinstance(job, str) and re.fullmatch(r"[0-9a-f]{64}", job), "Invalid bridge job ID")
+    display_log(f"IssueLens bridge job: {job}")
+    deadline = time.monotonic() + BRIDGE_WAIT_SECONDS
+    while True:
+        require(receipt.get("job_id") == job, "Bridge receipt does not match the submitted job")
+        state = receipt.get("state")
+        if state == "completed":
+            if request_type == "team-memory":
+                require(isinstance(receipt.get("result"), dict), "Missing team-memory receipt")
+                return json.dumps(receipt["result"], ensure_ascii=False)
+            return "IssueLens completed the issue-loop session. Inspect GitHub for any changes."
+        if state == "failed":
+            raise ValueError("Bridge job was rejected before a model session started")
+        if state == "unknown":
+            raise ValueError("Bridge job outcome is unknown; inspect the target before retrying")
+        require(state in {"queued", "running"}, "Invalid bridge job state")
+        require(time.monotonic() < deadline, "Bridge wait expired; inspect the submitted job before retrying")
+        time.sleep(BRIDGE_POLL_SECONDS)
+        if time.monotonic() - refreshed_at >= 120:
+            token = workflow_token(url)
+            refreshed_at = time.monotonic()
+        receipt = bridge_json(f"{url}/{job}", token)
+
+
+def foundry_request(envelope, output_mode):
     url = os.environ["AGENT_URL"]
     parsed = urllib.parse.urlsplit(url)
     require(parsed.scheme == "https" and parsed.hostname
@@ -812,10 +933,6 @@ def submit():
             "Configure a full HTTPS Foundry invocations endpoint")
     scope = os.environ["AGENT_SCOPE"]
     require(scope and not any(char.isspace() for char in scope), "Configure ISSUELENS_AGENT_SCOPE")
-    envelope = json.loads(Path(os.environ["REQUEST_PATH"]).read_text(encoding="utf-8"))
-    metadata = envelope["metadata"]
-    request_type = envelope.get("request_type")
-    require(request_type in REQUEST_TYPES, "Invalid prepared request type")
     token = subprocess.check_output(
         ["az", "account", "get-access-token", "--scope", scope, "--query", "accessToken", "-o", "tsv"],
         text=True, stderr=subprocess.PIPE, timeout=60,
@@ -830,10 +947,27 @@ def submit():
                  "Content-Type": "application/json", "Accept": "text/event-stream"},
         method="POST",
     )
+    return request, renderer
+
+
+def submit():
+    output_mode, summary_mode = display_options()
+    envelope = json.loads(Path(os.environ["REQUEST_PATH"]).read_text(encoding="utf-8"))
+    metadata = envelope["metadata"]
+    request_type = envelope.get("request_type")
+    require(request_type in REQUEST_TYPES, "Invalid prepared request type")
+    bridge = transport() == "bridge"
+    if bridge:
+        renderer = StreamRenderer(mode="quiet", secrets=(os.environ.get("BRIDGE_URL", ""),))
+    else:
+        request, renderer = foundry_request(envelope, output_mode)
     try:
-        with urllib.request.build_opener(NoRedirect()).open(
-                request, timeout=AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS) as response:
-            text = read_response(response, renderer)
+        if bridge:
+            text = submit_bridge(envelope)
+        else:
+            with urllib.request.build_opener(NoRedirect()).open(
+                    request, timeout=AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS) as response:
+                text = read_response(response, renderer)
         result = None
         if request_type == "team-memory":
             result = json.loads(text, object_pairs_hook=unique_object)

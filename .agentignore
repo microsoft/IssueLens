@@ -30,5 +30,6 @@ Dockerfile
 
 # Separate transports / CI assets, not part of the agent runtime
 webhook_bridge/
+automation_bridge/
 templates/
 deck/

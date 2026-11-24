@@ -100,7 +100,8 @@ class CIWorkflowTests(unittest.TestCase):
             self.assertEqual(setup["cache"], "pip")
             self.assertEqual(
                 set(setup["cache-dependency-path"].split()),
-                {manifest, "requirements-ci.txt", "constraints-ci.txt"},
+                {manifest, "requirements-ci.txt", "constraints-ci.txt"}
+                | ({"automation_bridge/requirements.txt"} if job_id == "application-tests" else set()),
             )
             if job_id != "application-tests":
                 self.assertEqual(setup["python-version"], "${{ matrix.python-version }}")
@@ -133,7 +134,7 @@ class CIWorkflowTests(unittest.TestCase):
         ):
             self.assertIn(command, [step.get("run") for step in self.jobs[job_id]["steps"]])
         self.assertIn(
-            "python -m pip install -r requirements.txt -r requirements-ci.txt",
+            "python -m pip install -r requirements.txt -r automation_bridge/requirements.txt -r requirements-ci.txt",
             self.commands("application-tests"),
         )
         self.assertIn(
@@ -159,7 +160,7 @@ class CIWorkflowTests(unittest.TestCase):
 
     def test_validation_tools_and_commands_are_documented(self):
         contributing = (ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
-        syntax = "python -m compileall -q *.py .github/actions/issuelens .github/actions/queue-team-memory github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests"
+        syntax = "python -m compileall -q *.py automation_bridge .github/actions/issuelens .github/actions/queue-team-memory github_app_mcp/src github_app_mcp/scripts tests github_app_mcp/tests"
         self.assertIn(syntax, self.commands("application-tests"))
         self.assertIn(syntax, contributing)
         lint = self.commands("workflow-validation")

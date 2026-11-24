@@ -5,18 +5,10 @@
 # .github/actions/issuelens/README.md. Repository policy belongs in
 # .github/issuelens.yml, not in this workflow.
 #
-# One-time setup in the repository (or organization, shared to selected repos):
-#   Secrets (Settings -> Secrets and variables -> Actions -> Secrets):
-#     AZURE_CLIENT_ID           Client ID of the OIDC identity (UAMI or app reg)
-#     AZURE_TENANT_ID
-#     AZURE_SUBSCRIPTION_ID
-#     ISSUELENS_AGENT_URL       Full deployed invocations endpoint
-#                               (.../protocols/invocations?api-version=...)
-#     ISSUELENS_AGENT_SCOPE     Entra scope/resource for the endpoint token
-#
-# The hosted agent owns its Key Vault-backed GitHub App identity and mints
-# repository-scoped tokens internally. Target repositories store no App private
-# key. Agent endpoint access uses Azure OIDC.
+# After the isolated Function bridge is approved, set the ISSUELENS_BRIDGE_URL
+# repository variable and opt in with ISSUELENS_ISSUE_LOOP_ENABLED=true.
+# This workflow authenticates only to the bridge. The worker's Azure identity
+# invokes Foundry; the hosted agent still owns all GitHub App writes.
 
 name: IssueLens issue loop
 
@@ -43,6 +35,9 @@ concurrency:
 jobs:
   orchestrate:
     if: >-
+      vars.ISSUELENS_ISSUE_LOOP_ENABLED == 'true' &&
+      vars.ISSUELENS_BRIDGE_URL != '' &&
+      github.repository == 'microsoft/IssueLens' &&
       (github.event_name != 'issue_comment' ||
        (github.event.issue.pull_request == null &&
         github.event.sender.type == 'User' && github.event.comment.user.type == 'User')) &&
@@ -68,8 +63,5 @@ jobs:
         with:
           request-type: issue-loop
           issue-number: ${{ inputs.issue_number }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          agent-url: ${{ secrets.ISSUELENS_AGENT_URL }}
-          agent-scope: ${{ secrets.ISSUELENS_AGENT_SCOPE }}
+          transport: bridge
+          bridge-url: ${{ vars.ISSUELENS_BRIDGE_URL }}
