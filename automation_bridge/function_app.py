@@ -68,7 +68,7 @@ def authorized(request):
 
 role = os.environ.get("ISSUELENS_BRIDGE_ROLE")
 if role == "ingress":
-    @app.route(route="issuelens/v1/jobs", methods=["POST"])
+    @app.route(route="issuelens/v1/jobs", methods=["POST"], trigger_arg_name="request")
     def submit(request: func.HttpRequest) -> func.HttpResponse:
         try:
             claims = authorized(request)
@@ -106,7 +106,7 @@ if role == "ingress":
             logger.warning("Bridge job admission not confirmed: %s", identifier)
             return respond({"error": "job_admission_not_confirmed", "job_id": identifier}, 503)
 
-    @app.route(route="issuelens/v1/jobs/{job_id}", methods=["GET"])
+    @app.route(route="issuelens/v1/jobs/{job_id}", methods=["GET"], trigger_arg_name="request")
     def status(request: func.HttpRequest) -> func.HttpResponse:
         try:
             claims = authorized(request)
