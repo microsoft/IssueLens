@@ -22,8 +22,10 @@ and result validation. No inline Python, pip installation, container build, or
 GitHub App private key is required.
 
 The [Function bridge pilot](../../../docs/guide.md#issuelens-function-bridge-pilot)
-uses GitHub workflow identity for `microsoft/IssueLens` only. It submits typed
-metadata after the same preflight, skips Azure login, and polls the job receipt.
+is a deployment-specific example, not a restriction on where this reusable action
+can be used. Configured bridge deployments determine which workflow identities
+and request types they accept. The action submits typed metadata after the same
+preflight, skips Azure login, and polls the job receipt.
 The worker authenticates to the existing `/invocations` endpoint using managed
 identity and submits the normal `{ "input": "..." }` request.
 It has no direct fallback or free-form task path. It does not stream or store
@@ -375,7 +377,7 @@ identity check is not authorization for any additional repositories named by a t
 | `source-run-id` | For coordinated automatic `team-memory` | Positive source push run ID. |
 | `source-run-attempt` | With `source-run-id` | Positive originating run attempt. |
 | `push-before`, `push-after` | With `source-run-id` | Full nonzero requested ancestor/source-run-head SHAs. Supply all four run/range inputs, never with `pull-request-number`. Before is not an attested original event boundary. |
-| `transport` | No | `foundry` (default for existing callers) or `bridge` (IssueLens pilot only). |
+| `transport` | No | `foundry` (default for existing callers) or `bridge` (reviewed pilot workflows only). |
 | `bridge-url` | For `bridge` | Complete approved HTTPS Azure Function jobs endpoint. Pass it from the `ISSUELENS_BRIDGE_URL` Actions secret, not a configuration variable. |
 | `azure-client-id` | For `foundry` | Existing Azure OIDC identity's client ID. |
 | `azure-tenant-id` | For `foundry` | Tenant used by Azure login. |
