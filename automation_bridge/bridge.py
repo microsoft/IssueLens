@@ -71,6 +71,8 @@ def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowli
             and isinstance(claims["repository_id"], str)
             and claims["repository_id"].isdecimal()
             and int(claims["repository_id"]) in allowlist
+            and (int(claims["repository_id"]) != pilot_repository_id
+                 or claims["repository"] == PILOT_REPOSITORY)
             and (claims["repository"] != PILOT_REPOSITORY
                  or int(claims["repository_id"]) == pilot_repository_id)
             and claims["repository_visibility"] == "public"

@@ -118,6 +118,16 @@ class BridgeIdentityTests(unittest.TestCase):
         metadata.pop("comment_sha256")
         return {"request_type": "issue-loop", "metadata": metadata | overrides}
 
+    def test_pilot_case_only_repository_rename_is_rejected(self):
+        renamed = self.token(
+            repository="microsoft/issuelens",
+            workflow_ref=bridge.workflow_ref(".github/workflows/manual.yml", "microsoft/issuelens"),
+            event_name="workflow_dispatch",
+            ref_protected="true",
+        )
+        with self.assertRaisesRegex(ValueError, "Workflow is not in the IssueLens pilot scope"):
+            self.workflow_claims(renamed, URL, PILOT_REPOSITORY_ID)
+
     def test_java_pack_manual_dispatch_is_allowed_from_an_enrolled_workflow(self):
         accepted = self.workflow_claims(self.java_token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
         self.assertEqual(bridge.validate_request(self.java_payload(), accepted), "repo-104967329-issue-12")
