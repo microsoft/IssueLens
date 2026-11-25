@@ -62,8 +62,7 @@ def authorized(request):
                    "A workflow token is required")
     return bridge.workflow_claims(
         auth[len("Bearer "):], os.environ["ISSUELENS_BRIDGE_OIDC_AUDIENCE"],
-        bridge.action.positive(os.environ["ISSUELENS_BRIDGE_REPOSITORY_ID"]),
-        repository_ids,
+        pilot_repository_id, repository_ids, repository_policies,
     )
 
 
@@ -72,6 +71,9 @@ if role == "ingress":
     pilot_repository_id = bridge.action.positive(os.environ["ISSUELENS_BRIDGE_REPOSITORY_ID"])
     repository_ids = bridge.load_repository_allowlist(
         os.environ.get("ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST", ""), pilot_repository_id,
+    )
+    repository_policies = bridge.load_repository_policies(
+        os.environ.get("ISSUELENS_BRIDGE_REPOSITORY_POLICIES"), pilot_repository_id, repository_ids,
     )
 
     @app.route(route="issuelens/v1/jobs", methods=["POST"], trigger_arg_name="request")
@@ -99,7 +101,7 @@ if role == "ingress":
             return respond({"error": "workflow_not_authorized"}, 401)
         identifier = bridge.job_id(claims)
         try:
-            job = jobs().reserve(identifier, target, body)
+            job = jobs().reserve(identifier, target, body, repository=claims["repository"])
             if job["state"] == bridge.QUEUED:
                 # A repeated send can only reference the original reservation.
                 with service_bus().get_queue_sender(os.environ["ISSUELENS_BRIDGE_QUEUE"]) as sender:

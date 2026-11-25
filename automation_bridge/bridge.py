@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 import jwt
@@ -27,9 +28,13 @@ _spec.loader.exec_module(action)
 
 PILOT_REPOSITORY = action.COORDINATOR_REPOSITORY
 PILOT_BRANCH = "main"
-JAVA_REPOSITORY = "microsoft/vscode-java-pack"
-JAVA_REPOSITORY_ID = 104967329
-JAVA_WORKFLOW = ".github/workflows/issueLens-run.yml"
+WORKFLOW_DIRECTORY = ".github/workflows/"
+WORKFLOW_BASENAME = re.compile(r"[A-Za-z0-9_.-]+\.ya?ml")
+ISSUE_EVENT_ACTIONS = {
+    "issues": ("opened", "reopened"),
+    "issue_comment": ("created", "edited"),
+    "workflow_dispatch": ("workflow_dispatch",),
+}
 GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
 KEYS = jwt.PyJWKClient(GITHUB_ISSUER + "/.well-known/jwks", timeout=5)
 JOB_ID = re.compile(r"[0-9a-f]{64}")
@@ -52,13 +57,62 @@ def load_repository_allowlist(value: str, pilot_repository_id: int) -> frozenset
     require(isinstance(ids, list) and ids
             and all(type(identifier) is int and identifier > 0 for identifier in ids)
             and len(set(ids)) == len(ids)
-            and type(pilot_repository_id) is int and pilot_repository_id != JAVA_REPOSITORY_ID
-            and pilot_repository_id in ids and set(ids) <= {pilot_repository_id, JAVA_REPOSITORY_ID},
+            and type(pilot_repository_id) is int and pilot_repository_id in ids,
             "Invalid bridge repository ID allowlist")
     return frozenset(ids)
 
 
-def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowlist: frozenset[int]) -> dict:
+@dataclass(frozen=True)
+class RepositoryPolicy:
+    repository: str
+    issue_workflow: str
+    issue_events: frozenset[str]
+    team_memory: bool
+
+
+def load_repository_policies(
+    value: str | None, pilot_repository_id: int, allowlist: frozenset[int],
+) -> dict[int, RepositoryPolicy]:
+    if value is None:
+        return {}
+    require(isinstance(value, str) and 0 < len(value.encode("utf-8")) <= 32 * 1024,
+            "Invalid bridge repository policy setting size")
+    entries = json.loads(value, object_pairs_hook=action.unique_object)
+    require(isinstance(entries, dict), "Expected bridge repository policies keyed by repository ID")
+    policies = {}
+    names = {PILOT_REPOSITORY.casefold()}
+    required = {"repository", "issue_workflow", "issue_events"}
+    reserved_workflows = {action.COORDINATOR_WORKFLOW.casefold(), action.DISPATCH_WORKFLOW.casefold()}
+    for key, entry in entries.items():
+        require(re.fullmatch(r"[1-9][0-9]*", key), "Invalid bridge repository policy ID")
+        repository_id = int(key)
+        require(repository_id != pilot_repository_id and repository_id in allowlist,
+                "Bridge repository policy ID must be enrolled and non-IssueLens")
+        require(isinstance(entry, dict) and required <= set(entry) <= required | {"team_memory"},
+                "Invalid bridge repository policy fields")
+        repository = entry["repository"]
+        require(isinstance(repository, str) and re.fullmatch(action.SOURCE_REPOSITORY_PATTERN, repository)
+                and ".." not in repository and repository.casefold() not in names,
+                "Invalid or ambiguous bridge repository policy name")
+        workflow = entry["issue_workflow"]
+        require(isinstance(workflow, str) and workflow.startswith(WORKFLOW_DIRECTORY)
+                and WORKFLOW_BASENAME.fullmatch(workflow[len(WORKFLOW_DIRECTORY):])
+                and workflow.casefold() not in reserved_workflows,
+                "Invalid bridge issue workflow path")
+        events, team_memory = entry["issue_events"], entry.get("team_memory", False)
+        require(isinstance(events, list) and events
+                and all(isinstance(event, str) and event in ISSUE_EVENT_ACTIONS for event in events)
+                and len(set(events)) == len(events) and type(team_memory) is bool,
+                "Invalid bridge repository policy events or team-memory opt-in")
+        names.add(repository.casefold())
+        policies[repository_id] = RepositoryPolicy(repository, workflow, frozenset(events), team_memory)
+    return policies
+
+
+def workflow_claims(
+    token: str, audience: str, pilot_repository_id: int, allowlist: frozenset[int],
+    policies: dict[int, RepositoryPolicy],
+) -> dict:
     require(type(pilot_repository_id) is int and pilot_repository_id in allowlist,
             "Configured IssueLens repository ID does not match the bridge allowlist")
     require(len(token) <= 16 * 1024, "Invalid workflow token size")
@@ -70,48 +124,57 @@ def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowli
             "ref", "workflow_ref", "workflow_sha", "event_name", "run_id", "run_attempt", "actor",
         ], "strict_aud": True},
     )
-    require(isinstance(claims["repository"], str)
-            and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", claims["repository"])
+    repository = claims["repository"]
+    require(isinstance(repository, str) and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository)
             and isinstance(claims["repository_id"], str)
-            and claims["repository_id"].isdecimal()
-            and int(claims["repository_id"]) in allowlist
-            and (int(claims["repository_id"]) != pilot_repository_id
-                 or claims["repository"] == PILOT_REPOSITORY)
-            and (claims["repository"] != PILOT_REPOSITORY
-                 or int(claims["repository_id"]) == pilot_repository_id)
-            and ((claims["repository"] == JAVA_REPOSITORY)
-                 == (int(claims["repository_id"]) == JAVA_REPOSITORY_ID))
+            and re.fullmatch(r"[1-9][0-9]*", claims["repository_id"])
+            and isinstance(claims["event_name"], str)
             and claims["repository_visibility"] == "public"
             and isinstance(claims["ref"], str) and claims["ref"].startswith("refs/heads/")
             and claims.get("runner_environment") == "github-hosted",
             "Workflow is not in the IssueLens pilot scope")
+    repository_id = int(claims["repository_id"])
+    require(repository_id in allowlist
+            and (repository_id != pilot_repository_id or repository == PILOT_REPOSITORY)
+            and (repository_id == pilot_repository_id or repository.casefold() != PILOT_REPOSITORY.casefold()),
+            "Workflow is not in the IssueLens pilot scope")
     if "ref_protected" in claims:
         protected = claims["ref_protected"]
         require(protected is True or protected == "true", "Workflow ref was not protected")
-    if claims["repository"] == PILOT_REPOSITORY:
+    policy = policies.get(repository_id)
+    if repository_id == pilot_repository_id:
         if claims["workflow_ref"] == workflow_ref(".github/workflows/issue-triage.yml"):
-            require(claims["event_name"] in {"issues", "issue_comment", "workflow_dispatch"},
-                    "Unsupported workflow event")
+            require(claims["event_name"] in ISSUE_EVENT_ACTIONS, "Unsupported workflow event")
         elif claims["workflow_ref"] == workflow_ref(action.COORDINATOR_WORKFLOW):
             require(claims["event_name"] == "workflow_dispatch", "Unsupported workflow event")
-            return _validated_claims(claims, "team-memory", int(claims["repository_id"]))
+            return _validated_claims(claims, "team-memory", repository_id)
         else:
             raise ValueError("Workflow is not enabled for this bridge")
-    else:
-        require(claims["repository"] == JAVA_REPOSITORY and claims["ref"] == "refs/heads/main",
-                "Workflow is not enabled for this bridge")
-        if claims["workflow_ref"] == workflow_ref(action.COORDINATOR_WORKFLOW, JAVA_REPOSITORY):
+    elif policy is not None:
+        require(repository == policy.repository and claims["ref"] == f"refs/heads/{PILOT_BRANCH}",
+                "Workflow repository or branch does not match bridge policy")
+        if policy.team_memory and claims["workflow_ref"] == workflow_ref(action.COORDINATOR_WORKFLOW, repository):
             require(claims["event_name"] == "workflow_dispatch", "Unsupported workflow event")
-            return _validated_claims(claims, "team-memory", int(claims["repository_id"]))
-        require(claims["workflow_ref"] == workflow_ref(JAVA_WORKFLOW, JAVA_REPOSITORY)
-                and claims["event_name"] in {"issues", "issue_comment", "workflow_dispatch"},
+            return _validated_claims(claims, "team-memory", repository_id, detailed_policy=True)
+        require(claims["workflow_ref"] == workflow_ref(policy.issue_workflow, repository)
+                and claims["event_name"] in policy.issue_events,
                 "Workflow is not enabled for this bridge")
-    return _validated_claims(claims, "issue-loop", int(claims["repository_id"]))
+    else:
+        require(not any(repository.casefold() == entry.repository.casefold() for entry in policies.values()),
+                "Workflow repository ID does not match bridge policy")
+        prefix = f"{repository}/{WORKFLOW_DIRECTORY}"
+        suffix = "@" + claims["ref"]
+        workflow = claims["workflow_ref"]
+        require(claims["event_name"] == "workflow_dispatch" and isinstance(workflow, str)
+                and workflow.startswith(prefix) and workflow.endswith(suffix)
+                and WORKFLOW_BASENAME.fullmatch(workflow[len(prefix):-len(suffix)]),
+                "Only manual workflow dispatches from enrolled repositories are allowed")
+    return _validated_claims(claims, "issue-loop", repository_id, detailed_policy=policy is not None)
 
 
-def _validated_claims(claims: dict, kind: str, repository_id: int) -> dict:
+def _validated_claims(claims: dict, kind: str, repository_id: int, *, detailed_policy: bool = False) -> dict:
     return {
-        **claims, "kind": kind, "repository_id": repository_id,
+        **claims, "kind": kind, "repository_id": repository_id, "detailed_policy": detailed_policy,
         "run_id": action.positive(claims["run_id"]), "run_attempt": action.positive(claims["run_attempt"]),
         "workflow_sha": action.full_sha(claims["workflow_sha"]),
     }
@@ -130,11 +193,11 @@ def default_branch_protected(claims: dict) -> bool:
             and isinstance(branch_name, str) and branch_name,
             "Invalid GitHub repository response")
     if (project["full_name"].casefold() != repository.casefold()
-            or (repository == JAVA_REPOSITORY and project["full_name"] != JAVA_REPOSITORY)
+            or (claims["detailed_policy"] and project["full_name"] != repository)
             or project["id"] != claims["repository_id"] or project["private"]
             or project["visibility"] != "public" or claims["ref"] != f"refs/heads/{branch_name}"):
         return False
-    if "ref_protected" in claims:
+    if "ref_protected" in claims and not claims["detailed_policy"]:
         return True
     branch_path = urllib.parse.quote(branch_name, safe="")
     branch = action.github_read(f"/repos/{repository}/branches/{branch_path}", token="", timeout=5)
@@ -167,11 +230,8 @@ def _positive_int(value):
 def _issue_job(metadata: dict, claims: dict) -> str:
     event = claims["event_name"]
     operation = metadata.get("event_action")
-    require(metadata.get("event_name") == event and operation in {
-        "issues": ("opened", "reopened"),
-        "issue_comment": ("created", "edited"),
-        "workflow_dispatch": ("workflow_dispatch",),
-    }[event], "Issue-event identity mismatch")
+    require(metadata.get("event_name") == event and operation in ISSUE_EVENT_ACTIONS[event],
+            "Issue-event identity mismatch")
     comment_event = event == "issue_comment"
     created = comment_event and operation == "created"
     require(set(metadata) == {
@@ -283,13 +343,13 @@ class JobStore:
         except ResourceNotFoundError:
             return None
 
-    def reserve(self, identifier: str, target: str, payload: bytes):
+    def reserve(self, identifier: str, target: str, payload: bytes, *, repository: str):
         existing = self.get(identifier)
         if existing is not None:
             return existing
         job = {
             "PartitionKey": PARTITION, "RowKey": identifier, "target": target,
-            "created": int(time.time()), "state": QUEUED, "payload": payload,
+            "created": int(time.time()), "state": QUEUED, "payload": payload, "repository": repository,
         }
         try:
             self.table.submit_transaction([
@@ -341,9 +401,7 @@ def receipt(job) -> dict:
     return value
 
 
-def _verify_created_comment(metadata: dict, digest: str) -> None:
-    repository = metadata["repository"]
-    require(repository in {PILOT_REPOSITORY, JAVA_REPOSITORY}, "Invalid comment repository")
+def _verify_created_comment(repository: str, metadata: dict, digest: str) -> None:
     identifier = _positive_int(metadata["comment_id"])
     number = _positive_int(metadata["issue_number"])
     comment = action.github_read(f"/repos/{repository}/issues/comments/{identifier}", token="")
@@ -373,11 +431,20 @@ class FoundryWorker:
     def prepare(self, job) -> urllib.request.Request:
         payload = json.loads(job["payload"])
         kind, metadata = payload["request_type"], payload["metadata"]
+        repository = job.get("repository")
+        if "repository" in job:
+            require(repository == metadata.get("repository"), "Bridge job repository mismatch")
         if kind == "issue-loop":
             digest = metadata.pop("comment_sha256", None)
             if metadata["comment_added"]:
                 require(isinstance(digest, str) and JOB_ID.fullmatch(digest), "Created comment requires its revision digest")
-                _verify_created_comment(metadata, digest)
+                if repository is None:
+                    # Only IssueLens could enqueue created comments before the repository field existed.
+                    require(metadata.get("repository") == PILOT_REPOSITORY
+                            and job.get("target") == f"issue-{_positive_int(metadata.get('issue_number'))}",
+                            "Created comment requires an admitted repository")
+                    repository = PILOT_REPOSITORY
+                _verify_created_comment(repository, metadata, digest)
             invocation = action.build_issue_loop_request(metadata)
         elif kind == "team-memory":
             invocation = action.build_team_memory_request(metadata)
