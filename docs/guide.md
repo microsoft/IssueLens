@@ -1053,8 +1053,8 @@ routing and command validation; no new permanent agent contract is introduced.
 
 ### IssueLens Function bridge pilot
 
-Configure repository enrollment and workflow policy through the ingress
-Function app settings. Keep the GitHub App webhook unchanged. Obtain
+Configure repository enrollment through the ingress Function app allowlist.
+Keep the GitHub App webhook unchanged. Obtain
 approval for the GitHub-facing endpoint, direct trust of the GitHub Actions
 issuer, network access, and the Azure release path before provisioning or
 enabling anything. The Function validates a GitHub token addressed to itself;
@@ -1065,8 +1065,8 @@ workflow revision is responsible for validating the event before submission.
 Build the Function source bundle from the reviewed bridge and action revision:
 `python -m automation_bridge.bundle <new-zip-path>`. The ZIP contains only the
 two Functions roles and the reused workflow helpers, with a separate dependency
-manifest. A missing or invalid ingress allowlist or an invalid supplied policy
-prevents ingress from initializing. Publish it through an approved release path to
+manifest. A missing or invalid allowlist prevents ingress from initializing.
+Publish it through an approved release path to
 **two** Function apps with distinct managed identities. Use a plan that supports a 40-minute function
 timeout for the worker. Use identity-backed Functions host storage separately
 from the application job table.
@@ -1074,46 +1074,35 @@ from the application job table.
 | Target | Configuration and access |
 | --- | --- |
 | Both Function apps | `ISSUELENS_BRIDGE_TABLE_ACCOUNT` points to the account containing precreated `IssueLensBridgeJobs`. Both need Table data read/write on that table. `ISSUELENS_BRIDGE_QUEUE` and `ISSUELENS_BRIDGE_SERVICE_BUS__fullyQualifiedNamespace` identify the same dedicated Service Bus queue. Use a queue with duplicate detection; reservations remain authoritative even outside the broker window. |
-| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the existing IssueLens numeric GitHub repository ID (`1303440932`), `ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST` set to the reviewed JSON ID array, and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. Use optional `ISSUELENS_BRIDGE_REPOSITORY_POLICIES` for exact workflow/event policies for enrolled non-IssueLens repositories. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
+| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the existing IssueLens numeric GitHub repository ID (`1303440932`), `ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST` set to the reviewed JSON ID array, and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
 | Worker | `ISSUELENS_BRIDGE_ROLE=worker`, `ISSUELENS_BRIDGE_FOUNDRY_URL` set to the existing deployed agent's full invocations URL (including API version). Grant queue **Data Receiver** and the narrowest applicable Foundry invocation access to the worker managed identity. It requests an Entra token for `https://ai.azure.com/.default`. No repository write, deployment, signing key, or GitHub App key access is needed. |
 
-The bridge verifies the signed workflow identity, public GitHub-hosted runner
-scope, and current public repository/default branch before admission. If a
-signed `ref_protected` claim is supplied it must affirm protection. For a
-detailed policy, or if that claim is absent, ingress must independently
-confirm current protection through GitHub's public branch API. Unprotected
-branches and unavailable checks stop admission. Status polls still require
-the owning run's signed identity under the active policy; they do not repeat
-the branch API check.
+The bridge verifies the signed workflow identity and GitHub-hosted runner,
+and confirms the public repository and current default branch through GitHub
+metadata before admission. A supplied `ref_protected` claim must affirm
+protection. If it is absent, ingress must confirm protection through GitHub's
+public branch API. Unprotected branches and unavailable checks stop admission.
+Status polls require the owning run's signed identity; they do not repeat the
+branch API check.
 
 Use `automation_bridge/repository_allowlist.example.json` as the initial
 `ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST` value: a JSON array of numeric GitHub
 repository IDs. The existing `ISSUELENS_BRIDGE_REPOSITORY_ID` setting must
 remain in that array and continues to identify IssueLens. The setting is
-limited to 32 KiB; IDs must be positive, unique integers. An enrolled
-non-IssueLens ID without a detailed policy can submit only manual
-`workflow_dispatch` issue-loop jobs from a workflow on its protected default
-branch. ID enrollment alone does not admit automatic events or team-memory.
-IssueLens keeps its built-in workflow and event restrictions.
+limited to 32 KiB; IDs must be positive, unique integers. **Enrolling a public
+repository grants bridge admission for both issue-loop and same-repository
+team-memory jobs.** There is no additional setting or per-workflow enrollment.
+Issue-loop jobs may come from any `.github/workflows/` YAML file in the signed
+repository on its protected default branch, for `issues`, `issue_comment`,
+or `workflow_dispatch`. The same issue action and human-comment restrictions
+apply. IssueLens keeps its built-in workflow and event restrictions.
 
-`ISSUELENS_BRIDGE_REPOSITORY_POLICIES` is an optional JSON object (up to 32 KiB)
-keyed by enrolled non-IssueLens repository IDs as decimal strings without
-leading zeroes. Omit it or use `{}` for ID-only enrollment. Each entry requires
-an exact canonical `repository` (`owner/repository`), `issue_workflow` (a
-single `.github/workflows/` YAML file, distinct from the team-memory workflows),
-and a nonempty, unique `issue_events` array drawn from `issues`, `issue_comment`,
-and `workflow_dispatch`. `team_memory` is an optional JSON boolean, off unless
-explicitly `true`. Invalid JSON, unknown fields, duplicate keys or canonical
-names (including case variants), and entries for unenrolled or IssueLens IDs
-fail closed. For a detailed entry, the exact ID, repository spelling, workflow
-and event must match. There is no fallback to ID-only admission on mismatch.
-The supported policy contract requires `main` to be the repository's protected
-default branch. Issue action and human-comment restrictions are unchanged.
-
-Team-memory opt-in admits only `workflow_dispatch` from the exact
-`.github/workflows/team-memory-coordinator.yml` workflow. Coordinated push
-ranges must identify `.github/workflows/team-memory-post-merge.yml` in the
-same repository. Coordinator, source and validated wiki destination must all
+The standard coordinator is never an issue-loop caller. Team-memory admission
+requires `workflow_dispatch` from the exact
+`.github/workflows/team-memory-coordinator.yml` workflow on protected default
+`main`. Coordinated push ranges must identify
+`.github/workflows/team-memory-post-merge.yml` in the same repository.
+Coordinator, source and validated wiki destination must all
 match the authenticated repository. Manual PR and coordinated range requests
 share that repository's wiki reservation, separate from other repositories.
 Source run metadata cannot prove the original push boundary or flags. Each
@@ -1123,32 +1112,19 @@ permissions or guarantee publication.
 
 Restrict permission to modify Function App settings to authorized operators:
 the allowlist controls admission and must never come from workflow or dispatch
-inputs. Review each repository's public identity, default branch protection,
-workflow code, and App permissions before adding an ID or expanding its policy.
-Azure applies app setting changes by restarting the Function App. Policy
-changes can prevent affected runs from continuing to poll their receipts;
-reconcile in-flight jobs first. Removing a detailed policy retains ID-only
-manual issue-loop admission; remove both the entry and the ID to revoke
-enrollment. Configuration and release require separate approval.
+inputs. Review each enrolled repository's public identity, default branch
+protection, workflow code, and App permissions before releasing the expanded
+admission. Azure applies app setting changes by restarting the Function App.
+Removing an ID revokes admission and receipt polling for that repository;
+reconcile in-flight jobs first. Configuration and release require separate
+approval.
 
-For Java Pack, retain `ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST=[1303440932,104967329]`
-and set this value for `ISSUELENS_BRIDGE_REPOSITORY_POLICIES` on ingress:
-
-```json
-{
-  "104967329": {
-    "repository": "microsoft/vscode-java-pack",
-    "issue_workflow": ".github/workflows/issueLens-run.yml",
-    "issue_events": ["issues", "issue_comment", "workflow_dispatch"],
-    "team_memory": true
-  }
-}
-```
-
+For Java Pack, the existing
+`ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST=[1303440932,104967329]` is sufficient.
 Keep the Java Pack workflows disabled during rollout. After approval, deploy
-the same ZIP built from the merged IssueLens revision to worker first and
-then ingress, and confirm ingress has the reviewed policy before enabling
-the merged caller workflows. Provide
+the same ZIP built from the merged IssueLens revision to the worker first,
+then ingress. Confirm both roles are ready before enabling the merged caller
+workflows. Provide
 the approved `ISSUELENS_BRIDGE_URL` Actions secret, and use the composite action
 with `request-type: issue-loop`, `transport: bridge`, `issue-number`, and
 `bridge-url`. The issue-loop job needs `issues: read` and

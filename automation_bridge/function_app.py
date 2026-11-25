@@ -62,7 +62,7 @@ def authorized(request):
                    "A workflow token is required")
     return bridge.workflow_claims(
         auth[len("Bearer "):], os.environ["ISSUELENS_BRIDGE_OIDC_AUDIENCE"],
-        pilot_repository_id, repository_ids, repository_policies,
+        pilot_repository_id, repository_ids,
     )
 
 
@@ -71,9 +71,6 @@ if role == "ingress":
     pilot_repository_id = bridge.action.positive(os.environ["ISSUELENS_BRIDGE_REPOSITORY_ID"])
     repository_ids = bridge.load_repository_allowlist(
         os.environ.get("ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST", ""), pilot_repository_id,
-    )
-    repository_policies = bridge.load_repository_policies(
-        os.environ.get("ISSUELENS_BRIDGE_REPOSITORY_POLICIES"), pilot_repository_id, repository_ids,
     )
 
     @app.route(route="issuelens/v1/jobs", methods=["POST"], trigger_arg_name="request")
