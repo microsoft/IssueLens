@@ -63,11 +63,17 @@ def authorized(request):
     return bridge.workflow_claims(
         auth[len("Bearer "):], os.environ["ISSUELENS_BRIDGE_OIDC_AUDIENCE"],
         bridge.action.positive(os.environ["ISSUELENS_BRIDGE_REPOSITORY_ID"]),
+        repository_ids,
     )
 
 
 role = os.environ.get("ISSUELENS_BRIDGE_ROLE")
 if role == "ingress":
+    pilot_repository_id = bridge.action.positive(os.environ["ISSUELENS_BRIDGE_REPOSITORY_ID"])
+    repository_ids = bridge.load_repository_allowlist(
+        os.environ.get("ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST", ""), pilot_repository_id,
+    )
+
     @app.route(route="issuelens/v1/jobs", methods=["POST"], trigger_arg_name="request")
     def submit(request: func.HttpRequest) -> func.HttpResponse:
         try:
@@ -84,14 +90,13 @@ if role == "ingress":
             target = bridge.validate_request(data, claims)
         except (ValueError, TypeError):
             return respond({"error": "invalid_job"}, 400)
-        if "ref_protected" not in claims:
-            try:
-                protected = bridge.pilot_branch_protected(claims)
-            except (OSError, http.client.HTTPException, ValueError):
-                logger.warning("GitHub branch protection unavailable")
-                return respond({"error": "branch_protection_unavailable"}, 503)
-            if not protected:
-                return respond({"error": "workflow_not_authorized"}, 401)
+        try:
+            protected = bridge.default_branch_protected(claims)
+        except (OSError, http.client.HTTPException, ValueError):
+            logger.warning("GitHub repository or branch validation unavailable")
+            return respond({"error": "branch_protection_unavailable"}, 503)
+        if not protected:
+            return respond({"error": "workflow_not_authorized"}, 401)
         identifier = bridge.job_id(claims)
         try:
             job = jobs().reserve(identifier, target, body)

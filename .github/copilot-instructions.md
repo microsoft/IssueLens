@@ -318,10 +318,11 @@ The agent is driven by a workflow in the target repo
    Azure Function bridge with a bridge-audience GitHub Actions token. The
    Function verifies GitHub identity without exchanging the token for Entra
    credentials. No App webhook or corporate FIC is used.
-   The bridge's reviewed `automation_bridge/repository_allowlist.json`
-   additionally admits only manual issue-loop dispatch from
-   `microsoft/vscode-java-pack` at its exact workflow on protected `main`;
-   it grants no Java Pack automatic events or team-memory.
+   The bridge's reviewed ingress Function App allowlist setting additionally
+   admits `microsoft/vscode-java-pack` for manual issue-loop dispatch from any
+   workflow on its protected default branch; it grants no automatic events or
+   team-memory. `automation_bridge/repository_allowlist.example.json` documents
+   the initial setting value; it is not loaded from the Function ZIP.
 2. The worker uses its managed identity to POST the existing `{ input }`
    payload to the deployed agent's `/invocations` API. Bridge validation and
    queueing stay outside the hosted agent. The agent remains independently

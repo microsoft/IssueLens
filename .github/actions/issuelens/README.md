@@ -22,9 +22,10 @@ and result validation. No inline Python, pip installation, container build, or
 GitHub App private key is required.
 
 The [Function bridge pilot](../../../docs/guide.md#issuelens-function-bridge-pilot)
-uses GitHub workflow identity for the reviewed `microsoft/IssueLens` workflows
-and the manual-only `microsoft/vscode-java-pack` issue-loop pilot. It submits typed
-metadata after the same preflight, skips Azure login, and polls the job receipt.
+is a deployment-specific example, not a restriction on where this reusable action
+can be used. Configured bridge deployments determine which workflow identities
+and request types they accept. The action submits typed metadata after the same
+preflight, skips Azure login, and polls the job receipt.
 The worker authenticates to the existing `/invocations` endpoint using managed
 identity and submits the normal `{ "input": "..." }` request.
 It has no direct fallback or free-form task path. It does not stream or store

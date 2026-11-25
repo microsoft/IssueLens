@@ -33,6 +33,7 @@ URL = "https://issuelens.azurewebsites.net/api/issuelens/v1/jobs"
 ENDPOINT = "https://account.services.ai.azure.com/test/protocols/invocations?api-version=2025-11-15-preview"
 JOB = "7" * 64
 COMMENT_URL = f"https://api.github.com/repos/{PILOT_REPOSITORY}/issues/comments/41"
+ALLOWLIST_JSON = pathlib.Path(bridge.__file__).with_name("repository_allowlist.example.json").read_text(encoding="utf-8")
 
 
 def issue_metadata(**overrides):
@@ -76,10 +77,15 @@ class BridgeIdentityTests(unittest.TestCase):
     def token(self, **overrides):
         return jwt.encode(self.claims | overrides, self.key, algorithm="RS256")
 
-    def load_ingress(self):
+    def workflow_claims(self, token, audience, repository_id):
+        allowlist = bridge.load_repository_allowlist(ALLOWLIST_JSON, PILOT_REPOSITORY_ID)
+        return bridge.workflow_claims(token, audience, repository_id, allowlist)
+
+    def load_ingress(self, allowlist=ALLOWLIST_JSON):
         self.enterContext(patch.dict(os.environ, {
             "ISSUELENS_BRIDGE_ROLE": "ingress", "ISSUELENS_BRIDGE_REPOSITORY_ID": str(PILOT_REPOSITORY_ID),
             "ISSUELENS_BRIDGE_OIDC_AUDIENCE": URL, "ISSUELENS_BRIDGE_QUEUE": "test-jobs",
+            "ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST": allowlist,
         }))
         path = pathlib.Path(bridge.__file__).with_name("function_app.py")
         spec = importlib.util.spec_from_file_location("test_bridge_ingress", path)
@@ -112,20 +118,23 @@ class BridgeIdentityTests(unittest.TestCase):
         metadata.pop("comment_sha256")
         return {"request_type": "issue-loop", "metadata": metadata | overrides}
 
-    def test_java_pack_admission_is_exact_and_manual_only(self):
-        accepted = bridge.workflow_claims(self.java_token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
+    def test_java_pack_manual_dispatch_is_allowed_from_an_enrolled_workflow(self):
+        accepted = self.workflow_claims(self.java_token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
         self.assertEqual(bridge.validate_request(self.java_payload(), accepted), "repo-104967329-issue-12")
+        additional_workflow = self.workflow_claims(self.java_token(
+            workflow_ref=bridge.workflow_ref(".github/workflows/another-triage.yaml", JAVA_REPOSITORY),
+            ref_protected="true",
+        ), URL, PILOT_REPOSITORY_ID)
+        self.assertEqual(additional_workflow["kind"], "issue-loop")
         for overrides in (
-            {"repository": PILOT_REPOSITORY}, {"repository_id": str(PILOT_REPOSITORY_ID)}, {"repository_id": "104967330"},
-            {"repository_visibility": "private"}, {"ref": "refs/heads/other"}, {"ref_protected": "false"},
+            {"repository": PILOT_REPOSITORY}, {"repository_id": "104967330"}, {"repository_id": "not-an-id"},
+            {"repository_visibility": "private"}, {"ref": "refs/tags/v1"}, {"ref_protected": "false"},
             {"runner_environment": "self-hosted"}, {"event_name": "issues"},
             {"event_name": "issue_comment"}, {"workflow_ref": bridge.workflow_ref(ISSUE_WORKFLOW)},
-            {"workflow_ref": bridge.workflow_ref(MEMORY_WORKFLOW, JAVA_REPOSITORY)},
-            {"workflow_ref": bridge.workflow_ref("other.yml", JAVA_REPOSITORY)},
             {"aud": ENDPOINT},
         ):
             with self.subTest(overrides=overrides), self.assertRaises((ValueError, jwt.PyJWTError)):
-                bridge.workflow_claims(self.java_token(**overrides), URL, PILOT_REPOSITORY_ID)
+                self.workflow_claims(self.java_token(**overrides), URL, PILOT_REPOSITORY_ID)
         for payload in (
             self.java_payload(repository=PILOT_REPOSITORY),
             self.java_payload(event_name="issues", event_action="opened", manual_dispatch=False),
@@ -136,7 +145,7 @@ class BridgeIdentityTests(unittest.TestCase):
         ):
             with self.subTest(payload=payload), self.assertRaises(ValueError):
                 bridge.validate_request(payload, accepted)
-        pilot = bridge.workflow_claims(self.token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
+        pilot = self.workflow_claims(self.token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
         self.assertEqual(bridge.validate_request(issue_payload(), pilot), "issue-12")
         self.assertNotEqual(bridge.job_id(pilot), bridge.job_id(accepted))
         self.assertEqual(bridge.job_id(accepted), bridge.job_id(accepted | {"run_attempt": 2}))
@@ -148,11 +157,31 @@ class BridgeIdentityTests(unittest.TestCase):
             patch.object(ingress, "jobs") as jobs,
         ):
             self.assertEqual(submit(self.request()).status_code, 401)
-            self.assertEqual(status(self.request(JOB, token=self.java_token())).status_code, 401)
+            self.assertEqual(status(self.request(JOB)).status_code, 401)
             jobs.assert_not_called()
 
+    def test_ingress_admits_a_new_configured_repository_without_changing_the_bundle(self):
+        repository, repository_id = "example/project", 12345678
+        workflow = ".github/workflows/triage.yml"
+        ids = json.loads(ALLOWLIST_JSON)
+        ids.append(repository_id)
+        ingress, submit, _ = self.load_ingress(json.dumps(ids))
+        token = self.token(
+            repository=repository, repository_id=str(repository_id), event_name="workflow_dispatch",
+            workflow_ref=bridge.workflow_ref(workflow, repository), ref_protected="true",
+        )
+        payload = self.java_payload(repository=repository)
+        with patch.object(bridge.action, "github_read", return_value={
+            "id": repository_id, "full_name": repository, "private": False,
+            "visibility": "public", "default_branch": "main",
+        }), patch.object(ingress, "jobs") as jobs, patch.object(ingress, "service_bus"):
+            jobs.return_value.reserve.return_value = {"RowKey": JOB, "state": bridge.QUEUED}
+            response = submit(self.request(token=token, payload=payload))
+            self.assertEqual(response.status_code, 202, response.get_body())
+            self.assertEqual(jobs.return_value.reserve.call_args.args[1], "repo-12345678-issue-12")
+
     def test_existing_team_memory_workflow_remains_enabled(self):
-        claims = bridge.workflow_claims(self.token(
+        claims = self.workflow_claims(self.token(
             workflow_ref=bridge.workflow_ref(MEMORY_WORKFLOW), event_name="workflow_dispatch",
             ref_protected="true",
         ), URL, PILOT_REPOSITORY_ID)
@@ -172,10 +201,14 @@ class BridgeIdentityTests(unittest.TestCase):
     def test_java_pack_fallback_and_same_run_receipt_are_repository_bound(self):
         ingress, submit, status = self.load_ingress()
         token = self.java_token()
-        claims = bridge.workflow_claims(token, URL, PILOT_REPOSITORY_ID)
+        claims = self.workflow_claims(token, URL, PILOT_REPOSITORY_ID)
         identifier = bridge.job_id(claims)
+        repository_info = {
+            "id": JAVA_REPOSITORY_ID, "full_name": JAVA_REPOSITORY, "private": False,
+            "visibility": "public", "default_branch": "main",
+        }
         with (
-            patch.object(bridge.action, "github_read", return_value={"name": "main", "protected": True}) as github,
+            patch.object(bridge.action, "github_read", side_effect=[repository_info, {"name": "main", "protected": True}]) as github,
             patch.object(ingress, "jobs") as jobs,
             patch.object(ingress, "service_bus"),
         ):
@@ -183,12 +216,17 @@ class BridgeIdentityTests(unittest.TestCase):
             jobs.return_value.get.return_value = {"RowKey": identifier, "state": bridge.COMPLETED}
             response = submit(self.request(token=token, payload=self.java_payload()))
             self.assertEqual(response.status_code, 202, response.get_body())
-            github.assert_called_once_with("/repos/microsoft/vscode-java-pack/branches/main", token="", timeout=5)
+            self.assertEqual([call.args[0] for call in github.call_args_list], [
+                "/repos/microsoft/vscode-java-pack",
+                "/repos/microsoft/vscode-java-pack/branches/main",
+            ])
             self.assertEqual(jobs.return_value.reserve.call_args.args[1], "repo-104967329-issue-12")
             self.assertEqual(status(self.request(identifier, token=token)).status_code, 200)
             self.assertEqual(status(self.request(identifier)).status_code, 404)
         with (
-            patch.object(bridge.action, "github_read", return_value={"name": "main", "protected": False}),
+            patch.object(bridge.action, "github_read", side_effect=[
+                repository_info, {"name": "main", "protected": False},
+            ]),
             patch.object(ingress, "jobs") as jobs,
         ):
             self.assertEqual(submit(self.request(token=token, payload=self.java_payload())).status_code, 401)
@@ -207,7 +245,7 @@ class BridgeIdentityTests(unittest.TestCase):
             patch.object(bridge.action, "github_read", side_effect=[project, {"number": 12}]),
         ):
             envelope = bridge.action.prepare_issue_loop(JAVA_REPOSITORY, {"repository": project})
-        claims = bridge.workflow_claims(self.java_token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
+        claims = self.workflow_claims(self.java_token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
         payload = {"request_type": "issue-loop", "metadata": envelope["metadata"]}
         self.assertEqual(bridge.validate_request(payload, claims), "repo-104967329-issue-12")
         request = bridge.FoundryWorker(ENDPOINT, Mock(get_token=Mock(return_value=Mock(token="token")))).prepare(
@@ -216,18 +254,18 @@ class BridgeIdentityTests(unittest.TestCase):
         self.assertEqual(json.loads(request.data), envelope["request"])
 
     def test_only_the_expected_workflow_identity_is_accepted(self):
-        accepted = bridge.workflow_claims(self.token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
+        accepted = self.workflow_claims(self.token(ref_protected="true"), URL, PILOT_REPOSITORY_ID)
         self.assertEqual(bridge.validate_request(issue_payload(), accepted), "issue-12")
         for alteration in (
-            {"repository_id": "101"}, {"ref": "refs/heads/other"}, {"ref_protected": "false"},
+            {"repository_id": "101"}, {"ref": "refs/tags/v1"}, {"ref_protected": "false"},
             {"repository_visibility": "private"}, {"runner_environment": "self-hosted"},
             {"event_name": "pull_request"}, {"workflow_ref": bridge.workflow_ref("another.yml")},
             {"aud": ENDPOINT}, {"exp": self.claims["iat"] - 1},
         ):
             with self.subTest(alteration=alteration), self.assertRaises((ValueError, jwt.PyJWTError)):
-                bridge.workflow_claims(self.token(**alteration), URL, PILOT_REPOSITORY_ID)
+                self.workflow_claims(self.token(**alteration), URL, PILOT_REPOSITORY_ID)
         with self.assertRaises(jwt.InvalidSignatureError):
-            bridge.workflow_claims(
+            self.workflow_claims(
                 jwt.encode(self.claims, rsa.generate_private_key(public_exponent=65537, key_size=2048), algorithm="RS256"),
                 URL, PILOT_REPOSITORY_ID,
             )
@@ -244,13 +282,19 @@ class BridgeIdentityTests(unittest.TestCase):
     def test_token_without_protection_claim_can_submit_and_poll_a_protected_branch_job(self):
         ingress, submit, status = self.load_ingress()
         identifier = bridge.job_id({"kind": "issue-loop", "run_id": 20, "repository_id": PILOT_REPOSITORY_ID})
+        repository_info = {
+            "id": PILOT_REPOSITORY_ID, "full_name": PILOT_REPOSITORY, "private": False,
+            "visibility": "public", "default_branch": "main",
+        }
         with (
             patch.object(bridge.urllib.request, "build_opener") as opener,
             patch.object(ingress, "jobs") as jobs,
             patch.object(ingress, "service_bus") as bus,
         ):
             read = opener.return_value.open
-            read.return_value.__enter__.return_value.read.return_value = b'{"name":"main","protected":true}'
+            read.return_value.__enter__.return_value.read.side_effect = [
+                json.dumps(repository_info).encode(), b'{"name":"main","protected":true}',
+            ]
             jobs.return_value.reserve.return_value = {"RowKey": identifier, "state": bridge.QUEUED}
             jobs.return_value.get.return_value = {"RowKey": identifier, "state": bridge.COMPLETED}
             queued = submit(self.request())
@@ -265,61 +309,58 @@ class BridgeIdentityTests(unittest.TestCase):
             self.assertEqual(json.loads(completed.get_body()), {"job_id": identifier, "state": bridge.COMPLETED})
             self.assertEqual(status(self.request("8" * 64)).status_code, 404)
             jobs.return_value.get.assert_called_once_with(identifier)
-            read.assert_called_once()
-            branch_request, = read.call_args.args
+            self.assertEqual(read.call_count, 2)
+            repository_request, branch_request = [call.args[0] for call in read.call_args_list]
+            self.assertEqual(repository_request.full_url, f"https://api.github.com/repos/{PILOT_REPOSITORY}")
             self.assertEqual(branch_request.full_url, f"https://api.github.com/repos/{PILOT_REPOSITORY}/branches/main")
             self.assertEqual(branch_request.get_header("Cache-control"), "no-cache")
             self.assertFalse(branch_request.has_header("Authorization"))
 
     def test_missing_protection_claim_does_not_admit_jobs_without_confirmed_protection(self):
         ingress, submit, _ = self.load_ingress()
-        for response, expected in (
-            ({"name": "main", "protected": False}, (401, {"error": "workflow_not_authorized"})),
-            ({"name": "main"}, (503, {"error": "branch_protection_unavailable"})),
-            (urllib.error.URLError("offline"), (503, {"error": "branch_protection_unavailable"})),
+        repository_info = {
+            "id": PILOT_REPOSITORY_ID, "full_name": PILOT_REPOSITORY, "private": False,
+            "visibility": "public", "default_branch": "main",
+        }
+        for responses, expected in (
+            ([repository_info, {"name": "main", "protected": False}], (401, {"error": "workflow_not_authorized"})),
+            ([repository_info, {"name": "main"}], (503, {"error": "branch_protection_unavailable"})),
+            ([repository_info, urllib.error.URLError("offline")], (503, {"error": "branch_protection_unavailable"})),
+            ([repository_info | {"default_branch": "trunk"}], (401, {"error": "workflow_not_authorized"})),
+            ([repository_info | {"id": 42}], (401, {"error": "workflow_not_authorized"})),
+            ([repository_info | {"private": True}], (401, {"error": "workflow_not_authorized"})),
+            ([repository_info | {"visibility": "internal"}], (401, {"error": "workflow_not_authorized"})),
+            ([repository_info | {"full_name": "example/other"}], (401, {"error": "workflow_not_authorized"})),
         ):
             with (
-                self.subTest(response=response),
-                patch.object(bridge.action, "github_read", side_effect=[response]) as github,
+                self.subTest(responses=responses),
+                patch.object(bridge.action, "github_read", side_effect=responses) as github,
                 patch.object(ingress, "jobs") as jobs,
                 patch.object(ingress, "service_bus") as bus,
             ):
                 result = submit(self.request())
                 self.assertEqual((result.status_code, json.loads(result.get_body())), expected)
-                github.assert_called_once()
+                self.assertEqual(github.call_count, len(responses))
                 jobs.assert_not_called()
                 bus.assert_not_called()
 
 
-class BridgeManifestTests(unittest.TestCase):
-    def test_invalid_manifest_is_rejected_as_a_whole(self):
-        source = pathlib.Path(bridge.__file__).with_name("repository_allowlist.json")
-        original = source.read_text(encoding="utf-8")
-        java = json.loads(original)[JAVA_REPOSITORY]
-        policies = json.loads(original)
+class BridgeAllowlistTests(unittest.TestCase):
+    def test_invalid_id_allowlist_is_rejected_as_a_whole(self):
+        original = ALLOWLIST_JSON
+        ids = json.loads(original)
         invalid = {
-            "duplicate key": '{"microsoft/IssueLens": {},' + original.lstrip()[1:],
-            "missing primary": json.dumps({JAVA_REPOSITORY: java}),
-            "duplicate repository ID": json.dumps(policies | {JAVA_REPOSITORY: java | {"id": PILOT_REPOSITORY_ID}}),
-            "non-numeric ID": json.dumps(policies | {JAVA_REPOSITORY: java | {"id": str(JAVA_REPOSITORY_ID)}}),
-            "wildcard branch": json.dumps(policies | {JAVA_REPOSITORY: java | {"branch": "*"}}),
-            "unknown field": json.dumps(policies | {JAVA_REPOSITORY: java | {"visibility": "private"}}),
+            "duplicate ID": json.dumps(ids + [JAVA_REPOSITORY_ID]),
+            "non-numeric ID": json.dumps(ids + [JAVA_REPOSITORY]),
+            "boolean ID": json.dumps(ids + [True]),
+            "empty": "",
+            "oversize": " " * (32 * 1024 + 1),
+            "object instead of list": json.dumps({"repositories": ids}),
+            "missing IssueLens ID": json.dumps([JAVA_REPOSITORY_ID]),
         }
-        for key, path, kind, events in (
-            ("automatic event", JAVA_WORKFLOW, "issue-loop", ["workflow_dispatch", "issues"]),
-            ("wiki job", JAVA_WORKFLOW, "team-memory", ["workflow_dispatch"]),
-            ("wildcard workflow", ".github/workflows/*.yml", "issue-loop", ["workflow_dispatch"]),
-            ("invalid event list", JAVA_WORKFLOW, "issue-loop", "workflow_dispatch"),
-        ):
-            invalid[key] = json.dumps(policies | {
-                JAVA_REPOSITORY: java | {"workflows": {path: {"kind": kind, "events": events}}},
-            })
-        with tempfile.TemporaryDirectory() as directory:
-            manifest = pathlib.Path(directory) / source.name
-            for label, content in invalid.items():
-                with self.subTest(label=label), self.assertRaises(ValueError):
-                    manifest.write_text(content, encoding="utf-8")
-                    bridge.load_repository_allowlist(manifest)
+        for label, content in invalid.items():
+            with self.subTest(label=label), self.assertRaises(ValueError):
+                bridge.load_repository_allowlist(content, PILOT_REPOSITORY_ID)
 
 
 class BridgeActionTests(unittest.TestCase):
@@ -562,11 +603,17 @@ class BridgeExecutionTests(unittest.TestCase):
             with ZipFile(archive) as source:
                 self.assertEqual(set(source.namelist()), {
                     "function_app.py", "bridge.py", "host.json", "requirements.txt",
-                    "issuelens_action.py", "stream_output.py", "repository_allowlist.json",
+                    "issuelens_action.py", "stream_output.py",
                 })
                 source.extractall(root)
             for role, expected in (("ingress", "status,submit"), ("worker", "process")):
                 with self.subTest(role=role):
+                    environment = {**os.environ, "ISSUELENS_BRIDGE_ROLE": role}
+                    environment.pop("ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST", None)
+                    environment.pop("ISSUELENS_BRIDGE_REPOSITORY_ID", None)
+                    if role == "ingress":
+                        environment["ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST"] = ALLOWLIST_JSON
+                        environment["ISSUELENS_BRIDGE_REPOSITORY_ID"] = str(PILOT_REPOSITORY_ID)
                     result = subprocess.run(
                         [sys.executable, "-c", (
                             "from inspect import signature\n"
@@ -578,20 +625,23 @@ class BridgeExecutionTests(unittest.TestCase):
                             "(function.get_function_name(), trigger)\n"
                             "print(','.join(sorted(x.get_function_name() for x in functions)))"
                         )],
-                        cwd=root, env={**os.environ, "ISSUELENS_BRIDGE_ROLE": role},
+                        cwd=root, env=environment,
                         capture_output=True, text=True, timeout=30,
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout.strip(), expected)
-            (root / "repository_allowlist.json").unlink()
-            result = subprocess.run(
-                [sys.executable, "-c", "import function_app"], cwd=root,
-                env={**os.environ, "ISSUELENS_BRIDGE_ROLE": "ingress"},
-                capture_output=True, text=True, timeout=30,
-            )
-            self.assertNotEqual(result.returncode, 0)
-            self.assertIn("FileNotFoundError", result.stderr)
-            self.assertIn("repository_allowlist.json", result.stderr)
+            for value in (None, "", "{invalid"):
+                environment = {**os.environ, "ISSUELENS_BRIDGE_ROLE": "ingress"}
+                environment.pop("ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST", None)
+                environment["ISSUELENS_BRIDGE_REPOSITORY_ID"] = str(PILOT_REPOSITORY_ID)
+                if value is not None:
+                    environment["ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST"] = value
+                result = subprocess.run(
+                    [sys.executable, "-c", "import function_app"], cwd=root,
+                    env=environment,
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertNotEqual(result.returncode, 0)
 
 
 if __name__ == "__main__":

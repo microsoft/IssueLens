@@ -12,7 +12,6 @@ def build(output: Path) -> None:
     files = (
         source / "function_app.py", source / "bridge.py",
         source / "host.json", source / "requirements.txt",
-        source / "repository_allowlist.json",
         action / "issuelens_action.py", action / "stream_output.py",
     )
     with ZipFile(output, "x", ZIP_DEFLATED) as archive:

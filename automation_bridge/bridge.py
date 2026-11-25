@@ -42,46 +42,20 @@ class BusyError(Exception):
     """A different job still owns the target reservation."""
 
 
-def load_repository_allowlist(path: Path) -> dict:
-    policies = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=action.unique_object)
-    require(isinstance(policies, dict) and PILOT_REPOSITORY in policies, "Missing IssueLens allowlist entry")
-    ids = set()
-    names = set()
-    for repository, policy in policies.items():
-        require(re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository)
-                and repository.casefold() not in names
-                and isinstance(policy, dict) and set(policy) == {"id", "branch", "workflows"}
-                and type(policy["id"]) is int and policy["id"] > 0 and policy["id"] not in ids
-                and isinstance(policy["branch"], str)
-                and re.fullmatch(r"[A-Za-z0-9_-]+", policy["branch"])
-                and isinstance(policy["workflows"], dict) and policy["workflows"],
-                "Invalid bridge repository allowlist")
-        require(repository != PILOT_REPOSITORY or policy["branch"] == PILOT_BRANCH,
-                "IssueLens must retain its existing bridge branch")
-        ids.add(policy["id"])
-        names.add(repository.casefold())
-        for path, workflow in policy["workflows"].items():
-            require(re.fullmatch(r"\.github/workflows/[A-Za-z0-9_.-]+\.ya?ml", path)
-                    and isinstance(workflow, dict) and set(workflow) == {"kind", "events"}
-                    and workflow["kind"] in ("issue-loop", "team-memory")
-                    and isinstance(workflow["events"], list) and workflow["events"]
-                    and all(isinstance(event, str) for event in workflow["events"]),
-                    "Invalid bridge workflow allowlist")
-            events = set(workflow["events"])
-            allowed_events = {"workflow_dispatch"}
-            if repository == PILOT_REPOSITORY and workflow["kind"] == "issue-loop":
-                allowed_events.update({"issues", "issue_comment"})
-            require(len(events) == len(workflow["events"]) and events <= allowed_events
-                    and (repository == PILOT_REPOSITORY or workflow["kind"] == "issue-loop"),
-                    "Invalid bridge workflow scope")
-    return policies
+def load_repository_allowlist(value: str, pilot_repository_id: int) -> frozenset[int]:
+    require(isinstance(value, str) and 0 < len(value.encode("utf-8")) <= 32 * 1024,
+            "Invalid bridge repository allowlist size")
+    ids = json.loads(value, object_pairs_hook=action.unique_object)
+    require(isinstance(ids, list) and ids
+            and all(type(identifier) is int and identifier > 0 for identifier in ids)
+            and len(set(ids)) == len(ids)
+            and type(pilot_repository_id) is int and pilot_repository_id in ids,
+            "Invalid bridge repository ID allowlist")
+    return frozenset(ids)
 
 
-_REPOSITORY_ALLOWLIST = load_repository_allowlist(Path(__file__).with_name("repository_allowlist.json"))
-
-
-def workflow_claims(token: str, audience: str, repository_id: int) -> dict:
-    require(type(repository_id) is int and repository_id == _REPOSITORY_ALLOWLIST[PILOT_REPOSITORY]["id"],
+def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowlist: frozenset[int]) -> dict:
+    require(type(pilot_repository_id) is int and pilot_repository_id in allowlist,
             "Configured IssueLens repository ID does not match the bridge allowlist")
     require(len(token) <= 16 * 1024, "Invalid workflow token size")
     key = KEYS.get_signing_key_from_jwt(token)
@@ -92,36 +66,69 @@ def workflow_claims(token: str, audience: str, repository_id: int) -> dict:
             "ref", "workflow_ref", "workflow_sha", "event_name", "run_id", "run_attempt", "actor",
         ], "strict_aud": True},
     )
-    require(isinstance(claims["repository"], str), "Invalid workflow repository")
-    policy = _REPOSITORY_ALLOWLIST.get(claims["repository"])
-    require(policy is not None
-            and claims["repository_id"] == str(policy["id"])
+    require(isinstance(claims["repository"], str)
+            and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", claims["repository"])
+            and isinstance(claims["repository_id"], str)
+            and claims["repository_id"].isdecimal()
+            and int(claims["repository_id"]) in allowlist
+            and (claims["repository"] != PILOT_REPOSITORY
+                 or int(claims["repository_id"]) == pilot_repository_id)
             and claims["repository_visibility"] == "public"
-            and claims["ref"] == f"refs/heads/{policy['branch']}"
+            and isinstance(claims["ref"], str) and claims["ref"].startswith("refs/heads/")
             and claims.get("runner_environment") == "github-hosted",
             "Workflow is not in the IssueLens pilot scope")
     if "ref_protected" in claims:
         protected = claims["ref_protected"]
         require(protected is True or protected == "true", "Workflow ref was not protected")
-    for path, workflow in policy["workflows"].items():
-        if claims["workflow_ref"] == workflow_ref(path, claims["repository"], policy["branch"]):
-            require(claims["event_name"] in workflow["events"], "Unsupported workflow event")
-            return {
-                **claims, "kind": workflow["kind"], "repository_id": policy["id"],
-                "run_id": action.positive(claims["run_id"]), "run_attempt": action.positive(claims["run_attempt"]),
-                "workflow_sha": action.full_sha(claims["workflow_sha"]),
-            }
-    raise ValueError("Workflow is not enabled for this bridge")
+    if claims["repository"] == PILOT_REPOSITORY:
+        if claims["workflow_ref"] == workflow_ref(".github/workflows/issue-triage.yml"):
+            require(claims["event_name"] in {"issues", "issue_comment", "workflow_dispatch"},
+                    "Unsupported workflow event")
+        elif claims["workflow_ref"] == workflow_ref(action.COORDINATOR_WORKFLOW):
+            require(claims["event_name"] == "workflow_dispatch", "Unsupported workflow event")
+            return _validated_claims(claims, "team-memory", int(claims["repository_id"]))
+        else:
+            raise ValueError("Workflow is not enabled for this bridge")
+    else:
+        prefix = f"{claims['repository']}/.github/workflows/"
+        suffix = "@" + claims["ref"]
+        require(claims["event_name"] == "workflow_dispatch"
+                and isinstance(claims["workflow_ref"], str)
+                and claims["workflow_ref"].startswith(prefix)
+                and claims["workflow_ref"].endswith(suffix)
+                and re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", claims["workflow_ref"][len(prefix):-len(suffix)]),
+                "Only manual workflow dispatches from enrolled repositories are allowed")
+    return _validated_claims(claims, "issue-loop", int(claims["repository_id"]))
+
+
+def _validated_claims(claims: dict, kind: str, repository_id: int) -> dict:
+    return {
+        **claims, "kind": kind, "repository_id": repository_id,
+        "run_id": action.positive(claims["run_id"]), "run_attempt": action.positive(claims["run_attempt"]),
+        "workflow_sha": action.full_sha(claims["workflow_sha"]),
+    }
 
 
 def workflow_ref(path: str, repository: str = PILOT_REPOSITORY, branch: str = PILOT_BRANCH) -> str:
     return f"{repository}/{path}@refs/heads/{branch}"
 
 
-def pilot_branch_protected(claims: dict) -> bool:
+def default_branch_protected(claims: dict) -> bool:
     repository = claims["repository"]
-    branch_name = claims["ref"].removeprefix("refs/heads/")
-    branch = action.github_read(f"/repos/{repository}/branches/{branch_name}", token="", timeout=5)
+    project = action.github_read(f"/repos/{repository}", token="", timeout=5)
+    branch_name = project.get("default_branch")
+    require(isinstance(project.get("full_name"), str) and type(project.get("id")) is int
+            and type(project.get("private")) is bool and isinstance(project.get("visibility"), str)
+            and isinstance(branch_name, str) and branch_name,
+            "Invalid GitHub repository response")
+    if (project["full_name"].casefold() != repository.casefold()
+            or project["id"] != claims["repository_id"] or project["private"]
+            or project["visibility"] != "public" or claims["ref"] != f"refs/heads/{branch_name}"):
+        return False
+    if "ref_protected" in claims:
+        return True
+    branch_path = urllib.parse.quote(branch_name, safe="")
+    branch = action.github_read(f"/repos/{repository}/branches/{branch_path}", token="", timeout=5)
     require(branch.get("name") == branch_name and isinstance(branch.get("protected"), bool),
             "Invalid GitHub branch protection response")
     return branch["protected"]
