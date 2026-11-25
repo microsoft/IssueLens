@@ -318,11 +318,13 @@ The agent is driven by a workflow in the target repo
    Azure Function bridge with a bridge-audience GitHub Actions token. The
    Function verifies GitHub identity without exchanging the token for Entra
    credentials. No App webhook or corporate FIC is used.
-   The bridge's reviewed ingress Function App allowlist setting additionally
-   admits `microsoft/vscode-java-pack` for manual issue-loop dispatch from any
-   workflow on its protected default branch; it grants no automatic events or
-   team-memory. `automation_bridge/repository_allowlist.example.json` documents
-   the initial setting value; it is not loaded from the Function ZIP.
+   The ingress allowlist enrolls numeric repository IDs for manual and
+   automatic issue-loop jobs from their protected default branch, and
+   same-repository team-memory via the fixed coordinator on protected default
+   `main`. Source, coordinator and validated wiki destination must match.
+   IssueLens keeps its stricter built-in workflow rules. The worker revalidates
+   created comments using the repository stored at admission. The ZIP does not
+   load the example allowlist or enroll Java Pack in code.
 2. The worker uses its managed identity to POST the existing `{ input }`
    payload to the deployed agent's `/invocations` API. Bridge validation and
    queueing stay outside the hosted agent. The agent remains independently

@@ -27,6 +27,13 @@ _spec.loader.exec_module(action)
 
 PILOT_REPOSITORY = action.COORDINATOR_REPOSITORY
 PILOT_BRANCH = "main"
+WORKFLOW_DIRECTORY = ".github/workflows/"
+WORKFLOW_BASENAME = re.compile(r"[A-Za-z0-9_.-]+\.ya?ml")
+ISSUE_EVENT_ACTIONS = {
+    "issues": ("opened", "reopened"),
+    "issue_comment": ("created", "edited"),
+    "workflow_dispatch": ("workflow_dispatch",),
+}
 GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
 KEYS = jwt.PyJWKClient(GITHUB_ISSUER + "/.well-known/jwks", timeout=5)
 JOB_ID = re.compile(r"[0-9a-f]{64}")
@@ -66,41 +73,46 @@ def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowli
             "ref", "workflow_ref", "workflow_sha", "event_name", "run_id", "run_attempt", "actor",
         ], "strict_aud": True},
     )
-    require(isinstance(claims["repository"], str)
-            and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", claims["repository"])
+    repository = claims["repository"]
+    require(isinstance(repository, str) and re.fullmatch(r"[A-Za-z0-9-]+/[A-Za-z0-9_.-]+", repository)
             and isinstance(claims["repository_id"], str)
-            and claims["repository_id"].isdecimal()
-            and int(claims["repository_id"]) in allowlist
-            and (int(claims["repository_id"]) != pilot_repository_id
-                 or claims["repository"] == PILOT_REPOSITORY)
-            and (claims["repository"] != PILOT_REPOSITORY
-                 or int(claims["repository_id"]) == pilot_repository_id)
+            and re.fullmatch(r"[1-9][0-9]*", claims["repository_id"])
+            and isinstance(claims["event_name"], str)
             and claims["repository_visibility"] == "public"
             and isinstance(claims["ref"], str) and claims["ref"].startswith("refs/heads/")
             and claims.get("runner_environment") == "github-hosted",
             "Workflow is not in the IssueLens pilot scope")
+    repository_id = int(claims["repository_id"])
+    require(repository_id in allowlist
+            and (repository_id != pilot_repository_id or repository == PILOT_REPOSITORY)
+            and (repository_id == pilot_repository_id or repository.casefold() != PILOT_REPOSITORY.casefold()),
+            "Workflow is not in the IssueLens pilot scope")
     if "ref_protected" in claims:
         protected = claims["ref_protected"]
         require(protected is True or protected == "true", "Workflow ref was not protected")
-    if claims["repository"] == PILOT_REPOSITORY:
+    if repository_id == pilot_repository_id:
         if claims["workflow_ref"] == workflow_ref(".github/workflows/issue-triage.yml"):
-            require(claims["event_name"] in {"issues", "issue_comment", "workflow_dispatch"},
-                    "Unsupported workflow event")
+            require(claims["event_name"] in ISSUE_EVENT_ACTIONS, "Unsupported workflow event")
         elif claims["workflow_ref"] == workflow_ref(action.COORDINATOR_WORKFLOW):
             require(claims["event_name"] == "workflow_dispatch", "Unsupported workflow event")
-            return _validated_claims(claims, "team-memory", int(claims["repository_id"]))
+            return _validated_claims(claims, "team-memory", repository_id)
         else:
             raise ValueError("Workflow is not enabled for this bridge")
     else:
-        prefix = f"{claims['repository']}/.github/workflows/"
+        prefix = f"{repository}/{WORKFLOW_DIRECTORY}"
         suffix = "@" + claims["ref"]
-        require(claims["event_name"] == "workflow_dispatch"
-                and isinstance(claims["workflow_ref"], str)
-                and claims["workflow_ref"].startswith(prefix)
-                and claims["workflow_ref"].endswith(suffix)
-                and re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", claims["workflow_ref"][len(prefix):-len(suffix)]),
-                "Only manual workflow dispatches from enrolled repositories are allowed")
-    return _validated_claims(claims, "issue-loop", int(claims["repository_id"]))
+        workflow = claims["workflow_ref"]
+        require(isinstance(workflow, str) and workflow.startswith(prefix) and workflow.endswith(suffix),
+                "Workflow repository or ref does not match the signed claims")
+        basename = workflow[len(prefix):-len(suffix)]
+        require(WORKFLOW_BASENAME.fullmatch(basename), "Invalid issue-loop workflow path")
+        path = WORKFLOW_DIRECTORY + basename
+        if path.casefold() == action.COORDINATOR_WORKFLOW.casefold():
+            require(workflow == workflow_ref(action.COORDINATOR_WORKFLOW, repository)
+                    and claims["event_name"] == "workflow_dispatch", "Unsupported team-memory workflow or event")
+            return _validated_claims(claims, "team-memory", repository_id)
+        require(claims["event_name"] in ISSUE_EVENT_ACTIONS, "Unsupported workflow event")
+    return _validated_claims(claims, "issue-loop", repository_id)
 
 
 def _validated_claims(claims: dict, kind: str, repository_id: int) -> dict:
@@ -160,11 +172,8 @@ def _positive_int(value):
 def _issue_job(metadata: dict, claims: dict) -> str:
     event = claims["event_name"]
     operation = metadata.get("event_action")
-    require(metadata.get("event_name") == event and operation in {
-        "issues": ("opened", "reopened"),
-        "issue_comment": ("created", "edited"),
-        "workflow_dispatch": ("workflow_dispatch",),
-    }[event], "Issue-event identity mismatch")
+    require(metadata.get("event_name") == event and operation in ISSUE_EVENT_ACTIONS[event],
+            "Issue-event identity mismatch")
     comment_event = event == "issue_comment"
     created = comment_event and operation == "created"
     require(set(metadata) == {
@@ -197,21 +206,22 @@ def _issue_job(metadata: dict, claims: dict) -> str:
 _MERGE_FIELDS = {"pull_number", "merge_commit_sha", "merged_at", "source_identity"}
 
 
-def _validate_merge(merge: dict):
+def _validate_merge(merge: dict, repository: str):
     number = _positive_int(merge.get("pull_number"))
     sha = action.full_sha(merge.get("merge_commit_sha"))
     merged_at = merge.get("merged_at")
-    require(merge.get("source_identity") == f"{PILOT_REPOSITORY}#{number}:{sha}"
+    require(merge.get("source_identity") == f"{repository}#{number}:{sha}"
             and isinstance(merged_at, str) and re.fullmatch(r"[0-9T:Z.+-]{1,64}", merged_at),
             "Invalid merged PR identity")
     return number
 
 
 def _memory_job(metadata: dict, claims: dict) -> str:
+    repository = claims["repository"]
     require(metadata.get("repository_id") == claims["repository_id"]
             and metadata.get("base_ref") == PILOT_BRANCH
-            and metadata.get("coordinator_repository") == PILOT_REPOSITORY
-            and metadata.get("required_wiki_repository") == PILOT_REPOSITORY
+            and metadata.get("coordinator_repository") == repository
+            and metadata.get("required_wiki_repository") == repository
             and metadata.get("coordinator_workflow_ref") == claims["workflow_ref"]
             and metadata.get("coordinator_workflow_sha") == claims["workflow_sha"]
             and metadata.get("coordinator_run_id") == claims["run_id"]
@@ -233,9 +243,9 @@ def _memory_job(metadata: dict, claims: dict) -> str:
         before, after = (action.full_sha(metadata[field]) for field in ("push_before", "push_after"))
         action.full_sha(metadata["source_tip_sha"])
         require(before != after and metadata["range_origin"] == "authorized-reconciliation"
-                and metadata["source_identity"] == f"{PILOT_REPOSITORY}@{before}..{after}"
+                and metadata["source_identity"] == f"{repository}@{before}..{after}"
                 and metadata["event_action"] == "push" and metadata["workflow_sha"] == after
-                and metadata["workflow_ref"] == workflow_ref(action.DISPATCH_WORKFLOW)
+                and metadata["workflow_ref"] == workflow_ref(action.DISPATCH_WORKFLOW, repository)
                 and _positive_int(metadata["commit_count"]) <= action.MAX_PUSH_COMMITS,
                 "Invalid reconciliation range metadata")
         _positive_int(metadata["run_id"])
@@ -244,7 +254,7 @@ def _memory_job(metadata: dict, claims: dict) -> str:
         require(isinstance(pulls, list) and 0 < len(pulls) <= action.MAX_BATCH_PRS
                 and all(isinstance(pull, dict) and set(pull) == _MERGE_FIELDS for pull in pulls),
                 "Invalid reconciliation PR inventory")
-        require(len({_validate_merge(pull) for pull in pulls}) == len(pulls), "Duplicate merged PRs")
+        require(len({_validate_merge(pull, repository) for pull in pulls}) == len(pulls), "Duplicate merged PRs")
     else:
         require(set(metadata) == fields | _MERGE_FIELDS and metadata.get("event_name") == "workflow_dispatch"
                 and metadata.get("event_action") == "workflow_dispatch"
@@ -252,7 +262,7 @@ def _memory_job(metadata: dict, claims: dict) -> str:
                 and all(metadata.get(field) == claims[field] for field in (
                     "workflow_ref", "workflow_sha", "run_id", "run_attempt",
                 )), "Invalid manual team-memory metadata")
-        _validate_merge(metadata)
+        _validate_merge(metadata, repository)
     return "wiki"
 
 
@@ -275,13 +285,13 @@ class JobStore:
         except ResourceNotFoundError:
             return None
 
-    def reserve(self, identifier: str, target: str, payload: bytes):
+    def reserve(self, identifier: str, target: str, payload: bytes, *, repository: str):
         existing = self.get(identifier)
         if existing is not None:
             return existing
         job = {
             "PartitionKey": PARTITION, "RowKey": identifier, "target": target,
-            "created": int(time.time()), "state": QUEUED, "payload": payload,
+            "created": int(time.time()), "state": QUEUED, "payload": payload, "repository": repository,
         }
         try:
             self.table.submit_transaction([
@@ -333,17 +343,17 @@ def receipt(job) -> dict:
     return value
 
 
-def _verify_created_comment(metadata: dict, digest: str) -> None:
+def _verify_created_comment(repository: str, metadata: dict, digest: str) -> None:
     identifier = _positive_int(metadata["comment_id"])
     number = _positive_int(metadata["issue_number"])
-    comment = action.github_read(f"/repos/{PILOT_REPOSITORY}/issues/comments/{identifier}", token="")
+    comment = action.github_read(f"/repos/{repository}/issues/comments/{identifier}", token="")
     issue_url = comment.get("issue_url")
     created = comment.get("created_at")
     body = comment.get("body")
     require(
         comment.get("id") == identifier
         and isinstance(issue_url, str)
-        and issue_url.casefold() == f"https://api.github.com/repos/{PILOT_REPOSITORY}/issues/{number}".casefold()
+        and issue_url.casefold() == f"https://api.github.com/repos/{repository}/issues/{number}".casefold()
         and isinstance(created, str) and created and created == comment.get("updated_at")
         and isinstance(body, str) and hashlib.sha256(body.encode("utf-8")).hexdigest() == digest,
         "GitHub comment no longer matches its created revision",
@@ -363,11 +373,20 @@ class FoundryWorker:
     def prepare(self, job) -> urllib.request.Request:
         payload = json.loads(job["payload"])
         kind, metadata = payload["request_type"], payload["metadata"]
+        repository = job.get("repository")
+        if "repository" in job:
+            require(repository == metadata.get("repository"), "Bridge job repository mismatch")
         if kind == "issue-loop":
             digest = metadata.pop("comment_sha256", None)
             if metadata["comment_added"]:
                 require(isinstance(digest, str) and JOB_ID.fullmatch(digest), "Created comment requires its revision digest")
-                _verify_created_comment(metadata, digest)
+                if repository is None:
+                    # Only IssueLens could enqueue created comments before the repository field existed.
+                    require(metadata.get("repository") == PILOT_REPOSITORY
+                            and job.get("target") == f"issue-{_positive_int(metadata.get('issue_number'))}",
+                            "Created comment requires an admitted repository")
+                    repository = PILOT_REPOSITORY
+                _verify_created_comment(repository, metadata, digest)
             invocation = action.build_issue_loop_request(metadata)
         elif kind == "team-memory":
             invocation = action.build_team_memory_request(metadata)
