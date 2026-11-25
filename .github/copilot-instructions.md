@@ -319,9 +319,13 @@ The agent is driven by a workflow in the target repo
    Function verifies GitHub identity without exchanging the token for Entra
    credentials. No App webhook or corporate FIC is used.
    The bridge's reviewed ingress Function App allowlist setting additionally
-   admits `microsoft/vscode-java-pack` for manual issue-loop dispatch from any
-   workflow on its protected default branch; it grants no automatic events or
-   team-memory. `automation_bridge/repository_allowlist.example.json` documents
+   admits `microsoft/vscode-java-pack` issue-loop events only from its exact
+   `.github/workflows/issueLens-run.yml` workflow and same-repository team-memory
+   only from `.github/workflows/team-memory-coordinator.yml` on protected `main`.
+   Java Pack source and validated wiki destination must both be that repository;
+   its wiki reservation is separate from IssueLens. The pinned action requires
+   explicit `source-repository: microsoft/vscode-java-pack` for manual requests.
+   `automation_bridge/repository_allowlist.example.json` documents
    the initial setting value; it is not loaded from the Function ZIP.
 2. The worker uses its managed identity to POST the existing `{ input }`
    payload to the deployed agent's `/invocations` API. Bridge validation and

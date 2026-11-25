@@ -1054,9 +1054,8 @@ routing and command validation; no new permanent agent contract is introduced.
 ### IssueLens Function bridge pilot
 
 Configure the ingress Function's reviewed repository allowlist to admit
-`microsoft/IssueLens` and, for the first Java Pack pilot, only manual issue-loop
-dispatches from `microsoft/vscode-java-pack`. No other Java Pack events or
-team-memory jobs should be admitted. Keep the GitHub App webhook unchanged. Obtain
+`microsoft/IssueLens` and `microsoft/vscode-java-pack` issue-loop and
+same-repository team-memory jobs. Keep the GitHub App webhook unchanged. Obtain
 approval for the GitHub-facing endpoint, direct trust of the GitHub Actions
 issuer, network access, and the Azure release path before provisioning or
 enabling anything. The Function validates a GitHub token addressed to itself;
@@ -1076,7 +1075,7 @@ from the application job table.
 | Target | Configuration and access |
 | --- | --- |
 | Both Function apps | `ISSUELENS_BRIDGE_TABLE_ACCOUNT` points to the account containing precreated `IssueLensBridgeJobs`. Both need Table data read/write on that table. `ISSUELENS_BRIDGE_QUEUE` and `ISSUELENS_BRIDGE_SERVICE_BUS__fullyQualifiedNamespace` identify the same dedicated Service Bus queue. Use a queue with duplicate detection; reservations remain authoritative even outside the broker window. |
-| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the existing IssueLens numeric GitHub repository ID (`1303440932`), `ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST` set to the reviewed JSON ID array, and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. The IssueLens ID must be in the allowlist or ingress fails closed. Other enrolled IDs come only from the trusted setting, not a workflow input or a replacement for the existing ID setting. The receiver verifies signature, audience, issuer, public repository identity, GitHub-hosted runner, current default branch and protection; non-IssueLens repositories can submit manual issue-loop jobs from any workflow on that branch. IssueLens retains its exact workflow/event restrictions. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
+| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the existing IssueLens numeric GitHub repository ID (`1303440932`), `ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST` set to the reviewed JSON ID array, and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. The IssueLens ID must be in the allowlist or ingress fails closed. Only IssueLens and Java Pack IDs are supported. The receiver verifies signature, audience, issuer, public repository identity, GitHub-hosted runner, current default branch and protection; Java Pack is restricted to its exact reviewed workflows on `main`. IssueLens retains its exact workflow/event restrictions. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
 | Worker | `ISSUELENS_BRIDGE_ROLE=worker`, `ISSUELENS_BRIDGE_FOUNDRY_URL` set to the existing deployed agent's full invocations URL (including API version). Grant queue **Data Receiver** and the narrowest applicable Foundry invocation access to the worker managed identity. It requests an Entra token for `https://ai.azure.com/.default`. No repository write, deployment, signing key, or GitHub App key access is needed. |
 
 Keep `main` protected. If the signed token supplies `ref_protected`, the
@@ -1091,43 +1090,54 @@ Use `automation_bridge/repository_allowlist.example.json` as the initial
 repository IDs. The existing `ISSUELENS_BRIDGE_REPOSITORY_ID` setting must
 remain in that array and continues to identify IssueLens. The setting is
 limited to 32 KiB; missing IssueLens enrollment, malformed JSON, duplicate or
-invalid IDs, and missing settings fail closed.
+invalid IDs, unreviewed IDs, and missing settings fail closed.
 
-For enrolled non-IssueLens repositories, the bridge accepts only manual
-`workflow_dispatch` issue-loop jobs from GitHub-hosted runners on the current
-protected default branch. The bridge checks repository ID, public visibility,
-canonical name, current default branch, and branch protection using GitHub
-metadata; it accepts no dispatch-supplied repository list or job type. The
-existing IssueLens issue workflow keeps its event behavior, and team-memory
-remains limited to the exact IssueLens coordinator workflow.
+For enrolled Java Pack, the bridge accepts `issues`, `issue_comment`, and
+`workflow_dispatch` issue-loop events only from `.github/workflows/issueLens-run.yml`
+on protected `main`. The same issue action and human-comment restrictions apply
+as for IssueLens. The bridge checks repository ID, public visibility, canonical
+name, current default branch, and branch protection using GitHub metadata; it
+accepts no dispatch-supplied repository list or arbitrary job type. The
+existing IssueLens issue workflow keeps its event behavior.
+
+Java Pack team-memory requires a GitHub-hosted `workflow_dispatch` from
+`.github/workflows/team-memory-coordinator.yml` on protected `main`. The
+coordinator, source, and validated wiki destination must all be
+`microsoft/vscode-java-pack`; cross-repository sources are not admitted.
+Manual PR and coordinated push-range requests share the Java Pack wiki
+reservation, separate from IssueLens. The pinned action
+`b88dadd40754d640cbb82f4d9a5e9d36e8386981` requires an explicit
+`source-repository: microsoft/vscode-java-pack` even for manual PR requests
+to generate the coordinated envelope. Source run metadata cannot prove the
+original push boundary or flags. A consumer must independently configure its
+own coordinator queue, source read credentials, validated wiki policy, and
+App access; bridge admission does not grant these permissions or guarantee
+publication.
 
 Restrict permission to modify Function App settings to authorized operators:
 the allowlist controls admission and must never come from workflow or dispatch
 inputs. Review each repository's public identity, default branch protection,
-workflow code, and App permissions before adding its ID. Azure applies app
-setting changes by restarting the Function App; onboarding an ID needs no ZIP
-redeployment. Removing an entry also prevents its existing runs from polling
+workflow code, and App permissions before adding its ID. Only the two reviewed
+IDs are supported; onboarding another repository requires a code change. Azure
+applies app setting changes by restarting the Function App. Removing an entry
+also prevents its existing runs from polling
 their receipts, so reconcile in-flight jobs before removal. Configuration and
 release approval remain separate from this code change.
 
 Java Pack enrollment requires a separately approved bridge release and caller
 workflow change. The allowlist admits public `microsoft/vscode-java-pack`
-(repository ID `104967329`) for manual issue-loop dispatch from any GitHub-hosted
-workflow on its protected current default branch. Its existing workflow is
-disabled and currently uses the legacy direct transport. Update and enable that
-workflow only after approval, restrict the pilot to manual dispatch on the
-protected default branch, provide
+(repository ID `104967329`) only from its exact reviewed workflows on protected
+`main`. Update and enable those workflows only after approval, provide
 the approved `ISSUELENS_BRIDGE_URL` Actions secret, and use the composite action
 with `request-type: issue-loop`, `transport: bridge`, `issue-number`, and
-`bridge-url`. The job needs `contents: read`, `issues: read`, and
+`bridge-url`. The issue-loop job needs `issues: read` and
 `id-token: write`; manual dispatch preflight verifies the issue exists and is
 not a pull request. Confirm the GitHub App has installation access and the
 necessary issue permissions for any authorized writes. Use privacy-appropriate
 output settings and a controlled issue; this is a write-capable invocation.
-The existing Java Pack pin `c431d42dddf4e6bf20329b0ac96dbd8a4bf04006`
-does not support bridge inputs; the already merged IssueLens action revision
-`b88dadd40754d640cbb82f4d9a5e9d36e8386981` does. Review and pin an approved
-full revision before enabling. The bridge trusts the signed workflow identity
+The merged IssueLens action revision
+`b88dadd40754d640cbb82f4d9a5e9d36e8386981` supports these bridge inputs.
+Review and pin an approved full revision before enabling. The bridge trusts the signed workflow identity
 and its protected-branch code, not a separately attested payload or a pinned
 workflow SHA. Changes to this allowlist require authorized configuration
 review; workflow inputs cannot enroll repositories.

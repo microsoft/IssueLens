@@ -27,6 +27,9 @@ _spec.loader.exec_module(action)
 
 PILOT_REPOSITORY = action.COORDINATOR_REPOSITORY
 PILOT_BRANCH = "main"
+JAVA_REPOSITORY = "microsoft/vscode-java-pack"
+JAVA_REPOSITORY_ID = 104967329
+JAVA_WORKFLOW = ".github/workflows/issueLens-run.yml"
 GITHUB_ISSUER = "https://token.actions.githubusercontent.com"
 KEYS = jwt.PyJWKClient(GITHUB_ISSUER + "/.well-known/jwks", timeout=5)
 JOB_ID = re.compile(r"[0-9a-f]{64}")
@@ -49,7 +52,8 @@ def load_repository_allowlist(value: str, pilot_repository_id: int) -> frozenset
     require(isinstance(ids, list) and ids
             and all(type(identifier) is int and identifier > 0 for identifier in ids)
             and len(set(ids)) == len(ids)
-            and type(pilot_repository_id) is int and pilot_repository_id in ids,
+            and type(pilot_repository_id) is int and pilot_repository_id != JAVA_REPOSITORY_ID
+            and pilot_repository_id in ids and set(ids) <= {pilot_repository_id, JAVA_REPOSITORY_ID},
             "Invalid bridge repository ID allowlist")
     return frozenset(ids)
 
@@ -75,6 +79,8 @@ def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowli
                  or claims["repository"] == PILOT_REPOSITORY)
             and (claims["repository"] != PILOT_REPOSITORY
                  or int(claims["repository_id"]) == pilot_repository_id)
+            and ((claims["repository"] == JAVA_REPOSITORY)
+                 == (int(claims["repository_id"]) == JAVA_REPOSITORY_ID))
             and claims["repository_visibility"] == "public"
             and isinstance(claims["ref"], str) and claims["ref"].startswith("refs/heads/")
             and claims.get("runner_environment") == "github-hosted",
@@ -92,14 +98,14 @@ def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowli
         else:
             raise ValueError("Workflow is not enabled for this bridge")
     else:
-        prefix = f"{claims['repository']}/.github/workflows/"
-        suffix = "@" + claims["ref"]
-        require(claims["event_name"] == "workflow_dispatch"
-                and isinstance(claims["workflow_ref"], str)
-                and claims["workflow_ref"].startswith(prefix)
-                and claims["workflow_ref"].endswith(suffix)
-                and re.fullmatch(r"[A-Za-z0-9_.-]+\.ya?ml", claims["workflow_ref"][len(prefix):-len(suffix)]),
-                "Only manual workflow dispatches from enrolled repositories are allowed")
+        require(claims["repository"] == JAVA_REPOSITORY and claims["ref"] == "refs/heads/main",
+                "Workflow is not enabled for this bridge")
+        if claims["workflow_ref"] == workflow_ref(action.COORDINATOR_WORKFLOW, JAVA_REPOSITORY):
+            require(claims["event_name"] == "workflow_dispatch", "Unsupported workflow event")
+            return _validated_claims(claims, "team-memory", int(claims["repository_id"]))
+        require(claims["workflow_ref"] == workflow_ref(JAVA_WORKFLOW, JAVA_REPOSITORY)
+                and claims["event_name"] in {"issues", "issue_comment", "workflow_dispatch"},
+                "Workflow is not enabled for this bridge")
     return _validated_claims(claims, "issue-loop", int(claims["repository_id"]))
 
 
@@ -124,6 +130,7 @@ def default_branch_protected(claims: dict) -> bool:
             and isinstance(branch_name, str) and branch_name,
             "Invalid GitHub repository response")
     if (project["full_name"].casefold() != repository.casefold()
+            or (repository == JAVA_REPOSITORY and project["full_name"] != JAVA_REPOSITORY)
             or project["id"] != claims["repository_id"] or project["private"]
             or project["visibility"] != "public" or claims["ref"] != f"refs/heads/{branch_name}"):
         return False
@@ -197,21 +204,22 @@ def _issue_job(metadata: dict, claims: dict) -> str:
 _MERGE_FIELDS = {"pull_number", "merge_commit_sha", "merged_at", "source_identity"}
 
 
-def _validate_merge(merge: dict):
+def _validate_merge(merge: dict, repository: str):
     number = _positive_int(merge.get("pull_number"))
     sha = action.full_sha(merge.get("merge_commit_sha"))
     merged_at = merge.get("merged_at")
-    require(merge.get("source_identity") == f"{PILOT_REPOSITORY}#{number}:{sha}"
+    require(merge.get("source_identity") == f"{repository}#{number}:{sha}"
             and isinstance(merged_at, str) and re.fullmatch(r"[0-9T:Z.+-]{1,64}", merged_at),
             "Invalid merged PR identity")
     return number
 
 
 def _memory_job(metadata: dict, claims: dict) -> str:
+    repository = claims["repository"]
     require(metadata.get("repository_id") == claims["repository_id"]
             and metadata.get("base_ref") == PILOT_BRANCH
-            and metadata.get("coordinator_repository") == PILOT_REPOSITORY
-            and metadata.get("required_wiki_repository") == PILOT_REPOSITORY
+            and metadata.get("coordinator_repository") == repository
+            and metadata.get("required_wiki_repository") == repository
             and metadata.get("coordinator_workflow_ref") == claims["workflow_ref"]
             and metadata.get("coordinator_workflow_sha") == claims["workflow_sha"]
             and metadata.get("coordinator_run_id") == claims["run_id"]
@@ -233,9 +241,9 @@ def _memory_job(metadata: dict, claims: dict) -> str:
         before, after = (action.full_sha(metadata[field]) for field in ("push_before", "push_after"))
         action.full_sha(metadata["source_tip_sha"])
         require(before != after and metadata["range_origin"] == "authorized-reconciliation"
-                and metadata["source_identity"] == f"{PILOT_REPOSITORY}@{before}..{after}"
+                and metadata["source_identity"] == f"{repository}@{before}..{after}"
                 and metadata["event_action"] == "push" and metadata["workflow_sha"] == after
-                and metadata["workflow_ref"] == workflow_ref(action.DISPATCH_WORKFLOW)
+                and metadata["workflow_ref"] == workflow_ref(action.DISPATCH_WORKFLOW, repository)
                 and _positive_int(metadata["commit_count"]) <= action.MAX_PUSH_COMMITS,
                 "Invalid reconciliation range metadata")
         _positive_int(metadata["run_id"])
@@ -244,7 +252,7 @@ def _memory_job(metadata: dict, claims: dict) -> str:
         require(isinstance(pulls, list) and 0 < len(pulls) <= action.MAX_BATCH_PRS
                 and all(isinstance(pull, dict) and set(pull) == _MERGE_FIELDS for pull in pulls),
                 "Invalid reconciliation PR inventory")
-        require(len({_validate_merge(pull) for pull in pulls}) == len(pulls), "Duplicate merged PRs")
+        require(len({_validate_merge(pull, repository) for pull in pulls}) == len(pulls), "Duplicate merged PRs")
     else:
         require(set(metadata) == fields | _MERGE_FIELDS and metadata.get("event_name") == "workflow_dispatch"
                 and metadata.get("event_action") == "workflow_dispatch"
@@ -252,7 +260,7 @@ def _memory_job(metadata: dict, claims: dict) -> str:
                 and all(metadata.get(field) == claims[field] for field in (
                     "workflow_ref", "workflow_sha", "run_id", "run_attempt",
                 )), "Invalid manual team-memory metadata")
-        _validate_merge(metadata)
+        _validate_merge(metadata, repository)
     return "wiki"
 
 
@@ -334,16 +342,18 @@ def receipt(job) -> dict:
 
 
 def _verify_created_comment(metadata: dict, digest: str) -> None:
+    repository = metadata["repository"]
+    require(repository in {PILOT_REPOSITORY, JAVA_REPOSITORY}, "Invalid comment repository")
     identifier = _positive_int(metadata["comment_id"])
     number = _positive_int(metadata["issue_number"])
-    comment = action.github_read(f"/repos/{PILOT_REPOSITORY}/issues/comments/{identifier}", token="")
+    comment = action.github_read(f"/repos/{repository}/issues/comments/{identifier}", token="")
     issue_url = comment.get("issue_url")
     created = comment.get("created_at")
     body = comment.get("body")
     require(
         comment.get("id") == identifier
         and isinstance(issue_url, str)
-        and issue_url.casefold() == f"https://api.github.com/repos/{PILOT_REPOSITORY}/issues/{number}".casefold()
+        and issue_url.casefold() == f"https://api.github.com/repos/{repository}/issues/{number}".casefold()
         and isinstance(created, str) and created and created == comment.get("updated_at")
         and isinstance(body, str) and hashlib.sha256(body.encode("utf-8")).hexdigest() == digest,
         "GitHub comment no longer matches its created revision",
