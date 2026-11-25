@@ -86,7 +86,7 @@ if role == "ingress":
             return respond({"error": "invalid_job"}, 400)
         if "ref_protected" not in claims:
             try:
-                protected = bridge.pilot_branch_protected()
+                protected = bridge.pilot_branch_protected(claims)
             except (OSError, http.client.HTTPException, ValueError):
                 logger.warning("GitHub branch protection unavailable")
                 return respond({"error": "branch_protection_unavailable"}, 503)

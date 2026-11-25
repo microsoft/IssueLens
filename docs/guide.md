@@ -1053,8 +1053,10 @@ routing and command validation; no new permanent agent contract is introduced.
 
 ### IssueLens Function bridge pilot
 
-The pilot is **only for `microsoft/IssueLens`**. Keep the GitHub App webhook
-unchanged. No Java workflow or other App installation participates. Obtain
+The bridge's reviewed `automation_bridge/repository_allowlist.json` admits
+`microsoft/IssueLens` and, for the first Java Pack pilot, only manual issue-loop
+dispatches from `microsoft/vscode-java-pack`. No other Java Pack events or
+team-memory jobs are admitted. Keep the GitHub App webhook unchanged. Obtain
 approval for the GitHub-facing endpoint, direct trust of the GitHub Actions
 issuer, network access, and the Azure release path before provisioning or
 enabling anything. The Function validates a GitHub token addressed to itself;
@@ -1064,16 +1066,17 @@ workflow revision is responsible for validating the event before submission.
 
 Build the Function source bundle from the reviewed bridge and action revision:
 `python -m automation_bridge.bundle <new-zip-path>`. The ZIP contains only the
-two Functions roles and the reused workflow helpers, with a separate dependency
-manifest. Publish it through an approved release path to **two** Function apps
-with distinct managed identities. Use a plan that supports a 40-minute function
+two Functions roles, the repository allowlist, and the reused workflow helpers,
+with a separate dependency manifest. A missing or invalid allowlist prevents
+the bundle from initializing. Publish it through an approved release path to
+**two** Function apps with distinct managed identities. Use a plan that supports a 40-minute function
 timeout for the worker. Use identity-backed Functions host storage separately
 from the application job table.
 
 | Target | Configuration and access |
 | --- | --- |
 | Both Function apps | `ISSUELENS_BRIDGE_TABLE_ACCOUNT` points to the account containing precreated `IssueLensBridgeJobs`. Both need Table data read/write on that table. `ISSUELENS_BRIDGE_QUEUE` and `ISSUELENS_BRIDGE_SERVICE_BUS__fullyQualifiedNamespace` identify the same dedicated Service Bus queue. Use a queue with duplicate detection; reservations remain authoritative even outside the broker window. |
-| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the enrolled numeric GitHub repository ID, and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. The receiver verifies signature, audience, issuer, expiry, public repository, `main` ref, and the two exact GitHub-hosted workflows and their event types. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
+| Ingress | `ISSUELENS_BRIDGE_ROLE=ingress`, `ISSUELENS_BRIDGE_REPOSITORY_ID` set to the existing IssueLens numeric GitHub repository ID (`1303440932`), and `ISSUELENS_BRIDGE_OIDC_AUDIENCE` set to the exact HTTPS `/api/issuelens/v1/jobs` URL on the approved `azurewebsites.net` endpoint. The IssueLens ID must match the manifest or ingress rejects requests. The Java Pack ID comes only from the reviewed manifest, not a workflow input or a replacement for this setting. The receiver verifies signature, audience, issuer, expiry, public repository, protected `main` ref, GitHub-hosted runner, and each exact workflow and event. Grant queue **Data Sender** only. Enforce HTTPS and set `FUNCTIONS_REQUEST_BODY_SIZE_LIMIT=32768` to cap requests before they reach Python. |
 | Worker | `ISSUELENS_BRIDGE_ROLE=worker`, `ISSUELENS_BRIDGE_FOUNDRY_URL` set to the existing deployed agent's full invocations URL (including API version). Grant queue **Data Receiver** and the narrowest applicable Foundry invocation access to the worker managed identity. It requests an Entra token for `https://ai.azure.com/.default`. No repository write, deployment, signing key, or GitHub App key access is needed. |
 
 Keep `main` protected. If the signed token supplies `ref_protected`, the
@@ -1082,6 +1085,28 @@ missing, the ingress must confirm current protection through GitHub's public
 branch API before reserving or queueing a job. An unprotected branch or an
 unavailable check stops admission. Status polls still require the owning
 workflow run's signed identity, but do not repeat the branch API check.
+
+Java Pack enrollment requires a separately approved bridge release and caller
+workflow change. The reviewed entry binds public `microsoft/vscode-java-pack`
+(repository ID `104967329`), `refs/heads/main`, and
+`.github/workflows/issueLens-run.yml` to `issue-loop` with
+`workflow_dispatch` only. Its existing workflow is disabled and currently uses
+the legacy direct transport. Update and enable that workflow only after approval,
+restrict the pilot to manual dispatch on the protected default branch, provide
+the approved `ISSUELENS_BRIDGE_URL` Actions secret, and use the composite action
+with `request-type: issue-loop`, `transport: bridge`, `issue-number`, and
+`bridge-url`. The job needs `contents: read`, `issues: read`, and
+`id-token: write`; manual dispatch preflight verifies the issue exists and is
+not a pull request. Confirm the GitHub App has installation access and the
+necessary issue permissions for any authorized writes. Use privacy-appropriate
+output settings and a controlled issue; this is a write-capable invocation.
+The existing Java Pack pin `c431d42dddf4e6bf20329b0ac96dbd8a4bf04006`
+does not support bridge inputs; the already merged IssueLens action revision
+`b88dadd40754d640cbb82f4d9a5e9d36e8386981` does. Review and pin an approved
+full revision before enabling. The bridge trusts the signed workflow identity
+and its protected-branch code, not a separately attested payload or a pinned
+workflow SHA. Changes to this allowlist require code review and a bridge
+release; workflow inputs cannot enroll repositories.
 
 The worker POSTs the standard `{ "input": "..." }` payload to the existing
 `/invocations` API. No replacement agent, host configuration change, or Foundry
@@ -1110,7 +1135,7 @@ point-in-time check does not lock the comment against later edits; the agent's
 existing authoritative comment, command, and replay checks remain in place.
 
 The coordinator waits on the job receipt; acknowledgement is not maintenance
-success. Reservations cover one issue or the one IssueLens wiki through
+success. Reservations cover one issue per repository or the one IssueLens wiki through
 completion, including when a GitHub waiter is canceled. The queue contains job
 IDs only. The table keeps pending job metadata and bounded terminal identifiers
 and outcomes, not raw agent text. A runner retry may recover the same queued

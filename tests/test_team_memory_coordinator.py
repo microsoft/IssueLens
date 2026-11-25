@@ -77,7 +77,7 @@ class TeamMemoryCoordinatorTests(unittest.TestCase):
 
     def coordinator_claims(self):
         return {
-            "kind": "team-memory", "repository_id": self.project["id"],
+            "kind": "team-memory", "repository": self.repository, "repository_id": self.project["id"],
             "actor": self.environment["GITHUB_ACTOR"],
             "workflow_ref": self.environment["GITHUB_WORKFLOW_REF"],
             "workflow_sha": self.environment["GITHUB_WORKFLOW_SHA"],
