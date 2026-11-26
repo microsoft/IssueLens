@@ -95,7 +95,7 @@ def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowli
             require(claims["event_name"] in ISSUE_EVENT_ACTIONS, "Unsupported workflow event")
         elif claims["workflow_ref"] == workflow_ref(action.COORDINATOR_WORKFLOW):
             require(claims["event_name"] == "workflow_dispatch", "Unsupported workflow event")
-            return _validated_claims(claims, "team-memory", repository_id)
+            return _validated_claims(claims, "team-memory", repository_id, pilot_repository_id, allowlist)
         else:
             raise ValueError("Workflow is not enabled for this bridge")
     else:
@@ -110,14 +110,18 @@ def workflow_claims(token: str, audience: str, pilot_repository_id: int, allowli
         if path.casefold() == action.COORDINATOR_WORKFLOW.casefold():
             require(workflow == workflow_ref(action.COORDINATOR_WORKFLOW, repository)
                     and claims["event_name"] == "workflow_dispatch", "Unsupported team-memory workflow or event")
-            return _validated_claims(claims, "team-memory", repository_id)
+            return _validated_claims(claims, "team-memory", repository_id, pilot_repository_id, allowlist)
         require(claims["event_name"] in ISSUE_EVENT_ACTIONS, "Unsupported workflow event")
-    return _validated_claims(claims, "issue-loop", repository_id)
+    return _validated_claims(claims, "issue-loop", repository_id, pilot_repository_id, allowlist)
 
 
-def _validated_claims(claims: dict, kind: str, repository_id: int) -> dict:
+def _validated_claims(
+    claims: dict, kind: str, repository_id: int,
+    pilot_repository_id: int, allowlist: frozenset[int],
+) -> dict:
     return {
         **claims, "kind": kind, "repository_id": repository_id,
+        "pilot_repository_id": pilot_repository_id, "allowlist": allowlist,
         "run_id": action.positive(claims["run_id"]), "run_attempt": action.positive(claims["run_attempt"]),
         "workflow_sha": action.full_sha(claims["workflow_sha"]),
     }
@@ -127,25 +131,57 @@ def workflow_ref(path: str, repository: str = PILOT_REPOSITORY, branch: str = PI
     return f"{repository}/{path}@refs/heads/{branch}"
 
 
-def default_branch_protected(claims: dict) -> bool:
-    repository = claims["repository"]
-    project = action.github_read(f"/repos/{repository}", token="", timeout=5)
-    branch_name = project.get("default_branch")
+def _github_public_read(path: str) -> dict | None:
+    try:
+        return action.github_read(path, token="", timeout=5)
+    except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
+        raise
+
+
+def _branch_protected(
+    repository: str, repository_id: int, branch_name: str, *, skip_branch_read: bool = False,
+) -> bool:
+    project = _github_public_read(f"/repos/{repository}")
+    if project is None:
+        return False
+    default_branch = project.get("default_branch")
     require(isinstance(project.get("full_name"), str) and type(project.get("id")) is int
             and type(project.get("private")) is bool and isinstance(project.get("visibility"), str)
-            and isinstance(branch_name, str) and branch_name,
+            and isinstance(default_branch, str) and default_branch,
             "Invalid GitHub repository response")
     if (project["full_name"].casefold() != repository.casefold()
-            or project["id"] != claims["repository_id"] or project["private"]
-            or project["visibility"] != "public" or claims["ref"] != f"refs/heads/{branch_name}"):
+            or project["id"] != repository_id or project["private"]
+            or project["visibility"] != "public" or default_branch != branch_name):
         return False
-    if "ref_protected" in claims:
+    if skip_branch_read:
         return True
-    branch_path = urllib.parse.quote(branch_name, safe="")
-    branch = action.github_read(f"/repos/{repository}/branches/{branch_path}", token="", timeout=5)
-    require(branch.get("name") == branch_name and isinstance(branch.get("protected"), bool),
+    branch_path = urllib.parse.quote(default_branch, safe="")
+    branch = _github_public_read(f"/repos/{repository}/branches/{branch_path}")
+    if branch is None:
+        return False
+    require(branch.get("name") == default_branch and isinstance(branch.get("protected"), bool),
             "Invalid GitHub branch protection response")
     return branch["protected"]
+
+
+def default_branch_protected(claims: dict, data: dict | None = None) -> bool:
+    ref = claims.get("ref", "")
+    if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+        return False
+    if not _branch_protected(
+        claims["repository"], claims["repository_id"], ref[len("refs/heads/"):],
+        skip_branch_read="ref_protected" in claims,
+    ):
+        return False
+    if data is not None and claims.get("kind") == "team-memory":
+        metadata = data["metadata"]
+        if metadata["repository_id"] != claims["repository_id"]:
+            return _branch_protected(
+                metadata["repository"], metadata["repository_id"], metadata["base_ref"],
+            )
+    return True
 
 
 def job_id(claims: dict) -> str:
@@ -169,7 +205,20 @@ def _positive_int(value):
     return action.positive(value)
 
 
+def _valid_branch_name(value) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(re.fullmatch(r"[A-Za-z0-9._/-]{1,255}", value))
+        and not value.startswith(("/", "."))
+        and not value.endswith(("/", ".", ".lock"))
+        and ".." not in value
+        and "//" not in value
+        and "/." not in value
+    )
+
+
 def _issue_job(metadata: dict, claims: dict) -> str:
+    require(metadata.get("repository") == claims["repository"], "Invalid workflow job")
     event = claims["event_name"]
     operation = metadata.get("event_action")
     require(metadata.get("event_name") == event and operation in ISSUE_EVENT_ACTIONS[event],
@@ -217,16 +266,46 @@ def _validate_merge(merge: dict, repository: str):
 
 
 def _memory_job(metadata: dict, claims: dict) -> str:
-    repository = claims["repository"]
-    require(metadata.get("repository_id") == claims["repository_id"]
-            and metadata.get("base_ref") == PILOT_BRANCH
-            and metadata.get("coordinator_repository") == repository
-            and metadata.get("required_wiki_repository") == repository
+    coordinator = claims["repository"]
+    coordinator_id = _positive_int(claims["repository_id"])
+    source_repository = metadata.get("repository")
+    source_repository_id = metadata.get("repository_id")
+    base_ref = metadata.get("base_ref")
+    require(metadata.get("coordinator_repository") == coordinator
+            and metadata.get("required_wiki_repository") == coordinator
             and metadata.get("coordinator_workflow_ref") == claims["workflow_ref"]
             and metadata.get("coordinator_workflow_sha") == claims["workflow_sha"]
             and metadata.get("coordinator_run_id") == claims["run_id"]
             and metadata.get("coordinator_run_attempt") == claims["run_attempt"],
             "Team-memory coordinator identity mismatch")
+    require(isinstance(source_repository, str)
+            and re.fullmatch(action.SOURCE_REPOSITORY_PATTERN, source_repository)
+            and ".." not in source_repository
+            and type(source_repository_id) is int and source_repository_id > 0
+            and _valid_branch_name(base_ref),
+            "Invalid team-memory source repository")
+    pilot_id = claims.get("pilot_repository_id")
+    if coordinator == PILOT_REPOSITORY or (type(pilot_id) is int and coordinator_id == pilot_id):
+        require(coordinator == PILOT_REPOSITORY
+                and source_repository == PILOT_REPOSITORY
+                and source_repository_id == coordinator_id
+                and base_ref == PILOT_BRANCH
+                and claims.get("ref", f"refs/heads/{PILOT_BRANCH}") == f"refs/heads/{PILOT_BRANCH}",
+                "Team-memory coordinator identity mismatch")
+    elif source_repository_id == coordinator_id:
+        require(source_repository == coordinator
+                and source_repository.casefold() != PILOT_REPOSITORY.casefold()
+                and claims.get("ref") == f"refs/heads/{base_ref}",
+                "Team-memory coordinator identity mismatch")
+    else:
+        allowlist = claims.get("allowlist")
+        require(isinstance(allowlist, frozenset)
+                and type(pilot_id) is int and pilot_id in allowlist
+                and coordinator_id in allowlist and coordinator_id != pilot_id
+                and source_repository_id in allowlist and source_repository_id != pilot_id
+                and source_repository.casefold() != PILOT_REPOSITORY.casefold()
+                and source_repository.casefold() != coordinator.casefold(),
+                "Team-memory source repository is not enrolled")
     fields = {
         "repository", "repository_id", "base_ref", "event_name", "event_action",
         "actor_login", "triggering_actor", "workflow_ref", "workflow_sha", "run_id", "run_attempt",
@@ -243,9 +322,9 @@ def _memory_job(metadata: dict, claims: dict) -> str:
         before, after = (action.full_sha(metadata[field]) for field in ("push_before", "push_after"))
         action.full_sha(metadata["source_tip_sha"])
         require(before != after and metadata["range_origin"] == "authorized-reconciliation"
-                and metadata["source_identity"] == f"{repository}@{before}..{after}"
+                and metadata["source_identity"] == f"{source_repository}@{before}..{after}"
                 and metadata["event_action"] == "push" and metadata["workflow_sha"] == after
-                and metadata["workflow_ref"] == workflow_ref(action.DISPATCH_WORKFLOW, repository)
+                and metadata["workflow_ref"] == workflow_ref(action.DISPATCH_WORKFLOW, source_repository, base_ref)
                 and _positive_int(metadata["commit_count"]) <= action.MAX_PUSH_COMMITS,
                 "Invalid reconciliation range metadata")
         _positive_int(metadata["run_id"])
@@ -254,7 +333,8 @@ def _memory_job(metadata: dict, claims: dict) -> str:
         require(isinstance(pulls, list) and 0 < len(pulls) <= action.MAX_BATCH_PRS
                 and all(isinstance(pull, dict) and set(pull) == _MERGE_FIELDS for pull in pulls),
                 "Invalid reconciliation PR inventory")
-        require(len({_validate_merge(pull, repository) for pull in pulls}) == len(pulls), "Duplicate merged PRs")
+        require(len({_validate_merge(pull, source_repository) for pull in pulls}) == len(pulls),
+                "Duplicate merged PRs")
     else:
         require(set(metadata) == fields | _MERGE_FIELDS and metadata.get("event_name") == "workflow_dispatch"
                 and metadata.get("event_action") == "workflow_dispatch"
@@ -262,14 +342,14 @@ def _memory_job(metadata: dict, claims: dict) -> str:
                 and all(metadata.get(field) == claims[field] for field in (
                     "workflow_ref", "workflow_sha", "run_id", "run_attempt",
                 )), "Invalid manual team-memory metadata")
-        _validate_merge(metadata, repository)
+        _validate_merge(metadata, source_repository)
     return "wiki"
 
 
 def validate_request(data: dict, claims: dict) -> str:
     require(isinstance(data, dict) and set(data) == {"request_type", "metadata"}
-            and data["request_type"] == claims["kind"] and isinstance(data["metadata"], dict)
-            and data["metadata"].get("repository") == claims["repository"], "Invalid workflow job")
+            and data["request_type"] == claims["kind"] and isinstance(data["metadata"], dict),
+            "Invalid workflow job")
     validator = _issue_job if claims["kind"] == "issue-loop" else _memory_job
     target = validator(data["metadata"], claims)
     return target if claims["repository"] == PILOT_REPOSITORY else f"repo-{claims['repository_id']}-{target}"
@@ -374,9 +454,10 @@ class FoundryWorker:
         payload = json.loads(job["payload"])
         kind, metadata = payload["request_type"], payload["metadata"]
         repository = job.get("repository")
-        if "repository" in job:
-            require(repository == metadata.get("repository"), "Bridge job repository mismatch")
         if kind == "issue-loop":
+            if "repository" in job:
+                require(isinstance(repository, str) and repository == metadata.get("repository"),
+                        "Bridge job repository mismatch")
             digest = metadata.pop("comment_sha256", None)
             if metadata["comment_added"]:
                 require(isinstance(digest, str) and JOB_ID.fullmatch(digest), "Created comment requires its revision digest")
@@ -389,6 +470,23 @@ class FoundryWorker:
                 _verify_created_comment(repository, metadata, digest)
             invocation = action.build_issue_loop_request(metadata)
         elif kind == "team-memory":
+            if "repository" in job:
+                if "coordinator_repository" in metadata:
+                    require(isinstance(repository, str)
+                            and repository == metadata.get("coordinator_repository")
+                            and repository == metadata.get("required_wiki_repository"),
+                            "Bridge job repository mismatch")
+                else:
+                    require(isinstance(repository, str)
+                            and repository == metadata.get("repository")
+                            and repository == metadata.get("required_wiki_repository", repository),
+                            "Bridge job repository mismatch")
+                if repository == PILOT_REPOSITORY:
+                    require(metadata.get("repository") == PILOT_REPOSITORY, "Bridge job repository mismatch")
+                else:
+                    require(isinstance(metadata.get("repository"), str)
+                            and metadata["repository"].casefold() != PILOT_REPOSITORY.casefold(),
+                            "Bridge job repository mismatch")
             invocation = action.build_team_memory_request(metadata)
         else:
             raise ValueError("Unsupported bridge job type")

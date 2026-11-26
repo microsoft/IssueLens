@@ -90,7 +90,7 @@ if role == "ingress":
         except (ValueError, TypeError):
             return respond({"error": "invalid_job"}, 400)
         try:
-            protected = bridge.default_branch_protected(claims)
+            protected = bridge.default_branch_protected(claims, data)
         except (OSError, http.client.HTTPException, ValueError):
             logger.warning("GitHub repository or branch validation unavailable")
             return respond({"error": "branch_protection_unavailable"}, 503)
