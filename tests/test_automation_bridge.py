@@ -30,6 +30,23 @@ MEMORY_WORKFLOW = ".github/workflows/team-memory-coordinator.yml"
 JAVA_REPOSITORY = "microsoft/vscode-java-pack"
 JAVA_REPOSITORY_ID = 104967329
 JAVA_WORKFLOW = ".github/workflows/issueLens-run.yml"
+JAVA_DEBUG_REPOSITORY = "microsoft/vscode-java-debug"
+JAVA_DEBUG_REPOSITORY_ID = 102584737
+GRADLE_REPOSITORY = "microsoft/vscode-gradle"
+GRADLE_REPOSITORY_ID = 216314492
+GRADLE_SERVER_REPOSITORY = "microsoft/build-server-for-gradle"
+GRADLE_SERVER_REPOSITORY_ID = 626812412
+ENROLLED_REPOSITORY_IDS = [
+    1303440932,
+    104967329,
+    102584737,
+    102583752,
+    110522074,
+    216314492,
+    626812412,
+    129053101,
+    116921700,
+]
 OTHER_REPOSITORY = "example/Project-Two"
 OTHER_REPOSITORY_ID = 24681012
 OTHER_WORKFLOW = ".github/workflows/route-issues.yaml"
@@ -431,6 +448,243 @@ class BridgeIdentityTests(unittest.TestCase):
             )
             self.assertEqual(status(self.request(identifier, token=different_run)).status_code, 404)
 
+    def test_cross_repo_java_coordinator_admits_enrolled_main_and_develop_sources_under_shared_wiki_lock(self):
+        ingress, submit, _ = self.load_ingress()
+        coordinator_project = {
+            "full_name": JAVA_REPOSITORY, "id": JAVA_REPOSITORY_ID, "private": False,
+            "default_branch": "main", "visibility": "public",
+        }
+        coordinator_ref = bridge.workflow_ref(MEMORY_WORKFLOW, JAVA_REPOSITORY)
+        token = self.java_token(workflow_ref=coordinator_ref, ref_protected="true")
+        claims = self.workflow_claims(token, URL, PILOT_REPOSITORY_ID)
+        worker = bridge.FoundryWorker(ENDPOINT, Mock(get_token=Mock(return_value=Mock(token="token"))))
+        before, after = "d" * 40, "e" * 40
+        merged_at = "2026-11-24T00:00:00Z"
+        source_map = json.dumps({
+            JAVA_REPOSITORY: JAVA_REPOSITORY_ID,
+            JAVA_DEBUG_REPOSITORY: JAVA_DEBUG_REPOSITORY_ID,
+            GRADLE_REPOSITORY: GRADLE_REPOSITORY_ID,
+            GRADLE_SERVER_REPOSITORY: GRADLE_SERVER_REPOSITORY_ID,
+        })
+        for source_repo, source_id, base_ref in (
+            (JAVA_DEBUG_REPOSITORY, JAVA_DEBUG_REPOSITORY_ID, "main"),
+            (GRADLE_REPOSITORY, GRADLE_REPOSITORY_ID, "develop"),
+            (GRADLE_SERVER_REPOSITORY, GRADLE_SERVER_REPOSITORY_ID, "develop"),
+        ):
+            source_project = {
+                "full_name": source_repo, "id": source_id, "private": False,
+                "default_branch": base_ref, "visibility": "public",
+            }
+            pull = {
+                "number": 18, "merged": True, "state": "closed", "merged_at": merged_at,
+                "merge_commit_sha": after, "base": {"ref": base_ref, "repo": source_project},
+            }
+            source_run = {
+                "id": 31, "run_attempt": 2, "event": "push",
+                "path": bridge.action.DISPATCH_WORKFLOW, "head_branch": base_ref, "head_sha": after,
+                "repository": source_project, "head_repository": source_project,
+                "actor": {"login": "source-dev"}, "triggering_actor": {"login": "source-dev"},
+            }
+            comparison = {
+                "base_commit": {"sha": before}, "merge_base_commit": {"sha": before},
+                "status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
+                "commits": [{"sha": after}],
+            }
+            node = {
+                "number": 18, "state": "MERGED", "merged": True, "mergedAt": merged_at,
+                "baseRefName": base_ref,
+                "baseRepository": {"databaseId": source_id, "nameWithOwner": source_repo},
+                "mergeCommit": {"oid": after},
+            }
+            associations = {"data": {"repository": {
+                "databaseId": source_id, "nameWithOwner": source_repo,
+                "defaultBranchRef": {"name": base_ref, "target": {"oid": after}},
+                "c0": {"oid": after, "associatedPullRequests": {
+                    "totalCount": 1, "pageInfo": {"hasNextPage": False}, "nodes": [node],
+                }},
+            }}}
+            environment = {
+                "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_REF": BRANCH,
+                "GITHUB_WORKFLOW_REF": coordinator_ref, "GITHUB_WORKFLOW_SHA": "1" * 40,
+                "GITHUB_ACTOR": "maintainer", "GITHUB_TRIGGERING_ACTOR": "maintainer",
+                "GITHUB_RUN_ID": "20", "GITHUB_RUN_ATTEMPT": "1", "SOURCE_REPOSITORY": source_repo,
+                "SOURCE_REPOSITORIES": source_map, "SOURCE_GH_TOKEN": "source-read-token",
+            }
+            for mode in ("manual", "push"):
+                variables = ({"DISPATCH_PR": "18"} if mode == "manual" else {
+                    "SOURCE_RUN_ID": "31", "SOURCE_RUN_ATTEMPT": "2",
+                    "PUSH_BEFORE": before, "PUSH_AFTER": after,
+                })
+                preflight_reads = (
+                    [coordinator_project, source_project, pull]
+                    if mode == "manual"
+                    else [
+                        coordinator_project, source_project, source_run,
+                        {"name": base_ref, "commit": {"sha": after}}, comparison, associations,
+                    ]
+                )
+                with (
+                    self.subTest(source=source_repo, mode=mode),
+                    patch.dict(os.environ, environment | variables, clear=True),
+                    patch.object(bridge.action, "github_read", side_effect=preflight_reads),
+                ):
+                    envelope = bridge.action.prepare_team_memory(JAVA_REPOSITORY, {"repository": coordinator_project})
+                metadata = envelope["metadata"]
+                payload = {"request_type": "team-memory", "metadata": metadata}
+                self.assertEqual(metadata["repository"], source_repo)
+                self.assertEqual(metadata["repository_id"], source_id)
+                self.assertEqual(metadata["base_ref"], base_ref)
+                self.assertEqual(metadata["coordinator_repository"], JAVA_REPOSITORY)
+                self.assertEqual(metadata["required_wiki_repository"], JAVA_REPOSITORY)
+                self.assertEqual(bridge.validate_request(payload, claims), "repo-104967329-wiki")
+                with (
+                    patch.object(bridge.action, "github_read", side_effect=[
+                        coordinator_project, source_project, {"name": base_ref, "protected": True},
+                    ]) as github,
+                    patch.object(ingress, "jobs") as jobs,
+                    patch.object(ingress, "service_bus"),
+                ):
+                    identifier = bridge.job_id(claims)
+                    jobs.return_value.reserve.return_value = {"RowKey": identifier, "state": bridge.QUEUED}
+                    req = self.request(token=token, payload=payload)
+                    response = submit(req)
+                    self.assertEqual(response.status_code, 202, response.get_body())
+                    self.assertEqual(
+                        [call.args[0] for call in github.call_args_list],
+                        [
+                            f"/repos/{JAVA_REPOSITORY}",
+                            f"/repos/{source_repo}",
+                            f"/repos/{source_repo}/branches/{base_ref}",
+                        ],
+                    )
+                    jobs.return_value.reserve.assert_called_once_with(
+                        identifier, "repo-104967329-wiki", req.get_body(), repository=JAVA_REPOSITORY,
+                    )
+                job = {"repository": JAVA_REPOSITORY, "payload": json.dumps(payload)}
+                self.assertEqual(json.loads(worker.prepare(job).data), envelope["request"])
+                result = {
+                    "source_repository": source_repo, "status": "updated", "reason": "Verified",
+                    "wiki_repository": JAVA_REPOSITORY, "wiki_sha": "f" * 40,
+                }
+                if mode == "manual":
+                    result.update(pull_number=18, merge_commit_sha=after)
+                else:
+                    result.update(push_before=before, push_after=after, results=[{
+                        "pull_number": 18, "merge_commit_sha": after, "status": "updated", "reason": "Verified",
+                    }])
+                receipt = json.loads(bridge._memory_receipt(json.dumps(result), metadata))
+                self.assertEqual(receipt["source_repository"], source_repo)
+                self.assertEqual(receipt["wiki_repository"], JAVA_REPOSITORY)
+                with self.assertRaises(ValueError):
+                    bridge._memory_receipt(json.dumps(result | {"wiki_repository": source_repo}), metadata)
+
+    def test_cross_repo_team_memory_enforces_pilot_isolation_allowlist_and_protected_source_branch(self):
+        ingress, submit, _ = self.load_ingress()
+        coordinator_ref = bridge.workflow_ref(MEMORY_WORKFLOW, JAVA_REPOSITORY)
+        java_token = self.java_token(workflow_ref=coordinator_ref, ref_protected="true")
+        java_claims = self.workflow_claims(java_token, URL, PILOT_REPOSITORY_ID)
+        pilot_claims = self.workflow_claims(self.token(
+            workflow_ref=bridge.workflow_ref(MEMORY_WORKFLOW), event_name="workflow_dispatch", ref_protected="true",
+        ), URL, PILOT_REPOSITORY_ID)
+        after = "a" * 40
+
+        # Pilot coordinator remains strictly same-repo and main-only even for enrolled Java IDs.
+        pilot_cross = manual_memory_payload(pilot_claims)
+        pilot_cross["metadata"].update(
+            repository=JAVA_REPOSITORY, repository_id=JAVA_REPOSITORY_ID,
+            source_identity=f"{JAVA_REPOSITORY}#12:{after}",
+        )
+        with self.assertRaisesRegex(ValueError, "Team-memory coordinator identity mismatch"):
+            bridge.validate_request(pilot_cross, pilot_claims)
+        pilot_develop = manual_memory_payload(pilot_claims)
+        pilot_develop["metadata"]["base_ref"] = "develop"
+        with self.assertRaisesRegex(ValueError, "Team-memory coordinator identity mismatch"):
+            bridge.validate_request(pilot_develop, pilot_claims)
+
+        # External coordinator can never claim IssueLens or an unallowlisted repo as a team-memory source.
+        for bad_repo, bad_id, base_ref in (
+            (PILOT_REPOSITORY, PILOT_REPOSITORY_ID, "main"),
+            ("microsoft/issuelens", PILOT_REPOSITORY_ID, "main"),
+            (PILOT_REPOSITORY, GRADLE_REPOSITORY_ID, "main"),
+            ("microsoft/issuelens", GRADLE_REPOSITORY_ID, "main"),
+            (GRADLE_REPOSITORY, PILOT_REPOSITORY_ID, "develop"),
+            (OTHER_REPOSITORY, OTHER_REPOSITORY_ID, "main"),
+            (JAVA_REPOSITORY, GRADLE_REPOSITORY_ID, "main"),
+        ):
+            rejected = manual_memory_payload(java_claims)
+            rejected["metadata"].update(
+                repository=bad_repo, repository_id=bad_id, base_ref=base_ref,
+                source_identity=f"{bad_repo}#12:{after}",
+            )
+            with self.subTest(repo=bad_repo, repo_id=bad_id), self.assertRaises(ValueError):
+                bridge.validate_request(rejected, java_claims)
+
+        for bad_branch in ("", "/develop", "develop/", "release..1", "release//1", "develop.lock", "refs/heads/ main"):
+            rejected = manual_memory_payload(java_claims)
+            rejected["metadata"].update(
+                repository=GRADLE_REPOSITORY, repository_id=GRADLE_REPOSITORY_ID, base_ref=bad_branch,
+                source_identity=f"{GRADLE_REPOSITORY}#12:{after}",
+            )
+            with self.subTest(base_ref=bad_branch), self.assertRaises(ValueError):
+                bridge.validate_request(rejected, java_claims)
+
+        # Ingress checks cross-repo source visibility, ID, default branch, and branch protection.
+        gradle_payload = manual_memory_payload(java_claims)
+        gradle_payload["metadata"].update(
+            repository=GRADLE_REPOSITORY, repository_id=GRADLE_REPOSITORY_ID, base_ref="develop",
+            source_identity=f"{GRADLE_REPOSITORY}#12:{after}",
+        )
+        coordinator_info = {
+            "id": JAVA_REPOSITORY_ID, "full_name": JAVA_REPOSITORY, "private": False,
+            "visibility": "public", "default_branch": "main",
+        }
+        gradle_info = {
+            "id": GRADLE_REPOSITORY_ID, "full_name": GRADLE_REPOSITORY, "private": False,
+            "visibility": "public", "default_branch": "develop",
+        }
+        not_found = urllib.error.HTTPError("https://api.github.com/repos/test", 404, "Not Found", hdrs=None, fp=None)
+        unavailable = urllib.error.HTTPError("https://api.github.com/repos/test", 503, "Unavailable", hdrs=None, fp=None)
+        for responses, expected in (
+            ([coordinator_info, gradle_info, {"name": "develop", "protected": False}], (401, {"error": "workflow_not_authorized"})),
+            ([coordinator_info, gradle_info | {"default_branch": "main"}], (401, {"error": "workflow_not_authorized"})),
+            ([coordinator_info, gradle_info | {"private": True}], (401, {"error": "workflow_not_authorized"})),
+            ([coordinator_info, gradle_info | {"visibility": "internal"}], (401, {"error": "workflow_not_authorized"})),
+            ([coordinator_info, gradle_info | {"id": JAVA_DEBUG_REPOSITORY_ID}], (401, {"error": "workflow_not_authorized"})),
+            ([coordinator_info, gradle_info | {"full_name": JAVA_DEBUG_REPOSITORY}], (401, {"error": "workflow_not_authorized"})),
+            ([coordinator_info, not_found], (401, {"error": "workflow_not_authorized"})),
+            ([coordinator_info, gradle_info, not_found], (401, {"error": "workflow_not_authorized"})),
+            ([coordinator_info, unavailable], (503, {"error": "branch_protection_unavailable"})),
+            ([coordinator_info, gradle_info, urllib.error.URLError("offline")], (503, {"error": "branch_protection_unavailable"})),
+            ([coordinator_info, gradle_info, {"name": "develop"}], (503, {"error": "branch_protection_unavailable"})),
+        ):
+            with (
+                self.subTest(responses=responses),
+                patch.object(bridge.action, "github_read", side_effect=responses),
+                patch.object(ingress, "jobs") as jobs,
+                patch.object(ingress, "service_bus") as bus,
+            ):
+                response = submit(self.request(token=java_token, payload=gradle_payload))
+                self.assertEqual((response.status_code, json.loads(response.get_body())), expected)
+                jobs.assert_not_called()
+                bus.assert_not_called()
+
+        # Release branch names with slashes are URL-encoded in the branch-protection read.
+        slash_payload = copy.deepcopy(gradle_payload)
+        slash_payload["metadata"]["base_ref"] = "release/1.0"
+        with (
+            patch.object(bridge.action, "github_read", side_effect=[
+                coordinator_info,
+                gradle_info | {"default_branch": "release/1.0"},
+                {"name": "release/1.0", "protected": True},
+            ]) as github,
+            patch.object(ingress, "jobs") as jobs,
+            patch.object(ingress, "service_bus"),
+        ):
+            jobs.return_value.reserve.return_value = {"RowKey": JOB, "state": bridge.QUEUED}
+            response = submit(self.request(token=java_token, payload=slash_payload))
+            self.assertEqual(response.status_code, 202, response.get_body())
+            self.assertEqual(github.call_args_list[-1].args[0], f"/repos/{GRADLE_REPOSITORY}/branches/release%2F1.0")
+
     def test_enrolled_repo_submit_requires_public_repo_identity_and_current_protected_default(self):
         ingress, submit, status = self.load_ingress()
         token = self.java_token()
@@ -646,6 +900,13 @@ class BridgeIdentityTests(unittest.TestCase):
 
 
 class BridgeConfigurationTests(unittest.TestCase):
+    def test_example_allowlist_enrolls_issuelens_and_all_java_tooling_repositories(self):
+        self.assertEqual(json.loads(ALLOWLIST_JSON), ENROLLED_REPOSITORY_IDS)
+        self.assertEqual(
+            bridge.load_repository_allowlist(ALLOWLIST_JSON, PILOT_REPOSITORY_ID),
+            frozenset(ENROLLED_REPOSITORY_IDS),
+        )
+
     def test_invalid_id_allowlist_is_rejected_as_a_whole(self):
         original = ALLOWLIST_JSON
         ids = json.loads(original)
@@ -950,6 +1211,49 @@ class BridgeExecutionTests(unittest.TestCase):
                     self.assertEqual(json.loads(request.data), expected)
         github.assert_not_called()
         self.credential.get_token.assert_called_with("https://ai.azure.com/.default")
+
+    def test_worker_validates_coordinator_and_wiki_repository_for_cross_repo_team_memory_jobs(self):
+        cross_repo_metadata = {
+            "repository": GRADLE_REPOSITORY, "repository_id": GRADLE_REPOSITORY_ID, "base_ref": "develop",
+            "event_name": "workflow_dispatch", "pull_number": 18, "merge_commit_sha": "a" * 40,
+            "coordinator_repository": JAVA_REPOSITORY, "required_wiki_repository": JAVA_REPOSITORY,
+        }
+        cross_job = {
+            "repository": JAVA_REPOSITORY,
+            "payload": json.dumps({"request_type": "team-memory", "metadata": cross_repo_metadata}),
+        }
+        request = self.worker.prepare(cross_job)
+        self.assertEqual(json.loads(request.data), bridge.action.build_team_memory_request(cross_repo_metadata))
+        for invalid_job in (
+            cross_job | {"repository": GRADLE_REPOSITORY},
+            cross_job | {"repository": PILOT_REPOSITORY},
+            {
+                "repository": JAVA_REPOSITORY,
+                "payload": json.dumps({
+                    "request_type": "team-memory",
+                    "metadata": cross_repo_metadata | {"required_wiki_repository": GRADLE_REPOSITORY},
+                }),
+            },
+            {
+                "repository": JAVA_REPOSITORY,
+                "payload": json.dumps({
+                    "request_type": "team-memory",
+                    "metadata": cross_repo_metadata | {"repository": PILOT_REPOSITORY},
+                }),
+            },
+            {
+                "repository": PILOT_REPOSITORY,
+                "payload": json.dumps({
+                    "request_type": "team-memory",
+                    "metadata": cross_repo_metadata | {
+                        "coordinator_repository": PILOT_REPOSITORY,
+                        "required_wiki_repository": PILOT_REPOSITORY,
+                    },
+                }),
+            },
+        ):
+            with self.subTest(job=invalid_job), self.assertRaisesRegex(ValueError, "Bridge job repository mismatch"):
+                self.worker.prepare(invalid_job)
 
     def test_worker_verifies_created_comment_without_forwarding_body_or_digest(self):
         payload = issue_payload()

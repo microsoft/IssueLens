@@ -320,8 +320,11 @@ The agent is driven by a workflow in the target repo
    credentials. No App webhook or corporate FIC is used.
    The ingress allowlist enrolls numeric repository IDs for manual and
    automatic issue-loop jobs from their protected default branch, and
-   same-repository team-memory via the fixed coordinator on protected default
-   `main`. Source, coordinator and validated wiki destination must match.
+   team-memory via the fixed coordinator on protected default `main`
+   (same-repository only for `microsoft/IssueLens`; same-repository or enrolled
+   non-pilot public cross-repository sources on their verified protected
+   default branch for non-pilot coordinators, where coordinator and validated
+   wiki destination match and share `repo-<coordinator_id>-wiki`).
    IssueLens keeps its stricter built-in workflow rules. The worker revalidates
    created comments using the repository stored at admission. The ZIP does not
    load the example allowlist or enroll Java Pack in code.
@@ -407,11 +410,13 @@ incomplete discovery rather than silently omitting sources. IssueLens automatic
 and manual requests share `issuelens-team-memory-wiki-microsoft-IssueLens`
 with `queue: max` and no in-progress cancellation: one complete coordinator
 run and at most 100 pending runs. Queue admission and dispatch acknowledgement
-are not maintenance success. Only `microsoft/IssueLens` sources and its validated
-`microsoft/IssueLens` wiki destination are accepted in this first rollout;
-policy is never overridden to force a destination. Java tooling callers remain
-unchanged and will need authenticated cross-repository dispatch and a separate
-queue for their shared `microsoft/vscode-java-pack` wiki. Direct external action
+are not maintenance success. In this repository's workflow, only
+`microsoft/IssueLens` sources and its validated `microsoft/IssueLens` wiki
+destination are accepted; policy is never overridden to force a destination.
+Enrolled non-pilot coordinators such as `microsoft/vscode-java-pack` serialize
+same-repository and enrolled Java tooling cross-repository sources under their
+shared coordinator queue and durable `repo-104967329-wiki` bridge reservation.
+Direct external action
 callers retain their existing event behavior and per-push concurrency.
 The pilot does not serialize chat, issue-loop work, or external direct requests.
 The manual pilot uses `ISSUELENS_TEAM_MEMORY_MANUAL_PILOT=true` after bridge

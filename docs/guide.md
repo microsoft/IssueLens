@@ -1087,11 +1087,15 @@ branch API check.
 
 Use `automation_bridge/repository_allowlist.example.json` as the initial
 `ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST` value: a JSON array of numeric GitHub
-repository IDs. The existing `ISSUELENS_BRIDGE_REPOSITORY_ID` setting must
+repository IDs (`microsoft/IssueLens`, `microsoft/vscode-java-pack`, and the
+seven enrolled Java tooling repositories). The existing
+`ISSUELENS_BRIDGE_REPOSITORY_ID` setting must
 remain in that array and continues to identify IssueLens. The setting is
 limited to 32 KiB; IDs must be positive, unique integers. **Enrolling a public
-repository grants bridge admission for both issue-loop and same-repository
-team-memory jobs.** There is no additional setting or per-workflow enrollment.
+repository grants bridge admission for issue-loop jobs on its protected default
+branch and allows enrolled non-pilot team-memory coordinators to reconcile that
+repository into the coordinator's shared wiki.** There is no additional setting
+or per-workflow enrollment.
 Issue-loop jobs may come from any `.github/workflows/` YAML file in the signed
 repository on its protected default branch, for `issues`, `issue_comment`,
 or `workflow_dispatch`. The same issue action and human-comment restrictions
@@ -1100,11 +1104,20 @@ apply. IssueLens keeps its built-in workflow and event restrictions.
 The standard coordinator is never an issue-loop caller. Team-memory admission
 requires `workflow_dispatch` from the exact
 `.github/workflows/team-memory-coordinator.yml` workflow on protected default
-`main`. Coordinated push ranges must identify
-`.github/workflows/team-memory-post-merge.yml` in the same repository.
-Coordinator, source and validated wiki destination must all
-match the authenticated repository. Manual PR and coordinated range requests
-share that repository's wiki reservation, separate from other repositories.
+`main`. For `microsoft/IssueLens`, coordinator, source, and validated wiki
+destination must all match `microsoft/IssueLens` on `main`, and external
+coordinators may never claim `microsoft/IssueLens` as a team-memory source.
+For an enrolled non-pilot coordinator such as `microsoft/vscode-java-pack`,
+`coordinator_repository` and `required_wiki_repository` must match the
+authenticated coordinator repository, while `repository` and `repository_id`
+may identify either the coordinator itself or another non-pilot repository in
+`ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST`. Coordinated push ranges must identify
+`.github/workflows/team-memory-post-merge.yml` on the source repository's
+protected default branch (`base_ref`, such as `main` or `develop`), and ingress
+independently verifies the cross-repository source's public GitHub identity,
+default branch, and branch protection before admission. Same-repository and
+cross-repository requests on that coordinator share one durable
+`repo-<coordinator_id>-wiki` reservation, separate from other coordinators.
 Source run metadata cannot prove the original push boundary or flags. Each
 consumer still needs its own coordinator queue, source read credentials,
 validated wiki policy and App access. Bridge admission does not grant those
@@ -1119,9 +1132,10 @@ Removing an ID revokes admission and receipt polling for that repository;
 reconcile in-flight jobs first. Configuration and release require separate
 approval.
 
-For Java Pack, the existing
-`ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST=[1303440932,104967329]` is sufficient.
-Keep the Java Pack workflows disabled during rollout. After approval, deploy
+For Java Pack and the enrolled Java tooling repositories, update
+`ISSUELENS_BRIDGE_REPOSITORY_ALLOWLIST` to match
+`automation_bridge/repository_allowlist.example.json` (`[1303440932,104967329,102584737,102583752,110522074,216314492,626812412,129053101,116921700]`).
+Keep the Java workflows disabled during rollout. After approval, deploy
 the same ZIP built from the merged IssueLens revision to the worker first,
 then ingress. Confirm both roles are ready before enabling the merged caller
 workflows. Provide
