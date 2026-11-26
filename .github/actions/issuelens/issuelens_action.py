@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import http.client
 import importlib.util
 import json
 import os
@@ -28,6 +29,9 @@ AGENT_STREAM_INACTIVITY_TIMEOUT_SECONDS = 300
 AGENT_STREAM_READ_BUDGET_SECONDS = 1800
 BRIDGE_POLL_SECONDS = 10
 BRIDGE_WAIT_SECONDS = 35 * 60
+BRIDGE_REQUEST_TIMEOUT_SECONDS = 30
+BRIDGE_SUBMIT_TIMEOUT_SECONDS = 60
+BRIDGE_TOKEN_REFRESH_SECONDS = 120
 BRIDGE_JOBS_PATH = "/api/issuelens/v1/jobs"
 ASSOCIATION_BATCH_SIZE = 20
 COORDINATOR_REPOSITORY = "microsoft/IssueLens"
@@ -843,13 +847,19 @@ def bridge_url():
     return url
 
 
-def bridge_json(url, token, body=None):
+def retryable_bridge_status(code):
+    return code in {408, 429} or 500 <= code < 600
+
+
+def bridge_json(url, token, body=None, *, timeout=None):
+    if timeout is None:
+        timeout = BRIDGE_SUBMIT_TIMEOUT_SECONDS if body is not None else BRIDGE_REQUEST_TIMEOUT_SECONDS
     request = urllib.request.Request(
         url, data=None if body is None else json.dumps(body).encode("utf-8"),
         headers={"Authorization": "Bearer " + token, "Accept": "application/json",
                  "Content-Type": "application/json"},
     )
-    with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+    with urllib.request.build_opener(NoRedirect()).open(request, timeout=timeout) as response:
         require(response.headers.get_content_type() == "application/json", "Expected a JSON bridge response")
         data = response.read(128 * 1024 + 1)
     require(len(data) <= 128 * 1024, "Bridge response exceeds the size limit")
@@ -884,7 +894,10 @@ def submit_bridge(envelope):
     url = bridge_url()
     request_type = envelope["request_type"]
     require(request_type in {"issue-loop", "team-memory"}, "Unsupported bridge request type")
-    token = workflow_token(url)
+    try:
+        token = workflow_token(url)
+    except (OSError, http.client.HTTPException):
+        raise ValueError("GitHub Actions OIDC token request failed; no bridge job was submitted") from None
     refreshed_at = time.monotonic()
     try:
         receipt = bridge_json(url, token, {"request_type": request_type, "metadata": envelope["metadata"]})
@@ -897,6 +910,8 @@ def submit_bridge(envelope):
         raise ValueError(messages.get(
             error.code, "Bridge submission was not confirmed; inspect the job before retrying",
         )) from None
+    except (OSError, http.client.HTTPException):
+        raise ValueError("Bridge submission was not confirmed; inspect the job before retrying") from None
     job = receipt.get("job_id")
     require(isinstance(job, str) and re.fullmatch(r"[0-9a-f]{64}", job), "Invalid bridge job ID")
     display_log(f"IssueLens bridge job: {job}")
@@ -916,10 +931,36 @@ def submit_bridge(envelope):
         require(state in {"queued", "running"}, "Invalid bridge job state")
         require(time.monotonic() < deadline, "Bridge wait expired; inspect the submitted job before retrying")
         time.sleep(BRIDGE_POLL_SECONDS)
-        if time.monotonic() - refreshed_at >= 120:
-            token = workflow_token(url)
-            refreshed_at = time.monotonic()
-        receipt = bridge_json(f"{url}/{job}", token)
+        if time.monotonic() - refreshed_at >= BRIDGE_TOKEN_REFRESH_SECONDS:
+            try:
+                token = workflow_token(url)
+                refreshed_at = time.monotonic()
+            except urllib.error.HTTPError as error:
+                if not retryable_bridge_status(error.code):
+                    raise ValueError(
+                        "GitHub Actions OIDC token refresh was rejected; inspect the submitted job before retrying",
+                    ) from None
+                display_log(f"GitHub Actions OIDC token refresh returned HTTP {int(error.code)}; retrying...")
+                continue
+            except (OSError, http.client.HTTPException):
+                display_log("GitHub Actions OIDC token refresh timed out or lost connection; retrying...")
+                continue
+        try:
+            receipt = bridge_json(f"{url}/{job}", token)
+        except urllib.error.HTTPError as error:
+            if retryable_bridge_status(error.code):
+                display_log(f"Bridge status poll returned HTTP {int(error.code)}; retrying...")
+                continue
+            poll_messages = {
+                401: "Bridge did not authorize status polling for this workflow identity",
+                404: "Bridge job receipt was not found",
+            }
+            raise ValueError(poll_messages.get(
+                error.code, "Bridge rejected status polling; inspect the submitted job before retrying",
+            )) from None
+        except (OSError, http.client.HTTPException):
+            display_log("Bridge status poll timed out or lost connection; retrying...")
+            continue
 
 
 def foundry_request(envelope, output_mode):
