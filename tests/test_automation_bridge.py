@@ -736,6 +736,191 @@ class BridgeActionTests(unittest.TestCase):
                 bridge.action.submit_bridge(issue_payload())
         request.assert_called_once()
 
+    def test_bridge_json_uses_cold_start_timeout_for_submit_and_standard_timeout_for_polls(self):
+        class FakeResponse:
+            def __init__(self, body=b'{"ok":true}'):
+                self._body = body
+                self.headers = Mock()
+                self.headers.get_content_type.return_value = "application/json"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, _limit):
+                return self._body
+
+        opener = Mock()
+        opener.open.side_effect = [FakeResponse(), FakeResponse()]
+        with patch.object(bridge.action.urllib.request, "build_opener", return_value=opener):
+            self.assertEqual(bridge.action.bridge_json(URL, "secret-token", issue_payload()), {"ok": True})
+            self.assertEqual(bridge.action.bridge_json(f"{URL}/{JOB}", "secret-token"), {"ok": True})
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in opener.open.call_args_list],
+            [bridge.action.BRIDGE_SUBMIT_TIMEOUT_SECONDS, bridge.action.BRIDGE_REQUEST_TIMEOUT_SECONDS],
+        )
+
+    def test_action_retries_transient_poll_and_token_refresh_errors_until_completion(self):
+        def http_error(code):
+            return urllib.error.HTTPError(f"{URL}/{JOB}", code, "transient", hdrs=None, fp=None)
+
+        clock = iter([
+            0.0,    # initial refreshed_at
+            0.0,    # deadline = 0 + 2100
+            1.0,    # poll #1 deadline check
+            10.0,   # poll #1 refresh check (< 120) -> TimeoutError on poll
+            40.0,   # poll #2 deadline check
+            50.0,   # poll #2 refresh check (< 120) -> HTTP 503 on poll
+            50.0,   # poll #3 deadline check
+            60.0,   # poll #3 refresh check (< 120) -> RemoteDisconnected on poll
+            60.0,   # poll #4 deadline check
+            130.0,  # poll #4 refresh check (>= 120) -> token refresh TimeoutError
+            140.0,  # poll #5 deadline check
+            150.0,  # poll #5 refresh check (>= 120) -> token refresh HTTP 503
+            160.0,  # poll #6 deadline check
+            170.0,  # poll #6 refresh check (>= 120) -> token refresh succeeds
+            170.0,  # updated refreshed_at -> HTTP 429 on poll
+            180.0,  # poll #7 deadline check
+            190.0,  # poll #7 refresh check (< 120 since 170) -> poll returns completed
+        ])
+        logs = []
+        with (
+            patch.dict(os.environ, {"BRIDGE_URL": URL}, clear=True),
+            patch.object(bridge.action.time, "monotonic", side_effect=lambda: next(clock)),
+            patch.object(bridge.action.time, "sleep") as sleep,
+            patch.object(bridge.action, "display_log", side_effect=logs.append),
+            patch.object(bridge.action, "workflow_token", side_effect=[
+                "initial-jwt",
+                TimeoutError("oidc timed out"),
+                http_error(503),
+                "refreshed-jwt",
+            ]) as tokens,
+            patch.object(bridge.action, "bridge_json", side_effect=[
+                {"job_id": JOB, "state": "queued"},
+                TimeoutError("ingress cold start"),
+                http_error(503),
+                bridge.action.http.client.RemoteDisconnected("Remote end closed connection"),
+                http_error(429),
+                {"job_id": JOB, "state": "completed"},
+            ]) as request,
+        ):
+            self.assertIn("Inspect GitHub", bridge.action.submit_bridge(issue_payload()))
+        self.assertEqual(tokens.call_count, 4)
+        self.assertEqual(sleep.call_count, 7)
+        self.assertEqual(
+            [call.args for call in request.call_args_list],
+            [
+                (URL, "initial-jwt", issue_payload()),
+                (f"{URL}/{JOB}", "initial-jwt"),
+                (f"{URL}/{JOB}", "initial-jwt"),
+                (f"{URL}/{JOB}", "initial-jwt"),
+                (f"{URL}/{JOB}", "refreshed-jwt"),
+                (f"{URL}/{JOB}", "refreshed-jwt"),
+            ],
+        )
+        joined_logs = "\n".join(logs)
+        self.assertNotIn(URL, joined_logs)
+        self.assertNotIn("initial-jwt", joined_logs)
+        self.assertNotIn("refreshed-jwt", joined_logs)
+
+    def test_action_does_not_retry_submit_transport_errors_or_permanent_poll_errors(self):
+        def http_error(code):
+            return urllib.error.HTTPError(f"{URL}/{JOB}", code, "error", hdrs=None, fp=None)
+
+        with self.subTest("initial_oidc_transport_failure"):
+            with (
+                patch.dict(os.environ, {"BRIDGE_URL": URL}, clear=True),
+                patch.object(bridge.action, "workflow_token", side_effect=TimeoutError(URL)),
+                patch.object(bridge.action, "bridge_json") as request,
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    bridge.action.submit_bridge(issue_payload())
+            self.assertEqual(str(raised.exception),
+                             "GitHub Actions OIDC token request failed; no bridge job was submitted")
+            request.assert_not_called()
+
+        with self.subTest("post_timeout_not_retried"):
+            with (
+                patch.dict(os.environ, {"BRIDGE_URL": URL}, clear=True),
+                patch.object(bridge.action, "workflow_token", return_value="workflow-token"),
+                patch.object(bridge.action, "bridge_json", side_effect=TimeoutError(URL)) as request,
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    bridge.action.submit_bridge(issue_payload())
+            self.assertEqual(str(raised.exception),
+                             "Bridge submission was not confirmed; inspect the job before retrying")
+            request.assert_called_once()
+
+        for code, expected in (
+            (401, "Bridge did not authorize status polling for this workflow identity"),
+            (404, "Bridge job receipt was not found"),
+            (403, "Bridge rejected status polling; inspect the submitted job before retrying"),
+        ):
+            with self.subTest(poll_status=code):
+                with (
+                    patch.dict(os.environ, {"BRIDGE_URL": URL}, clear=True),
+                    patch.object(bridge.action, "workflow_token", return_value="workflow-token"),
+                    patch.object(bridge.action, "bridge_json", side_effect=[
+                        {"job_id": JOB, "state": "queued"},
+                        http_error(code),
+                    ]) as request,
+                    patch.object(bridge.action.time, "sleep"),
+                    patch.object(bridge.action, "display_log"),
+                ):
+                    with self.assertRaises(ValueError) as raised:
+                        bridge.action.submit_bridge(issue_payload())
+                self.assertEqual(str(raised.exception), expected)
+                self.assertEqual(request.call_count, 2)
+
+        with self.subTest("permanent_oidc_refresh_rejection"):
+            clock = iter([0.0, 0.0, 1.0, 130.0])
+            with (
+                patch.dict(os.environ, {"BRIDGE_URL": URL}, clear=True),
+                patch.object(bridge.action.time, "monotonic", side_effect=lambda: next(clock)),
+                patch.object(bridge.action.time, "sleep"),
+                patch.object(bridge.action, "display_log"),
+                patch.object(bridge.action, "workflow_token", side_effect=[
+                    "initial-jwt",
+                    http_error(401),
+                ]),
+                patch.object(bridge.action, "bridge_json", side_effect=[
+                    {"job_id": JOB, "state": "queued"},
+                ]) as request,
+            ):
+                with self.assertRaises(ValueError) as raised:
+                    bridge.action.submit_bridge(issue_payload())
+            self.assertEqual(
+                str(raised.exception),
+                "GitHub Actions OIDC token refresh was rejected; inspect the submitted job before retrying",
+            )
+            request.assert_called_once()
+
+    def test_action_stops_retrying_transient_poll_errors_after_wait_deadline(self):
+        clock = iter([
+            0.0,    # initial refreshed_at
+            0.0,    # deadline = 2100
+            10.0,   # before first sleep (< 2100)
+            20.0,   # refresh check (< 120) -> poll times out
+            2100.0, # after timeout, deadline reached -> fail without sleeping again
+        ])
+        with (
+            patch.dict(os.environ, {"BRIDGE_URL": URL}, clear=True),
+            patch.object(bridge.action.time, "monotonic", side_effect=lambda: next(clock)),
+            patch.object(bridge.action.time, "sleep") as sleep,
+            patch.object(bridge.action, "display_log"),
+            patch.object(bridge.action, "workflow_token", return_value="workflow-token"),
+            patch.object(bridge.action, "bridge_json", side_effect=[
+                {"job_id": JOB, "state": "queued"},
+                TimeoutError("ingress stalled"),
+            ]) as request,
+        ):
+            with self.assertRaisesRegex(ValueError, "Bridge wait expired"):
+                bridge.action.submit_bridge(issue_payload())
+        sleep.assert_called_once_with(bridge.action.BRIDGE_POLL_SECONDS)
+        self.assertEqual(request.call_count, 2)
+
 
 class BridgeExecutionTests(unittest.TestCase):
     def setUp(self):

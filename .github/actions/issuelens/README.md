@@ -26,6 +26,9 @@ is a deployment-specific example, not a restriction on where this reusable actio
 can be used. Configured bridge deployments determine which workflow identities
 and request types they accept. The action submits typed metadata after the same
 preflight, skips Azure login, and polls the job receipt.
+Bridge submission uses a 60-second request timeout without automatic POST retries;
+idempotent status polls and OIDC token refreshes retry transient HTTP (`408`, `429`, `5xx`)
+and connection/timeout errors within the 35-minute polling budget.
 The worker authenticates to the existing `/invocations` endpoint using managed
 identity and submits the normal `{ "input": "..." }` request.
 It has no direct fallback or free-form task path. It does not stream or store
